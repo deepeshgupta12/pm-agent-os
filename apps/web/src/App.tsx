@@ -1,26 +1,69 @@
-import { Link, Route, Routes } from "react-router-dom";
-import Register from "./pages/Register";
+import { AppShell, Group, Anchor, Text } from "@mantine/core";
+import { Link, Route, Routes, useLocation } from "react-router-dom";
+import WorkspacesPage from "./pages/WorkspacesPage";
+import WorkspaceDetailPage from "./pages/WorkspaceDetailPage";
+import RunDetailPage from "./pages/RunDetailPage";
+import ArtifactDetailPage from "./pages/ArtifactDetailPage";
 import Login from "./pages/Login";
+import Register from "./pages/Register";
 import Me from "./pages/Me";
+
+function TopNav() {
+  const loc = useLocation();
+  return (
+    <Group justify="space-between" px="md" py="sm">
+      <Group gap="md">
+        <Text fw={700}>PM Agent OS</Text>
+        <Anchor component={Link} to="/workspaces">
+          Workspaces
+        </Anchor>
+        <Anchor component={Link} to="/agents">
+          Agents (via Create Run)
+        </Anchor>
+      </Group>
+      <Group gap="md">
+        <Anchor component={Link} to="/register">
+          Register
+        </Anchor>
+        <Anchor component={Link} to="/login">
+          Login
+        </Anchor>
+        <Anchor component={Link} to="/me">
+          Me
+        </Anchor>
+        <Text size="xs" c="dimmed">
+          {loc.pathname}
+        </Text>
+      </Group>
+    </Group>
+  );
+}
 
 export default function App() {
   return (
-    <div style={{ maxWidth: 920, margin: "24px auto", padding: 16 }}>
-      <h1>PM Agent OS (V0)</h1>
-      <p>Auth V0: Email/Password + JWT (HttpOnly cookie)</p>
+    <AppShell header={{ height: 56 }} padding="md">
+      <AppShell.Header>
+        <TopNav />
+      </AppShell.Header>
+      <AppShell.Main>
+        <Routes>
+          <Route path="/" element={<WorkspacesPage />} />
 
-      <nav style={{ display: "flex", gap: 12, margin: "16px 0" }}>
-        <Link to="/register">Register</Link>
-        <Link to="/login">Login</Link>
-        <Link to="/me">Me</Link>
-      </nav>
+          {/* Auth */}
+          <Route path="/register" element={<Register />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/me" element={<Me />} />
 
-      <Routes>
-        <Route path="/" element={<Me />} />
-        <Route path="/register" element={<Register />} />
-        <Route path="/login" element={<Login />} />
-        <Route path="/me" element={<Me />} />
-      </Routes>
-    </div>
+          {/* Platform */}
+          <Route path="/workspaces" element={<WorkspacesPage />} />
+          <Route path="/workspaces/:workspaceId" element={<WorkspaceDetailPage />} />
+          <Route path="/runs/:runId" element={<RunDetailPage />} />
+          <Route path="/artifacts/:artifactId" element={<ArtifactDetailPage />} />
+
+          {/* fallback */}
+          <Route path="*" element={<WorkspacesPage />} />
+        </Routes>
+      </AppShell.Main>
+    </AppShell>
   );
 }
