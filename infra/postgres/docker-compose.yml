@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: pm_agent_os_postgres
+    environment:
+      POSTGRES_DB: pm_agent_os
+      POSTGRES_USER: pm_agent_os_user
+      POSTGRES_PASSWORD: pm_agent_os_password
+    ports:
+      - "5434:5432"
+    volumes:
+      - pm_agent_os_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pm_agent_os_user -d pm_agent_os"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pm_agent_os_pgdata:
