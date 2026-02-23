@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import uuid
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_user
+from app.core.generator import build_initial_artifact, build_run_summary
 from app.db.session import get_db
-from app.db.models import Workspace, Run, AgentDefinition, User
+from app.db.models import Workspace, Run, AgentDefinition, Artifact, User
+
 from app.schemas.core import RunCreateIn, RunOut, RunStatusUpdateIn
 
 router = APIRouter(tags=["runs"])
@@ -24,6 +24,7 @@ def create_run(workspace_id: str, payload: RunCreateIn, db: Session = Depends(ge
     if not agent:
         raise HTTPException(status_code=400, detail="Invalid agent_id")
 
+    # 1) Create run
     r = Run(
         workspace_id=ws.id,
         agent_id=agent.id,
@@ -31,6 +32,34 @@ def create_run(workspace_id: str, payload: RunCreateIn, db: Session = Depends(ge
         status="created",
         input_payload=payload.input_payload or {},
     )
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+
+    # 2) Mark running
+    r.status = "running"
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+
+    # 3) Generate initial artifact deterministically
+    artifact_type, title, md = build_initial_artifact(agent_id=r.agent_id, input_payload=r.input_payload)
+
+    art = Artifact(
+        run_id=r.id,
+        type=artifact_type,
+        title=title,
+        content_md=md,
+        logical_key=artifact_type,  # stable key within run for versioning
+        version=1,
+        status="draft",
+    )
+    db.add(art)
+    db.commit()
+
+    # 4) Mark completed + summary
+    r.status = "completed"
+    r.output_summary = build_run_summary(agent_id=r.agent_id, artifact_type=artifact_type)
     db.add(r)
     db.commit()
     db.refresh(r)
