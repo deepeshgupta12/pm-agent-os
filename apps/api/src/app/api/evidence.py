@@ -44,7 +44,7 @@ def add_evidence(run_id: str, payload: EvidenceCreateIn, db: Session = Depends(g
         source_name=ev.source_name,
         source_ref=ev.source_ref,
         excerpt=ev.excerpt,
-        metadata=ev.metadata,
+        meta=ev.meta,
     )
 
 
@@ -64,7 +64,7 @@ def list_evidence(run_id: str, db: Session = Depends(get_db), user: User = Depen
             source_name=e.source_name,
             source_ref=e.source_ref,
             excerpt=e.excerpt,
-            metadata=e.metadata,
+            meta=e.meta,
         )
         for e in items
     ]

@@ -93,4 +93,4 @@ class EvidenceOut(BaseModel):
     source_name: str
     source_ref: Optional[str]
     excerpt: str
-    metadata: Dict[str, Any]
+    meta: Dict[str, Any]
