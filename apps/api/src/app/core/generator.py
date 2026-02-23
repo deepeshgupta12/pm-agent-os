@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, Tuple
 
+from app.core.config import settings
+
 AGENT_TO_DEFAULT_ARTIFACT_TYPE: dict[str, str] = {
     "discovery": "problem_brief",
     "research": "research_summary",
@@ -29,11 +31,7 @@ def _safe_str(v: Any) -> str:
     return str(v).strip()
 
 
-def build_initial_artifact(agent_id: str, input_payload: Dict[str, Any]) -> Tuple[str, str, str]:
-    """
-    Returns: (artifact_type, title, markdown_content)
-    Deterministic V0 template generation.
-    """
+def _deterministic_template(agent_id: str, input_payload: Dict[str, Any]) -> Tuple[str, str, str]:
     artifact_type = AGENT_TO_DEFAULT_ARTIFACT_TYPE.get(agent_id, "strategy_memo")
 
     goal = _safe_str(input_payload.get("goal"))
@@ -43,7 +41,6 @@ def build_initial_artifact(agent_id: str, input_payload: Dict[str, Any]) -> Tupl
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     title = f"{artifact_type.replace('_', ' ').title()} — Draft"
-
     md = f"""# {title}
 
 **Agent:** `{agent_id}`  
@@ -59,16 +56,45 @@ def build_initial_artifact(agent_id: str, input_payload: Dict[str, Any]) -> Tupl
 {constraints or "- (not provided)"}
 
 ## Draft Output (V0 Template)
-This is a V0 deterministic draft scaffold. In later versions, this section will be generated with OpenAI 4.1 mini (grounded + citation-ready), and will optionally attach evidence.
-
-### What I will produce next
-- A structured `{artifact_type}` draft aligned to your goal
-- Clear assumptions + open questions
-- Next actions checklist
+This is a deterministic draft scaffold.
 """
 
     return artifact_type, title, md
 
 
+def build_initial_artifact(agent_id: str, input_payload: Dict[str, Any]) -> Tuple[str, str, str]:
+    """
+    Returns: (artifact_type, title, markdown_content)
+
+    V1 behavior:
+    - If LLM_ENABLED=true and OPENAI_API_KEY is present, generate content via OpenAI.
+    - Otherwise fallback to deterministic template.
+    """
+    artifact_type = AGENT_TO_DEFAULT_ARTIFACT_TYPE.get(agent_id, "strategy_memo")
+    title = f"{artifact_type.replace('_', ' ').title()} — Draft"
+
+    if settings.LLM_ENABLED and settings.OPENAI_API_KEY:
+        try:
+            from app.core.prompts import build_system_prompt, build_user_prompt
+            from app.core.llm_client import llm_generate_markdown
+
+            system_prompt = build_system_prompt()
+            user_prompt = build_user_prompt(agent_id=agent_id, input_payload=input_payload)
+            md = llm_generate_markdown(system_prompt=system_prompt, user_prompt=user_prompt)
+
+            # Ensure at least starts with a heading
+            if not md.lstrip().startswith("#"):
+                md = f"# {title}\n\n" + md
+
+            return artifact_type, title, md
+        except Exception:
+            # Safety fallback: never fail run creation due to LLM issues
+            return _deterministic_template(agent_id, input_payload)
+
+    return _deterministic_template(agent_id, input_payload)
+
+
 def build_run_summary(agent_id: str, artifact_type: str) -> str:
+    if settings.LLM_ENABLED and settings.OPENAI_API_KEY:
+        return f"Run completed. Generated initial draft artifact via LLM: {artifact_type}."
     return f"Run completed. Generated initial draft artifact: {artifact_type}."

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import List
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,7 +21,7 @@ class Settings(BaseSettings):
     COOKIE_SECURE: bool = False
     COOKIE_SAMESITE: str = "lax"  # lax|strict|none
 
-    # JWT (used in Step 1)
+    # JWT
     JWT_SECRET: str = "change_me"
     JWT_ALG: str = "HS256"
     JWT_EXPIRES_MINUTES: int = 60
@@ -30,12 +29,13 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+psycopg://pm_agent_os_user:pm_agent_os_password@localhost:5434/pm_agent_os"
 
-    # OpenAI (later)
+    # OpenAI / LLM
+    LLM_ENABLED: bool = False
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4.1-mini"
+    OPENAI_TIMEOUT_SECONDS: int = 45
 
     def cors_origins_list(self) -> List[str]:
-        # comma-separated allowed (optional in future); for now single origin is enough
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
 
 
