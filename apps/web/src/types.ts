@@ -7,6 +7,7 @@ export type Agent = {
   version: string;
   input_schema: Record<string, unknown>;
   output_artifact_types: string[];
+  default_artifact_type: string;
 };
 
 export type Run = {

@@ -33,6 +33,11 @@ export default function WorkspaceDetailPage() {
   );
   const [creating, setCreating] = useState(false);
 
+  const selectedAgent = useMemo(
+    () => agents.find((a) => a.id === agentId) || null,
+    [agents, agentId]
+  );
+
   const agentOptions = useMemo(
     () =>
       agents.map((a) => ({
@@ -76,7 +81,7 @@ export default function WorkspaceDetailPage() {
     let payload: any = {};
     try {
       payload = inputJson.trim() ? JSON.parse(inputJson) : {};
-    } catch (e: any) {
+    } catch {
       setCreating(false);
       setErr("Input JSON is invalid. Please fix JSON format.");
       return;
@@ -134,6 +139,28 @@ export default function WorkspaceDetailPage() {
             searchable
             nothingFoundMessage="No agents"
           />
+
+          {selectedAgent ? (
+            <Card withBorder>
+              <Stack gap={4}>
+                <Group gap="sm">
+                  <Badge>{selectedAgent.id}</Badge>
+                  <Badge variant="light">{selectedAgent.version}</Badge>
+                  <Text fw={600}>{selectedAgent.name}</Text>
+                </Group>
+                <Text size="sm" c="dimmed">
+                  {selectedAgent.description}
+                </Text>
+                <Text size="sm">
+                  This run will auto-create a draft artifact of type:{" "}
+                  <Text span fw={700}>
+                    {selectedAgent.default_artifact_type}
+                  </Text>
+                </Text>
+              </Stack>
+            </Card>
+          ) : null}
+
           <Textarea
             label="Input payload (JSON)"
             autosize
@@ -174,6 +201,11 @@ export default function WorkspaceDetailPage() {
                         <Badge>{r.status}</Badge>
                         <Text fw={600}>{r.agent_id}</Text>
                       </Group>
+                      {r.output_summary ? (
+                        <Text size="sm" c="dimmed">
+                          {r.output_summary}
+                        </Text>
+                      ) : null}
                       <Text size="xs" c="dimmed">
                         {r.id}
                       </Text>

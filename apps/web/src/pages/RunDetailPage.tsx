@@ -63,6 +63,12 @@ export default function RunDetailPage() {
     []
   );
 
+  const autoArtifact = useMemo(() => {
+    if (artifacts.length === 0) return null;
+    // heuristic: newest is first (we fetch desc), use first
+    return artifacts[0];
+  }, [artifacts]);
+
   async function loadAll() {
     setErr(null);
 
@@ -165,15 +171,36 @@ export default function RunDetailPage() {
 
       {run ? (
         <Card withBorder>
-          <Group justify="space-between">
-            <Group gap="sm">
-              <Badge>{run.status}</Badge>
-              <Text fw={700}>{run.agent_id}</Text>
+          <Stack gap="xs">
+            <Group justify="space-between">
+              <Group gap="sm">
+                <Badge>{run.status}</Badge>
+                <Text fw={700}>{run.agent_id}</Text>
+              </Group>
+              <Text size="xs" c="dimmed">
+                {run.id}
+              </Text>
             </Group>
-            <Text size="xs" c="dimmed">
-              {run.id}
-            </Text>
-          </Group>
+
+            {run.output_summary ? <Text c="dimmed">{run.output_summary}</Text> : null}
+
+            <Card withBorder>
+              <Text fw={600} mb={6}>
+                Input payload
+              </Text>
+              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+                {JSON.stringify(run.input_payload, null, 2)}
+              </pre>
+            </Card>
+
+            {autoArtifact ? (
+              <Group>
+                <Button component={Link} to={`/artifacts/${autoArtifact.id}`}>
+                  Open latest artifact
+                </Button>
+              </Group>
+            ) : null}
+          </Stack>
         </Card>
       ) : (
         <Text c="dimmed">Loading run…</Text>

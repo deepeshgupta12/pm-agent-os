@@ -23,6 +23,7 @@ class AgentOut(BaseModel):
     version: str
     input_schema: Dict[str, Any]
     output_artifact_types: List[str]
+    default_artifact_type: str
 
 
 # -------- Runs --------
