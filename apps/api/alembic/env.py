@@ -6,14 +6,15 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from app.core.config import settings
+from app.db.base import Base
+from app.db import models  # noqa: F401  (ensures models are imported)
 
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# No models yet in Step 0; we'll wire metadata in Step 1 when User model is added
-target_metadata = None
+target_metadata = Base.metadata
 
 
 def get_url() -> str:
