@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     CHUNK_SIZE_CHARS: int = 1100
     CHUNK_OVERLAP_CHARS: int = 150
 
+    # GitHub (read-only V1)
+    GITHUB_TOKEN: str = ""  # classic PAT or fine-grained token with repo read access
+
     def cors_origins_list(self) -> List[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
 

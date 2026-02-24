@@ -14,6 +14,7 @@ from app.api.artifacts import router as artifacts_router
 from app.api.evidence import router as evidence_router
 from app.api.export import router as export_router
 from app.api.retrieval import router as retrieval_router
+from app.api.integrations_github import router as github_router
 
 app = FastAPI(title="PM Agent OS API", version="0.0.1")
 
@@ -34,3 +35,4 @@ app.include_router(artifacts_router)
 app.include_router(evidence_router)
 app.include_router(export_router)
 app.include_router(retrieval_router)
+app.include_router(github_router)
