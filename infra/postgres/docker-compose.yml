@@ -1,7 +1,8 @@
 services:
   postgres:
-    image: postgres:16
+    image: pgvector/pgvector:pg16
     container_name: pm_agent_os_postgres
+    restart: unless-stopped
     environment:
       POSTGRES_DB: pm_agent_os
       POSTGRES_USER: pm_agent_os_user
@@ -13,7 +14,7 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pm_agent_os_user -d pm_agent_os"]
       interval: 5s
-      timeout: 3s
+      timeout: 5s
       retries: 20
 
 volumes:
