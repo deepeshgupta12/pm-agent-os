@@ -40,3 +40,35 @@ export type Evidence = {
   excerpt: string;
   meta: Record<string, unknown>;
 };
+
+/** Pipelines */
+export type PipelineTemplate = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  description: string;
+  // backend stores full json definition; keep loose for now
+  definition_json: Record<string, unknown>;
+};
+
+export type PipelineStep = {
+  id: string;
+  pipeline_run_id: string;
+  step_index: number;
+  step_name: string;
+  agent_id: string;
+  status: string;
+  input_payload: Record<string, unknown>;
+  run_id?: string | null;
+};
+
+export type PipelineRun = {
+  id: string;
+  workspace_id: string;
+  template_id: string;
+  created_by_user_id: string;
+  status: string;
+  current_step_index: number;
+  input_payload: Record<string, unknown>;
+  steps: PipelineStep[];
+};
