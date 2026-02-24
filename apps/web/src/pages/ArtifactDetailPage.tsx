@@ -1,6 +1,19 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { Button, Card, Group, Stack, Text, TextInput, Textarea, Title } from "@mantine/core";
+import {
+  Button,
+  Card,
+  Group,
+  Stack,
+  Text,
+  TextInput,
+  Textarea,
+  Title,
+  SimpleGrid,
+  Divider,
+} from "@mantine/core";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { apiFetch } from "../apiClient";
 import type { Artifact } from "../types";
 
@@ -16,6 +29,7 @@ export default function ArtifactDetailPage() {
   const [err, setErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [newVerLoading, setNewVerLoading] = useState(false);
+  const [copyMsg, setCopyMsg] = useState<string | null>(null);
 
   async function load() {
     setErr(null);
@@ -66,13 +80,24 @@ export default function ArtifactDetailPage() {
       return;
     }
 
-    // Navigate to newly created artifact id? For V0 we just load the new artifact by replacing state.
-    // We'll set current art to the new record and update URL later in V1.
     setArt(res.data);
     setTitle(res.data.title);
     setContentMd(res.data.content_md);
     setStatus(res.data.status);
+
+    // update URL to new artifact id
     window.history.replaceState({}, "", `/artifacts/${res.data.id}`);
+  }
+
+  async function copyMarkdown() {
+    try {
+      await navigator.clipboard.writeText(contentMd);
+      setCopyMsg("Copied!");
+      setTimeout(() => setCopyMsg(null), 1200);
+    } catch {
+      setCopyMsg("Copy failed");
+      setTimeout(() => setCopyMsg(null), 1200);
+    }
   }
 
   useEffect(() => {
@@ -108,15 +133,10 @@ export default function ArtifactDetailPage() {
               </Text>
             </Group>
 
-            <TextInput label="Title" value={title} onChange={(e) => setTitle(e.currentTarget.value)} />
-            <TextInput label="Status" value={status} onChange={(e) => setStatus(e.currentTarget.value)} />
-            <Textarea
-              label="Content (Markdown)"
-              autosize
-              minRows={14}
-              value={contentMd}
-              onChange={(e) => setContentMd(e.currentTarget.value)}
-            />
+            <Group grow>
+              <TextInput label="Title" value={title} onChange={(e) => setTitle(e.currentTarget.value)} />
+              <TextInput label="Status" value={status} onChange={(e) => setStatus(e.currentTarget.value)} />
+            </Group>
 
             <Group>
               <Button onClick={saveInPlace} loading={saving}>
@@ -125,7 +145,34 @@ export default function ArtifactDetailPage() {
               <Button variant="light" onClick={saveNewVersion} loading={newVerLoading}>
                 Save as new version
               </Button>
+              <Button variant="default" onClick={copyMarkdown}>
+                Copy Markdown
+              </Button>
+              {copyMsg ? <Text size="sm" c="dimmed">{copyMsg}</Text> : null}
             </Group>
+
+            <Divider />
+
+            <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
+              <div>
+                <Textarea
+                  label="Content (Markdown)"
+                  autosize
+                  minRows={18}
+                  value={contentMd}
+                  onChange={(e) => setContentMd(e.currentTarget.value)}
+                />
+              </div>
+
+              <div>
+                <Text fw={600} mb={6}>
+                  Preview
+                </Text>
+                <Card withBorder style={{ height: "100%", overflow: "auto" }}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{contentMd}</ReactMarkdown>
+                </Card>
+              </div>
+            </SimpleGrid>
           </Stack>
         </Card>
       ) : (
