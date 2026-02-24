@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
-from typing import Any, Dict, List, Tuple, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_user
+from app.core.generator import build_initial_artifact, build_run_summary
 from app.db.session import get_db
 from app.db.models import (
     Workspace,
@@ -41,12 +42,12 @@ CANONICAL_PIPELINES: List[Dict[str, Any]] = [
     {
         "key": "discovery_strategy_prd",
         "name": "Discovery → Strategy → PRD",
-        "description": "Go from discovery insights to a strategy memo and a PRD.",
+        "description": "End-to-end early phase flow: identify opportunities, pick direction, write PRD.",
         "definition_json": {
             "version": "v1",
             "steps": [
                 {"name": "Discovery", "agent_id": "discovery"},
-                {"name": "Strategy", "agent_id": "strategy_memo"},
+                {"name": "Strategy & Roadmap", "agent_id": "strategy_roadmap"},
                 {"name": "PRD", "agent_id": "prd"},
             ],
         },
@@ -54,45 +55,48 @@ CANONICAL_PIPELINES: List[Dict[str, Any]] = [
     {
         "key": "prd_ux_feasibility",
         "name": "PRD → UX → Feasibility",
-        "description": "Turn a PRD into UX spec and feasibility/tech brief.",
+        "description": "Turn PRD into UX flow spec, then validate feasibility and architecture.",
         "definition_json": {
             "version": "v1",
             "steps": [
                 {"name": "PRD", "agent_id": "prd"},
-                {"name": "UX", "agent_id": "ux_spec"},
-                {"name": "Feasibility", "agent_id": "tech_brief"},
+                {"name": "UX Flow", "agent_id": "ux_flow"},
+                {"name": "Feasibility & Architecture", "agent_id": "feasibility_architecture"},
             ],
         },
     },
     {
         "key": "analytics_qa_launch",
         "name": "Analytics → QA → Launch",
-        "description": "Use analytics to plan QA coverage and produce a launch plan.",
+        "description": "Operationalization flow: tracking + experiment plan → QA suite → launch plan/runbook.",
         "definition_json": {
             "version": "v1",
             "steps": [
-                {"name": "Analytics", "agent_id": "analytics_experiment"},
-                {"name": "QA", "agent_id": "qa_suite"},
-                {"name": "Launch", "agent_id": "launch_plan"},
+                {"name": "Analytics & Experiment", "agent_id": "analytics_experiment"},
+                {"name": "QA & Test", "agent_id": "qa_test"},
+                {"name": "Launch", "agent_id": "launch"},
             ],
         },
     },
     {
         "key": "launch_monitoring_stakeholder",
-        "name": "Launch → Monitoring → Stakeholder",
-        "description": "Post-launch workflow: monitoring report and stakeholder update.",
+        "name": "Launch → Monitoring → Stakeholders",
+        "description": "Post-release loop: launch → health monitoring → stakeholder update pack.",
         "definition_json": {
             "version": "v1",
             "steps": [
-                {"name": "Launch", "agent_id": "launch_plan"},
-                {"name": "Monitoring", "agent_id": "health_report"},
-                {"name": "Stakeholder", "agent_id": "stakeholder_update"},
+                {"name": "Launch", "agent_id": "launch"},
+                {"name": "Post-launch Monitoring", "agent_id": "post_launch_monitoring"},
+                {"name": "Stakeholder Alignment", "agent_id": "stakeholder_alignment"},
             ],
         },
     },
 ]
 
 
+# -------------------------
+# Helpers
+# -------------------------
 def _ensure_workspace_access(db: Session, workspace_id: str, user: User) -> Workspace:
     ws = db.get(Workspace, workspace_id)
     if not ws or ws.owner_user_id != user.id:
@@ -151,10 +155,7 @@ def _validate_pipeline_definition(db: Session, steps_def: Any) -> None:
 
 
 def _seed_canonical_templates_for_workspace(db: Session, ws: Workspace) -> Tuple[List[PipelineTemplate], List[PipelineTemplate]]:
-    existing = db.execute(
-        select(PipelineTemplate).where(PipelineTemplate.workspace_id == ws.id)
-    ).scalars().all()
-
+    existing = db.execute(select(PipelineTemplate).where(PipelineTemplate.workspace_id == ws.id)).scalars().all()
     by_name = {t.name.strip().lower(): t for t in existing}
 
     created: List[PipelineTemplate] = []
@@ -185,6 +186,152 @@ def _seed_canonical_templates_for_workspace(db: Session, ws: Workspace) -> Tuple
     return created, existing_out
 
 
+def _latest_artifact_snapshot(db: Session, run_id: uuid.UUID) -> Optional[Dict[str, Any]]:
+    """
+    Returns a small snapshot of the latest artifact for a run.
+    This is what we embed into _pipeline.prev_artifact.
+    """
+    a = (
+        db.execute(
+            select(Artifact)
+            .where(Artifact.run_id == run_id)
+            .order_by(Artifact.created_at.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+    if not a:
+        return None
+
+    md = a.content_md or ""
+    excerpt = md[:800].strip()
+
+    return {
+        "artifact_id": str(a.id),
+        "type": a.type,
+        "title": a.title,
+        "version": a.version,
+        "status": a.status,
+        "content_md_excerpt": excerpt,
+    }
+
+
+def _create_completed_run_with_artifact(
+    db: Session,
+    ws: Workspace,
+    user: User,
+    agent_id: str,
+    input_payload: Dict[str, Any],
+) -> Run:
+    """
+    Mirrors apps/api/src/app/api/runs.py:create_run behavior:
+    - creates Run
+    - marks running
+    - generates initial artifact
+    - marks completed + output_summary
+    """
+    agent = db.get(AgentDefinition, agent_id)
+    if not agent:
+        raise HTTPException(status_code=400, detail=f"Invalid agent_id: {agent_id}")
+
+    r = Run(
+        workspace_id=ws.id,
+        agent_id=agent.id,
+        created_by_user_id=user.id,
+        status="created",
+        input_payload=input_payload or {},
+    )
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+
+    r.status = "running"
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+
+    artifact_type, title, md = build_initial_artifact(agent_id=r.agent_id, input_payload=r.input_payload)
+
+    art = Artifact(
+        run_id=r.id,
+        type=artifact_type,
+        title=title,
+        content_md=md,
+        logical_key=artifact_type,
+        version=1,
+        status="draft",
+    )
+    db.add(art)
+    db.commit()
+
+    r.status = "completed"
+    r.output_summary = build_run_summary(agent_id=r.agent_id, artifact_type=artifact_type)
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+
+    return r
+
+
+def _execute_one_step(
+    db: Session,
+    ws: Workspace,
+    user: User,
+    pr: PipelineRun,
+    steps: List[PipelineStep],
+    step: PipelineStep,
+) -> str:
+    """
+    Executes exactly one pipeline step by creating a completed Run + artifact.
+    Returns created run_id.
+    """
+    step.status = "running"
+    step.started_at = datetime.now(timezone.utc)
+    db.add(step)
+    db.commit()
+    db.refresh(step)
+
+    run_input: Dict[str, Any] = dict(pr.input_payload or {})
+    run_input["_pipeline"] = {
+        "pipeline_run_id": str(pr.id),
+        "step_index": step.step_index,
+        "step_name": step.step_name,
+        "template_id": str(pr.template_id),
+    }
+
+    # Attach previous step context (run_id + latest artifact excerpt)
+    if step.step_index > 0:
+        prev_step = steps[step.step_index - 1]
+        run_input["_pipeline"]["prev_run_id"] = str(prev_step.run_id) if prev_step.run_id else None
+
+        if prev_step.run_id:
+            snap = _latest_artifact_snapshot(db, prev_step.run_id)
+            if snap:
+                run_input["_pipeline"]["prev_artifact"] = snap
+
+    # Create run + initial artifact (COMPLETED)
+    new_run = _create_completed_run_with_artifact(
+        db=db,
+        ws=ws,
+        user=user,
+        agent_id=step.agent_id,
+        input_payload=run_input,
+    )
+
+    # Mark step completed and link
+    step.run_id = new_run.id
+    step.status = "completed"
+    step.completed_at = datetime.now(timezone.utc)
+    db.add(step)
+    db.commit()
+
+    return str(new_run.id)
+
+
+# -------------------------
+# Routes
+# -------------------------
 @router.post("/workspaces/{workspace_id}/pipelines/templates/seed", response_model=PipelineTemplatesSeedOut)
 def seed_pipeline_templates(
     workspace_id: str,
@@ -192,7 +339,6 @@ def seed_pipeline_templates(
     user: User = Depends(require_user),
 ):
     ws = _ensure_workspace_access(db, workspace_id, user)
-
     created, existing = _seed_canonical_templates_for_workspace(db, ws)
 
     return PipelineTemplatesSeedOut(
@@ -275,7 +421,6 @@ def start_pipeline_run(
     db.commit()
     db.refresh(pr)
 
-    # Create step rows
     steps_rows: List[PipelineStep] = []
     for idx, sd in enumerate(steps_def):
         agent_id = (sd or {}).get("agent_id")
@@ -336,43 +481,20 @@ def get_pipeline_run(
     return _run_to_out(pr, steps)
 
 
-def _latest_artifact_snapshot(db: Session, run_id: uuid.UUID, max_chars: int = 1400) -> Optional[Dict[str, Any]]:
-    a = (
-        db.execute(
-            select(Artifact)
-            .where(Artifact.run_id == run_id)
-            .order_by(Artifact.version.desc(), Artifact.created_at.desc())
-        )
-        .scalars()
-        .first()
-    )
-    if not a:
-        return None
+@router.post("/pipelines/runs/{pipeline_run_id}/next", response_model=PipelineNextOut)
+def run_next_step(
+    pipeline_run_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    pr_uuid = uuid.UUID(pipeline_run_id)
+    pr = db.get(PipelineRun, pr_uuid)
+    if not pr:
+        raise HTTPException(status_code=404, detail="Pipeline run not found")
 
-    md = (a.content_md or "").strip()
-    excerpt = md[:max_chars]
-    if len(md) > max_chars:
-        excerpt += "\n\n…(truncated)…"
-
-    return {
-        "artifact_id": str(a.id),
-        "type": a.type,
-        "title": a.title,
-        "version": int(a.version),
-        "status": a.status,
-        "content_md_excerpt": excerpt,
-    }
-
-
-def _ensure_pipeline_run_access(db: Session, pr: PipelineRun, user: User) -> Workspace:
     ws = db.get(Workspace, pr.workspace_id)
     if not ws or ws.owner_user_id != user.id:
         raise HTTPException(status_code=404, detail="Pipeline run not found")
-    return ws
-
-
-def _execute_one_step(db: Session, pr: PipelineRun, user: User) -> Tuple[PipelineRun, List[PipelineStep], Optional[str]]:
-    ws = _ensure_pipeline_run_access(db, pr, user)
 
     steps = db.execute(
         select(PipelineStep)
@@ -386,91 +508,32 @@ def _execute_one_step(db: Session, pr: PipelineRun, user: User) -> Tuple[Pipelin
         pr.status = "completed"
         db.add(pr)
         db.commit()
-        db.refresh(pr)
-        return pr, steps, None
+        return PipelineNextOut(ok=True, pipeline_run=_run_to_out(pr, steps), created_run_id=None)
 
     step = steps[pr.current_step_index]
 
     if step.status == "completed":
         pr.current_step_index += 1
-        if pr.current_step_index >= len(steps):
-            pr.status = "completed"
         db.add(pr)
         db.commit()
-        db.refresh(pr)
         steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
-        return pr, steps, None
+        return PipelineNextOut(ok=True, pipeline_run=_run_to_out(pr, steps), created_run_id=None)
 
-    step.status = "running"
-    step.started_at = datetime.utcnow()
-    db.add(step)
-    db.commit()
-    db.refresh(step)
-
-    run_input: Dict[str, Any] = dict(pr.input_payload or {})
-    run_input["_pipeline"] = {
-        "pipeline_run_id": str(pr.id),
-        "step_index": int(step.step_index),
-        "step_name": step.step_name,
-        "template_id": str(pr.template_id),
-    }
-
-    # carry forward prev run + latest artifact snapshot
-    if step.step_index > 0:
-        prev = steps[step.step_index - 1]
-        run_input["_pipeline"]["prev_run_id"] = str(prev.run_id) if prev.run_id else None
-        if prev.run_id:
-            snap = _latest_artifact_snapshot(db, prev.run_id)
-            if snap:
-                run_input["_pipeline"]["prev_artifact"] = snap
-
-    new_run = Run(
-        workspace_id=ws.id,
-        agent_id=step.agent_id,
-        created_by_user_id=user.id,
-        status="created",
-        input_payload=run_input,
-    )
-    db.add(new_run)
-    db.commit()
-    db.refresh(new_run)
-
-    step.run_id = new_run.id
-    step.status = "completed"
-    step.completed_at = datetime.utcnow()
-    db.add(step)
+    created_run_id = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step)
 
     pr.current_step_index += 1
     if pr.current_step_index >= len(steps):
         pr.status = "completed"
-    else:
-        pr.status = "running"
-
     db.add(pr)
     db.commit()
     db.refresh(pr)
 
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
-    return pr, steps, str(new_run.id)
-
-
-@router.post("/pipelines/runs/{pipeline_run_id}/next", response_model=PipelineNextOut)
-def run_next_step(
-    pipeline_run_id: str,
-    db: Session = Depends(get_db),
-    user: User = Depends(require_user),
-):
-    pr_uuid = uuid.UUID(pipeline_run_id)
-    pr = db.get(PipelineRun, pr_uuid)
-    if not pr:
-        raise HTTPException(status_code=404, detail="Pipeline run not found")
-
-    pr2, steps, created = _execute_one_step(db, pr, user)
-    return PipelineNextOut(ok=True, pipeline_run=_run_to_out(pr2, steps), created_run_id=created)
+    return PipelineNextOut(ok=True, pipeline_run=_run_to_out(pr, steps), created_run_id=created_run_id)
 
 
 @router.post("/pipelines/runs/{pipeline_run_id}/execute-all", response_model=PipelineExecuteAllOut)
-def execute_all_remaining_steps(
+def execute_all_steps(
     pipeline_run_id: str,
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
@@ -480,27 +543,48 @@ def execute_all_remaining_steps(
     if not pr:
         raise HTTPException(status_code=404, detail="Pipeline run not found")
 
-    _ensure_pipeline_run_access(db, pr, user)
+    ws = db.get(Workspace, pr.workspace_id)
+    if not ws or ws.owner_user_id != user.id:
+        raise HTTPException(status_code=404, detail="Pipeline run not found")
 
-    created_ids: List[str] = []
-    safety = 0
+    steps = db.execute(
+        select(PipelineStep)
+        .where(PipelineStep.pipeline_run_id == pr.id)
+        .order_by(PipelineStep.step_index.asc())
+    ).scalars().all()
+    if not steps:
+        raise HTTPException(status_code=400, detail="Pipeline has no steps")
 
-    while True:
-        safety += 1
-        if safety > 50:
-            raise HTTPException(status_code=500, detail="Safety stop: too many pipeline iterations")
+    created_run_ids: List[str] = []
 
-        pr = db.get(PipelineRun, pr_uuid)
-        if not pr:
-            raise HTTPException(status_code=404, detail="Pipeline run not found")
+    # Execute remaining steps starting from current_step_index
+    while pr.current_step_index < len(steps):
+        step = steps[pr.current_step_index]
 
-        if (pr.status or "").lower() == "completed":
-            steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
-            return PipelineExecuteAllOut(ok=True, pipeline_run=_run_to_out(pr, steps), created_run_ids=created_ids)
+        if step.status == "completed":
+            pr.current_step_index += 1
+            continue
 
-        pr2, steps, created = _execute_one_step(db, pr, user)
-        if created:
-            created_ids.append(created)
+        rid = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step)
+        created_run_ids.append(rid)
 
-        if (pr2.status or "").lower() == "completed":
-            return PipelineExecuteAllOut(ok=True, pipeline_run=_run_to_out(pr2, steps), created_run_ids=created_ids)
+        # Reload steps so prev_run_id and run_id are consistent for next iteration
+        steps = db.execute(
+            select(PipelineStep)
+            .where(PipelineStep.pipeline_run_id == pr.id)
+            .order_by(PipelineStep.step_index.asc())
+        ).scalars().all()
+
+        pr.current_step_index += 1
+
+    pr.status = "completed"
+    db.add(pr)
+    db.commit()
+    db.refresh(pr)
+
+    steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
+    return PipelineExecuteAllOut(
+        ok=True,
+        pipeline_run=_run_to_out(pr, steps),
+        created_run_ids=created_run_ids,
+    )
