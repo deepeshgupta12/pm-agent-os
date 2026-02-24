@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_user
-from app.core.github_client import GitHubClient
+from app.core.github_client import GitHubClient, GitHubAPIError
 from app.core.ingest_common import get_or_create_source, upsert_document, rebuild_chunks, embed_document
 from app.db.session import get_db
 from app.db.models import Workspace, User
@@ -26,10 +26,18 @@ class GitHubConfigIn(BaseModel):
 class SyncOut(BaseModel):
     ok: bool = True
     source_id: str
-    releases_docs: int
-    prs_docs: int
+
+    releases_fetched: int
+    prs_fetched: int
+
+    releases_created: int
+    prs_created: int
+    documents_upserted: int
+
     chunks_created: int
     chunks_embedded: int
+
+    debug: Dict[str, Any]
 
 
 def _ensure_workspace_access(db: Session, workspace_id: str, user: User) -> Workspace:
@@ -67,7 +75,6 @@ def sync_github(
 ):
     ws = _ensure_workspace_access(db, workspace_id, user)
 
-    # Find github source
     from sqlalchemy import select
     from app.db.retrieval_models import Source
 
@@ -87,11 +94,15 @@ def sync_github(
 
     client = GitHubClient()
 
-    releases = client.list_releases(owner, repo, per_page=releases_per_page)
-    prs = client.list_pull_requests(owner, repo, state=prs_state, per_page=prs_per_page)
+    try:
+        releases, rel_debug = client.list_releases(owner, repo, per_page=releases_per_page)
+        prs, pr_debug = client.list_pull_requests(owner, repo, state=prs_state, per_page=prs_per_page)
+    except GitHubAPIError as e:
+        raise HTTPException(status_code=e.status_code, detail={"message": str(e), **(e.details or {})})
 
-    releases_docs = 0
-    prs_docs = 0
+    releases_created = 0
+    prs_created = 0
+    documents_upserted = 0
     chunks_created_total = 0
     chunks_embedded_total = 0
 
@@ -116,11 +127,11 @@ def sync_github(
             raw_text=raw,
             meta=meta,
         )
-        # Always rebuild chunks on update to keep text aligned
+        documents_upserted += 1
         chunks_created_total += rebuild_chunks(db, document_id=doc.id, raw_text=doc.raw_text)
         chunks_embedded_total += embed_document(db, document_id=doc.id)
         if created:
-            releases_docs += 1
+            releases_created += 1
 
     # Ingest PRs
     for pr in prs:
@@ -145,16 +156,27 @@ def sync_github(
             raw_text=raw,
             meta=meta,
         )
+        documents_upserted += 1
         chunks_created_total += rebuild_chunks(db, document_id=doc.id, raw_text=doc.raw_text)
         chunks_embedded_total += embed_document(db, document_id=doc.id)
         if created:
-            prs_docs += 1
+            prs_created += 1
+
+    debug = {
+        "repo": f"{owner}/{repo}",
+        "releases_api": rel_debug,
+        "prs_api": pr_debug,
+    }
 
     return SyncOut(
         ok=True,
         source_id=str(src.id),
-        releases_docs=releases_docs,
-        prs_docs=prs_docs,
+        releases_fetched=len(releases),
+        prs_fetched=len(prs),
+        releases_created=releases_created,
+        prs_created=prs_created,
+        documents_upserted=documents_upserted,
         chunks_created=chunks_created_total,
         chunks_embedded=chunks_embedded_total,
+        debug=debug,
     )
