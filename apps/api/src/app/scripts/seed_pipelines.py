@@ -2,80 +2,127 @@ from __future__ import annotations
 
 import argparse
 import uuid
+from typing import Any, Dict, List, Tuple
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from app.db.session import engine
-from app.db.models import Workspace, AgentDefinition, PipelineTemplate
-from app.api.pipelines import CANONICAL_PIPELINES  # reuse single source of truth
+from app.db.session import SessionLocal
+from app.db.models import AgentDefinition, PipelineTemplate
 
 
-def _validate_agents_exist(workspace_id: uuid.UUID) -> None:
-    # workspace_id is not needed for agent validation since agents are global,
-    # but it keeps signature symmetric for future.
-    needed = set()
-    for tpl in CANONICAL_PIPELINES:
-        steps = (tpl.get("definition_json") or {}).get("steps") or []
-        for s in steps:
-            aid = (s or {}).get("agent_id")
-            if aid:
-                needed.add(aid)
+# ---------
+# Canonical pipelines (V1)
+# NOTE: agent_id must exist in AgentDefinition.id (seed_agents.py)
+# ---------
+CANONICAL_PIPELINES: List[Dict[str, Any]] = [
+    {
+        "name": "Discovery → Strategy → PRD",
+        "description": "End-to-end early phase flow: identify opportunities, pick direction, write PRD.",
+        "steps": [
+            {"name": "Discovery", "agent_id": "discovery"},
+            {"name": "Strategy & Roadmap", "agent_id": "strategy_roadmap"},
+            {"name": "PRD", "agent_id": "prd"},
+        ],
+    },
+    {
+        "name": "PRD → UX → Feasibility",
+        "description": "Turn PRD into UX flow spec, then validate feasibility and architecture.",
+        "steps": [
+            {"name": "PRD", "agent_id": "prd"},
+            {"name": "UX Flow", "agent_id": "ux_flow"},
+            {"name": "Feasibility & Architecture", "agent_id": "feasibility_architecture"},
+        ],
+    },
+    {
+        "name": "Analytics → QA → Launch",
+        "description": "Operationalization flow: tracking + experiment plan → QA suite → launch plan/runbook.",
+        "steps": [
+            {"name": "Analytics & Experiment", "agent_id": "analytics_experiment"},
+            {"name": "QA & Test", "agent_id": "qa_test"},
+            {"name": "Launch", "agent_id": "launch"},
+        ],
+    },
+    {
+        "name": "Launch → Monitoring → Stakeholders",
+        "description": "Post-release loop: launch → health monitoring → stakeholder update pack.",
+        "steps": [
+            {"name": "Launch", "agent_id": "launch"},
+            {"name": "Post-launch Monitoring", "agent_id": "post_launch_monitoring"},
+            {"name": "Stakeholder Alignment", "agent_id": "stakeholder_alignment"},
+        ],
+    },
+]
 
-    with engine.begin() as conn:
-        existing = set(conn.execute(select(AgentDefinition.id)).scalars().all())
-    missing = sorted([a for a in needed if a not in existing])
+
+def _validate_agents_exist(db: Session) -> None:
+    needed = sorted({s["agent_id"] for p in CANONICAL_PIPELINES for s in p["steps"]})
+    existing = {a.id for a in db.execute(select(AgentDefinition)).scalars().all()}
+    missing = [a for a in needed if a not in existing]
     if missing:
-        raise RuntimeError(f"Missing AgentDefinition rows for: {missing}. Run seed_agents first.")
+        raise RuntimeError(
+            f"Missing AgentDefinition rows for: {missing}. "
+            f"Run: PYTHONPATH=src python -m app.scripts.seed_agents"
+        )
 
 
-def seed_for_workspace(workspace_id: uuid.UUID) -> tuple[int, int]:
+def seed(workspace_id: uuid.UUID) -> Tuple[int, int]:
     """
-    Idempotent seed. Creates canonical templates if not already present by (workspace_id + name).
-    Returns (created_count, existing_count).
+    Upsert canonical pipeline templates for a workspace.
+    Returns: (created_count, updated_count)
     """
-    with engine.begin() as conn:
-        ws = conn.execute(select(Workspace).where(Workspace.id == workspace_id)).scalar_one_or_none()
-        if not ws:
-            raise RuntimeError(f"Workspace not found: {workspace_id}")
+    db: Session = SessionLocal()
+    try:
+        _validate_agents_exist(db)
 
-        existing = conn.execute(
-            select(PipelineTemplate).where(PipelineTemplate.workspace_id == workspace_id)
-        ).scalars().all()
-        by_name = {t.name.strip().lower(): t for t in existing}
+        existing_by_name: Dict[str, PipelineTemplate] = {
+            t.name: t
+            for t in db.execute(
+                select(PipelineTemplate).where(PipelineTemplate.workspace_id == workspace_id)
+            ).scalars().all()
+        }
 
         created = 0
-        existing_count = 0
+        updated = 0
 
-        for tpl in CANONICAL_PIPELINES:
-            name = str(tpl["name"]).strip()
-            key = name.lower()
-            if key in by_name:
-                existing_count += 1
-                continue
+        for p in CANONICAL_PIPELINES:
+            definition_json = {
+                "version": "v1",
+                "steps": [{"name": s["name"], "agent_id": s["agent_id"]} for s in p["steps"]],
+            }
 
-            t = PipelineTemplate(
-                id=uuid.uuid4(),
-                workspace_id=workspace_id,
-                name=name,
-                description=str(tpl.get("description") or ""),
-                definition_json=tpl.get("definition_json") or {},
-            )
-            conn.add(t)
-            created += 1
+            if p["name"] in existing_by_name:
+                t = existing_by_name[p["name"]]
+                # Update in-place (id stable)
+                t.description = p["description"]
+                t.definition_json = definition_json
+                db.add(t)
+                updated += 1
+            else:
+                t = PipelineTemplate(
+                    id=uuid.uuid4(),
+                    workspace_id=workspace_id,
+                    name=p["name"],
+                    description=p["description"],
+                    definition_json=definition_json,
+                )
+                db.add(t)
+                created += 1
 
-        return created, existing_count
+        db.commit()
+        return created, updated
+    finally:
+        db.close()
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--workspace_id", required=True, help="Workspace UUID to seed canonical pipeline templates into")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--workspace_id", required=True, help="Workspace UUID to seed templates into")
+    args = parser.parse_args()
 
     ws_id = uuid.UUID(args.workspace_id)
-    _validate_agents_exist(ws_id)
-
-    created, existing = seed_for_workspace(ws_id)
-    print(f"Seed complete. created={created} existing={existing}")
+    created, updated = seed(ws_id)
+    print(f"Seed pipelines complete. Created={created}, Updated={updated}")
 
 
 if __name__ == "__main__":
