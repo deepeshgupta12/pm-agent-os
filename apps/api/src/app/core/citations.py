@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 import re
+import hashlib
+
+
+def _fingerprint(ev: Dict[str, Any]) -> str:
+    source_ref = str(ev.get("source_ref") or "").strip()
+    excerpt = str(ev.get("excerpt") or "").strip()
+    h = hashlib.sha256((source_ref + "\n" + excerpt).encode("utf-8")).hexdigest()[:16]
+    return h
 
 
 def build_citation_pack(evidence: List[Dict[str, Any]]) -> Tuple[str, str, List[Dict[str, Any]]]:
@@ -9,15 +17,21 @@ def build_citation_pack(evidence: List[Dict[str, Any]]) -> Tuple[str, str, List[
     Returns:
       (citations_block_for_prompt, sources_section_markdown, normalized_citations)
 
-    Evidence items should be dicts with keys:
-      - excerpt (str)
-      - source_ref (str|None)
-      - meta (dict)
-      - source_name (str)
+    Dedupes evidence rows to avoid exploding citation lists when auto-evidence is run multiple times.
     """
     normalized: List[Dict[str, Any]] = []
+    seen: set[str] = set()
 
-    for i, ev in enumerate(evidence, start=1):
+    # Deduplicate while keeping order
+    deduped: List[Dict[str, Any]] = []
+    for ev in evidence:
+        fp = _fingerprint(ev)
+        if fp in seen:
+            continue
+        seen.add(fp)
+        deduped.append(ev)
+
+    for i, ev in enumerate(deduped, start=1):
         meta = ev.get("meta") or {}
         title = meta.get("document_title") or meta.get("title") or "Source"
         url = meta.get("url") or meta.get("link") or ""
@@ -34,7 +48,6 @@ def build_citation_pack(evidence: List[Dict[str, Any]]) -> Tuple[str, str, List[
             }
         )
 
-    # Prompt block: include short excerpts with stable IDs
     lines: List[str] = []
     for c in normalized:
         head = f"[{c['n']}] {c['title']}"
@@ -49,10 +62,8 @@ def build_citation_pack(evidence: List[Dict[str, Any]]) -> Tuple[str, str, List[
                 ex = ex[:600] + "…"
             lines.append(ex)
         lines.append("")
-
     citations_block = "\n".join(lines).strip()
 
-    # Sources section to append in output
     src_md: List[str] = ["## Sources"]
     for c in normalized:
         row = f"- [{c['n']}] {c['title']}"
@@ -71,10 +82,6 @@ def output_has_any_citations(md: str) -> bool:
 
 
 def split_body_and_sources(md: str) -> Tuple[str, str]:
-    """
-    Split markdown into (body, sources_section_and_beyond).
-    If no Sources section present, sources part is "".
-    """
     if not md:
         return "", ""
     idx = md.find("## Sources")
@@ -89,10 +96,6 @@ def body_has_inline_citations(md: str) -> bool:
 
 
 def build_inline_citation_patch(citations: List[Dict[str, Any]]) -> str:
-    """
-    Deterministic fallback block to ensure citations appear in-body.
-    Uses evidence titles and adds [n] inline tokens.
-    """
     if not citations:
         return ""
 
@@ -103,8 +106,6 @@ def build_inline_citation_patch(citations: List[Dict[str, Any]]) -> str:
     )
     lines.append("")
 
-    # Add 1 bullet per citation with a generic grounded statement.
-    # (We avoid hallucinating facts; we simply point to what evidence exists.)
     for c in citations[:10]:
         t = c.get("title") or "Source"
         n = c.get("n")
