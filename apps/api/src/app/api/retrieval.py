@@ -11,10 +11,11 @@ from app.api.deps import require_user
 from app.core.chunker import chunk_text
 from app.core.config import settings
 from app.core.embeddings import embed_texts
+from app.core.retrieval_search import hybrid_retrieve
 from app.db.session import get_db
 from app.db.models import Workspace, User
 from app.db.retrieval_models import Source, Document, Chunk, Embedding
-from app.schemas.retrieval import DocumentIn, IngestResult, EmbedResult
+from app.schemas.retrieval import DocumentIn, IngestResult, EmbedResult, RetrieveResponse
 
 router = APIRouter(tags=["retrieval"])
 
@@ -120,11 +121,7 @@ def embed_document_chunks(
 
     chunk_ids = [c.id for c in chunks]
 
-    # 1) Repair/backfill: if an embedding exists but embedding_vec is NULL,
-    #    fill embedding_vec from the stored JSON embedding.
-    #
-    # NOTE: jsonb can't be cast directly to vector. We convert to text first:
-    #   embedding::text -> "[0.1,0.2,...]" which pgvector parses as a vector literal.
+    # Repair/backfill: jsonb -> text -> vector
     db.execute(
         sql_text(
             """
@@ -140,7 +137,6 @@ def embed_document_chunks(
     )
     db.commit()
 
-    # 2) Determine which chunks still need embedding rows
     if force:
         todo = chunks
     else:
@@ -163,7 +159,6 @@ def embed_document_chunks(
     vectors = embed_texts(texts)
 
     embedded_count = 0
-
     for c, vec in zip(todo, vectors):
         emb = Embedding(chunk_id=c.id, model=settings.EMBEDDINGS_MODEL, embedding=vec)
         db.add(emb)
@@ -178,3 +173,18 @@ def embed_document_chunks(
         embedded_count += 1
 
     return EmbedResult(document_id=str(doc.id), model=settings.EMBEDDINGS_MODEL, chunks_embedded=embedded_count)
+
+
+@router.get("/workspaces/{workspace_id}/retrieve", response_model=RetrieveResponse)
+def retrieve(
+    workspace_id: str,
+    q: str = Query(min_length=1, max_length=500),
+    k: int = Query(default=8, ge=1, le=50),
+    alpha: float = Query(default=0.65, ge=0.0, le=1.0),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    _ensure_workspace_access(db, workspace_id, user)
+
+    items = hybrid_retrieve(db, workspace_id=workspace_id, q=q, k=k, alpha=alpha)
+    return RetrieveResponse(ok=True, q=q, k=k, alpha=alpha, items=items)

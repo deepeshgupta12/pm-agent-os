@@ -43,3 +43,25 @@ class EmbedResult(BaseModel):
     document_id: str
     model: str
     chunks_embedded: int
+
+
+class RetrieveItem(BaseModel):
+    chunk_id: str
+    document_id: str
+    source_id: str
+    document_title: str
+    chunk_index: int
+    snippet: str
+    meta: Dict[str, Any]
+
+    score_fts: float
+    score_vec: float
+    score_hybrid: float
+
+
+class RetrieveResponse(BaseModel):
+    ok: bool = True
+    q: str
+    k: int
+    alpha: float
+    items: List[RetrieveItem]
