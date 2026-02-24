@@ -109,15 +109,27 @@ def embed_document_chunks(
     if not ws or ws.owner_user_id != user.id:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    chunks = db.execute(select(Chunk).where(Chunk.document_id == doc.id).order_by(Chunk.chunk_index.asc())).scalars().all()
+    chunks = (
+        db.execute(select(Chunk).where(Chunk.document_id == doc.id).order_by(Chunk.chunk_index.asc()))
+        .scalars()
+        .all()
+    )
     if not chunks:
         raise HTTPException(status_code=400, detail="No chunks to embed")
 
-    # Find chunks that do NOT already have an embedding_vec for this model
-    # We'll treat "has any embedding row with same model" as already embedded.
+    # Doc-scoped idempotency: only consider embeddings for chunks in THIS document
+    chunk_ids = [c.id for c in chunks]
     existing_chunk_ids = set(
-        db.execute(select(Embedding.chunk_id).where(Embedding.model == settings.EMBEDDINGS_MODEL)).scalars().all()
+        db.execute(
+            select(Embedding.chunk_id).where(
+                Embedding.model == settings.EMBEDDINGS_MODEL,
+                Embedding.chunk_id.in_(chunk_ids),
+            )
+        )
+        .scalars()
+        .all()
     )
+
     todo = [c for c in chunks if c.id not in existing_chunk_ids]
     if not todo:
         return EmbedResult(document_id=str(doc.id), model=settings.EMBEDDINGS_MODEL, chunks_embedded=0)
@@ -125,18 +137,17 @@ def embed_document_chunks(
     texts = [c.text for c in todo]
     vectors = embed_texts(texts)
 
-    # Insert embedding rows; set embedding_vec via raw SQL so we avoid python pgvector dependency.
-    # We'll store json embedding too for debugging.
     embedded_count = 0
+
     for c, vec in zip(todo, vectors):
         emb = Embedding(chunk_id=c.id, model=settings.EMBEDDINGS_MODEL, embedding=vec)
         db.add(emb)
         db.commit()
         db.refresh(emb)
 
-        # Update embedding_vec (vector type)
+        # IMPORTANT: do not use :v::vector (breaks bind parsing). Use CAST(:v AS vector)
         db.execute(
-            sql_text("UPDATE embeddings SET embedding_vec = :v::vector WHERE id = :id"),
+            sql_text("UPDATE embeddings SET embedding_vec = CAST(:v AS vector) WHERE id = :id"),
             {"v": vec, "id": str(emb.id)},
         )
         db.commit()
