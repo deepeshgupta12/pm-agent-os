@@ -1,20 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import {
-  Badge,
-  Button,
-  Card,
-  Group,
-  Stack,
-  Text,
-  Title,
-} from "@mantine/core";
+import { Badge, Button, Card, Group, Stack, Text, Title } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import type { PipelineRun, PipelineStep } from "../types";
 
 type NextResponse = {
   ok: boolean;
   created_run_id?: string | null;
+  pipeline_run: PipelineRun;
+};
+
+type ExecuteAllResponse = {
+  ok: boolean;
+  created_run_ids: string[];
   pipeline_run: PipelineRun;
 };
 
@@ -34,9 +32,12 @@ export default function PipelineRunDetailPage() {
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [execLoading, setExecLoading] = useState(false);
-  const [lastCreatedRunId, setLastCreatedRunId] = useState<string | null>(null);
+  const [execAllLoading, setExecAllLoading] = useState(false);
 
-  const canExecuteNext = useMemo(() => {
+  const [lastCreatedRunId, setLastCreatedRunId] = useState<string | null>(null);
+  const [createdRunIds, setCreatedRunIds] = useState<string[]>([]);
+
+  const canExecute = useMemo(() => {
     if (!pr) return false;
     return (pr.status || "").toLowerCase() !== "completed";
   }, [pr]);
@@ -46,8 +47,6 @@ export default function PipelineRunDetailPage() {
     setErr(null);
     setLoading(true);
 
-    // Expected endpoint:
-    // GET /pipelines/runs/{pipeline_run_id}
     const res = await apiFetch<PipelineRun>(`/pipelines/runs/${prid}`, { method: "GET" });
 
     setLoading(false);
@@ -65,8 +64,6 @@ export default function PipelineRunDetailPage() {
     setErr(null);
     setExecLoading(true);
 
-    // Expected endpoint:
-    // POST /pipelines/runs/{pipeline_run_id}/next
     const res = await apiFetch<NextResponse>(`/pipelines/runs/${prid}/next`, {
       method: "POST",
       body: JSON.stringify({}),
@@ -80,7 +77,47 @@ export default function PipelineRunDetailPage() {
     }
 
     setPr(res.data.pipeline_run);
-    setLastCreatedRunId(res.data.created_run_id ?? null);
+    const rid = res.data.created_run_id ?? null;
+    setLastCreatedRunId(rid);
+
+    if (rid) {
+      setCreatedRunIds((prev) => [rid, ...prev.filter((x) => x !== rid)]);
+    }
+  }
+
+  async function executeAll() {
+    if (!prid) return;
+    setErr(null);
+    setExecAllLoading(true);
+
+    const res = await apiFetch<ExecuteAllResponse>(`/pipelines/runs/${prid}/execute-all`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+
+    setExecAllLoading(false);
+
+    if (!res.ok) {
+      setErr(`Execute all failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setPr(res.data.pipeline_run);
+
+    const ids = (res.data.created_run_ids || []).filter(Boolean);
+    if (ids.length > 0) {
+      setLastCreatedRunId(ids[ids.length - 1] ?? null);
+      setCreatedRunIds((prev) => {
+        const merged = [...ids, ...prev];
+        // de-dupe preserve order
+        const seen = new Set<string>();
+        return merged.filter((x) => {
+          if (seen.has(x)) return false;
+          seen.add(x);
+          return true;
+        });
+      });
+    }
   }
 
   useEffect(() => {
@@ -139,14 +176,20 @@ export default function PipelineRunDetailPage() {
             </Card>
 
             <Group gap="sm">
-              <Button onClick={executeNext} disabled={!canExecuteNext} loading={execLoading}>
+              <Button onClick={executeNext} disabled={!canExecute} loading={execLoading}>
                 Execute next step
               </Button>
-              <Text size="sm" c="dimmed">
-                {canExecuteNext
-                  ? "Creates a normal Run for the current step and marks it completed."
-                  : "Pipeline is completed."}
-              </Text>
+              <Button
+                onClick={executeAll}
+                disabled={!canExecute}
+                loading={execAllLoading}
+                variant="light"
+              >
+                Execute all remaining
+              </Button>
+              <Button variant="light" onClick={load} loading={loading}>
+                Refresh
+              </Button>
             </Group>
 
             {lastCreatedRunId ? (
@@ -162,6 +205,24 @@ export default function PipelineRunDetailPage() {
                     Open Run
                   </Button>
                 </Group>
+              </Card>
+            ) : null}
+
+            {createdRunIds.length > 0 ? (
+              <Card withBorder>
+                <Stack gap="xs">
+                  <Text fw={600}>Runs created (this session)</Text>
+                  {createdRunIds.map((id) => (
+                    <Group key={id} justify="space-between">
+                      <Text size="xs" c="dimmed">
+                        {id}
+                      </Text>
+                      <Button component={Link} to={`/runs/${id}`} size="xs" variant="light">
+                        Open
+                      </Button>
+                    </Group>
+                  ))}
+                </Stack>
               </Card>
             ) : null}
           </Stack>
