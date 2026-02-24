@@ -73,7 +73,7 @@ def _s(v: Any) -> str:
     return "" if v is None else str(v).strip()
 
 
-def build_user_prompt(agent_id: str, input_payload: Dict[str, Any]) -> str:
+def build_user_prompt(agent_id: str, input_payload: Dict[str, Any], evidence_text: str = "") -> str:
     artifact_type = AGENT_TO_DEFAULT_ARTIFACT_TYPE.get(agent_id, "strategy_memo")
     goal = _s(input_payload.get("goal"))
     context = _s(input_payload.get("context"))
@@ -81,7 +81,18 @@ def build_user_prompt(agent_id: str, input_payload: Dict[str, Any]) -> str:
 
     agent_instruction = _AGENT_PLAYBOOK.get(agent_id, "")
 
-    # Common skeleton required across all agents
+    evidence_block = ""
+    if evidence_text.strip():
+        evidence_block = f"""
+Known Evidence (only use what is provided below; do not invent anything):
+{evidence_text}
+
+Evidence Rules:
+- If you state something derived from evidence, prefix the bullet with: **[EVIDENCE]**
+- If you state something that is an assumption, prefix it with: **[ASSUMPTION]**
+- If you need data not present, list it under Open Questions.
+"""
+
     common_requirements = f"""
 You must produce a **{artifact_type}** draft for the user's goal.
 
@@ -94,6 +105,8 @@ Context:
 Constraints:
 {constraints or "(not provided)"}
 
+{evidence_block}
+
 Rules:
 - Use the goal/context/constraints explicitly in the draft (do not ignore them).
 - No fake metrics, no fake baselines. If unknown, mark as unknown.
@@ -101,7 +114,6 @@ Rules:
 - Output must be actionable (decisions, next actions).
 """
 
-    # Artifact-type specific structure
     structure = _structure_for_artifact_type(artifact_type)
 
     return f"""
