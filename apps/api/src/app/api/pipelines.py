@@ -9,7 +9,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_user
-from app.core.generator import build_initial_artifact, build_run_summary
+from app.core.generator import build_initial_artifact, build_run_summary, AGENT_TO_DEFAULT_ARTIFACT_TYPE
+from app.core.config import settings
+from app.core.evidence_format import format_evidence_for_prompt
+from app.core.citations import (
+    build_citation_pack,
+    output_has_any_citations,
+    body_has_inline_citations,
+    build_inline_citation_patch,
+)
 from app.db.session import get_db
 from app.db.models import (
     Workspace,
@@ -46,6 +54,7 @@ CANONICAL_PIPELINES: List[Dict[str, Any]] = [
         "description": "End-to-end early phase flow: identify opportunities, pick direction, write PRD.",
         "definition_json": {
             "version": "v1",
+            "auto_regenerate_with_evidence": True,
             "steps": [
                 {"name": "Discovery", "agent_id": "discovery"},
                 {"name": "Strategy & Roadmap", "agent_id": "strategy_roadmap"},
@@ -59,6 +68,7 @@ CANONICAL_PIPELINES: List[Dict[str, Any]] = [
         "description": "Turn PRD into UX flow spec, then validate feasibility and architecture.",
         "definition_json": {
             "version": "v1",
+            "auto_regenerate_with_evidence": True,
             "steps": [
                 {"name": "PRD", "agent_id": "prd"},
                 {"name": "UX Flow", "agent_id": "ux_flow"},
@@ -72,6 +82,7 @@ CANONICAL_PIPELINES: List[Dict[str, Any]] = [
         "description": "Operationalization flow: tracking + experiment plan → QA suite → launch plan/runbook.",
         "definition_json": {
             "version": "v1",
+            "auto_regenerate_with_evidence": True,
             "steps": [
                 {"name": "Analytics & Experiment", "agent_id": "analytics_experiment"},
                 {"name": "QA & Test", "agent_id": "qa_test"},
@@ -85,6 +96,7 @@ CANONICAL_PIPELINES: List[Dict[str, Any]] = [
         "description": "Post-release loop: launch → health monitoring → stakeholder update pack.",
         "definition_json": {
             "version": "v1",
+            "auto_regenerate_with_evidence": True,
             "steps": [
                 {"name": "Launch", "agent_id": "launch"},
                 {"name": "Post-launch Monitoring", "agent_id": "post_launch_monitoring"},
@@ -115,7 +127,74 @@ def _template_to_out(t: PipelineTemplate) -> PipelineTemplateOut:
     )
 
 
-def _step_to_out(s: PipelineStep) -> PipelineStepOut:
+def _prev_context_attached_map(db: Session, steps: List[PipelineStep]) -> Dict[str, bool]:
+    run_ids = [s.run_id for s in steps if s.run_id is not None and s.step_index > 0]
+    if not run_ids:
+        return {}
+
+    rows = (
+        db.execute(
+            select(Evidence.run_id)
+            .where(
+                Evidence.run_id.in_(run_ids),
+                Evidence.source_name == "pipeline_prev_artifact",
+            )
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+    return {str(rid): True for rid in rows}
+
+
+def _latest_artifact_map(db: Session, steps: List[PipelineStep]) -> Dict[str, Dict[str, Any]]:
+    """
+    One query to get latest artifact metadata for each run_id (if exists).
+    Uses DISTINCT ON which is Postgres-specific (you’re on Postgres already).
+    """
+    run_ids = [s.run_id for s in steps if s.run_id is not None]
+    if not run_ids:
+        return {}
+
+    # DISTINCT ON requires order by run_id, created_at desc to pick latest per run
+    q = (
+        select(Artifact)
+        .where(Artifact.run_id.in_(run_ids))
+        .distinct(Artifact.run_id)
+        .order_by(Artifact.run_id, Artifact.created_at.desc())
+    )
+
+    rows = db.execute(q).scalars().all()
+    out: Dict[str, Dict[str, Any]] = {}
+    for a in rows:
+        out[str(a.run_id)] = {
+            "latest_artifact_id": str(a.id),
+            "latest_artifact_version": int(a.version),
+            "latest_artifact_type": a.type,
+            "latest_artifact_title": a.title,
+        }
+    return out
+
+
+def _step_to_out(
+    s: PipelineStep,
+    prev_attached_map: Dict[str, bool],
+    latest_art_map: Dict[str, Dict[str, Any]],
+) -> PipelineStepOut:
+    run_id_str = str(s.run_id) if s.run_id else None
+
+    prev_ctx = None
+    auto_regenerated = None
+    latest = {}
+
+    if run_id_str:
+        prev_ctx = bool(prev_attached_map.get(run_id_str, False))
+        latest = latest_art_map.get(run_id_str, {}) or {}
+        # Step 18: consider auto-regenerated if artifact version >=2
+        v = latest.get("latest_artifact_version")
+        if isinstance(v, int):
+            auto_regenerated = v >= 2
+
     return PipelineStepOut(
         id=str(s.id),
         pipeline_run_id=str(s.pipeline_run_id),
@@ -124,11 +203,20 @@ def _step_to_out(s: PipelineStep) -> PipelineStepOut:
         agent_id=s.agent_id,
         status=s.status,
         input_payload=s.input_payload or {},
-        run_id=str(s.run_id) if s.run_id else None,
+        run_id=run_id_str,
+        prev_context_attached=prev_ctx,
+        auto_regenerated=auto_regenerated,
+        latest_artifact_id=latest.get("latest_artifact_id"),
+        latest_artifact_version=latest.get("latest_artifact_version"),
+        latest_artifact_type=latest.get("latest_artifact_type"),
+        latest_artifact_title=latest.get("latest_artifact_title"),
     )
 
 
-def _run_to_out(pr: PipelineRun, steps: List[PipelineStep]) -> PipelineRunOut:
+def _run_to_out(db: Session, pr: PipelineRun, steps: List[PipelineStep]) -> PipelineRunOut:
+    prev_map = _prev_context_attached_map(db, steps)
+    latest_map = _latest_artifact_map(db, steps)
+
     return PipelineRunOut(
         id=str(pr.id),
         workspace_id=str(pr.workspace_id),
@@ -137,7 +225,7 @@ def _run_to_out(pr: PipelineRun, steps: List[PipelineStep]) -> PipelineRunOut:
         status=pr.status,
         current_step_index=pr.current_step_index,
         input_payload=pr.input_payload or {},
-        steps=[_step_to_out(s) for s in sorted(steps, key=lambda x: x.step_index)],
+        steps=[_step_to_out(s, prev_map, latest_map) for s in sorted(steps, key=lambda x: x.step_index)],
     )
 
 
@@ -190,10 +278,6 @@ def _seed_canonical_templates_for_workspace(
 
 
 def _latest_artifact_snapshot(db: Session, run_id: uuid.UUID) -> Optional[Dict[str, Any]]:
-    """
-    Returns a small snapshot of the latest artifact for a run.
-    This is what we embed into _pipeline.prev_artifact.
-    """
     a = (
         db.execute(
             select(Artifact)
@@ -227,13 +311,6 @@ def _create_completed_run_with_artifact(
     agent_id: str,
     input_payload: Dict[str, Any],
 ) -> Run:
-    """
-    Mirrors runs.py:create_run behavior:
-    - creates Run
-    - marks running
-    - generates initial artifact
-    - marks completed + output_summary
-    """
     agent = db.get(AgentDefinition, agent_id)
     if not agent:
         raise HTTPException(status_code=400, detail=f"Invalid agent_id: {agent_id}")
@@ -287,17 +364,11 @@ def _auto_attach_prev_artifact_as_evidence(
     prev_run_id: Optional[str],
     prev_artifact: Dict[str, Any],
 ) -> None:
-    """
-    Step 17A:
-    If _pipeline.prev_artifact exists, attach it as an Evidence row for the new run.
-    """
     artifact_id = str(prev_artifact.get("artifact_id") or "").strip()
     excerpt = (prev_artifact.get("content_md_excerpt") or "").strip()
-
     if not artifact_id or not excerpt:
         return
 
-    # Keep evidence excerpt reasonably sized for DB + prompts
     safe_excerpt = excerpt[:2000].strip()
 
     ev = Evidence(
@@ -323,6 +394,124 @@ def _auto_attach_prev_artifact_as_evidence(
     db.commit()
 
 
+def _regenerate_run_with_evidence_internal(db: Session, run_uuid: uuid.UUID) -> None:
+    """
+    Step 18: Internal regenerate that mirrors runs.py:/runs/{id}/regenerate behavior,
+    but without auth wrappers (pipelines already validates workspace ownership).
+    Creates a new artifact version row.
+
+    NOTE: This assumes evidence already attached to the run.
+    """
+    r = db.get(Run, run_uuid)
+    if not r:
+        return
+
+    ev_items = (
+        db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc()))
+        .scalars()
+        .all()
+    )
+    if len(ev_items) == 0:
+        return
+
+    evidence_text = format_evidence_for_prompt(ev_items)
+    evidence_dicts = [
+        {"excerpt": e.excerpt, "source_ref": e.source_ref, "source_name": e.source_name, "meta": e.meta or {}}
+        for e in ev_items
+    ]
+    citations_block, sources_section_md, normalized = build_citation_pack(evidence_dicts)
+
+    artifact_type = AGENT_TO_DEFAULT_ARTIFACT_TYPE.get(r.agent_id, "strategy_memo")
+    title = f"{artifact_type.replace('_', ' ').title()} — Draft"
+
+    if settings.LLM_ENABLED and settings.OPENAI_API_KEY:
+        from app.core.prompts import build_system_prompt, build_user_prompt
+        from app.core.llm_client import llm_generate_markdown
+
+        system_prompt = build_system_prompt()
+        base_user_prompt = build_user_prompt(agent_id=r.agent_id, input_payload=r.input_payload, evidence_text=evidence_text)
+
+        citation_rules = f"""
+You MUST ground claims in the Evidence Pack below.
+
+Citation rules:
+- Any factual claim, decision, requirement, or number MUST include at least one inline citation like [1] or [2].
+- Do NOT invent sources. Only cite from the Evidence Pack IDs.
+- If evidence is insufficient for a claim, write it under "## Unknowns / Assumptions" instead of guessing.
+
+Output requirements (MANDATORY):
+1) Start with a clear H1 title.
+2) Include a section "## Unknowns / Assumptions".
+3) Include a section "## Sources" at the end with the exact [n] references.
+"""
+
+        evidence_pack = f"""
+Evidence Pack (cite as [n]):
+
+{citations_block}
+""".strip()
+
+        user_prompt = "\n\n".join([base_user_prompt.strip(), citation_rules.strip(), evidence_pack])
+        md = llm_generate_markdown(system_prompt=system_prompt, user_prompt=user_prompt)
+
+        if not md.lstrip().startswith("#"):
+            md = f"# {title}\n\n" + md
+
+        if "## Unknowns / Assumptions" not in md:
+            md = md.rstrip() + "\n\n## Unknowns / Assumptions\n- None stated.\n"
+
+        if "## Sources" not in md:
+            md = md.rstrip() + "\n\n" + sources_section_md + "\n"
+
+        if len(ev_items) > 0 and not output_has_any_citations(md):
+            md = (
+                md.rstrip()
+                + "\n\n"
+                + "### ⚠️ Citation check\n"
+                + "Evidence was available, but no citations like [1] were found. Please add inline citations.\n\n"
+                + sources_section_md
+                + "\n"
+            )
+
+        if len(ev_items) > 0 and not body_has_inline_citations(md):
+            patch = build_inline_citation_patch(normalized)
+            md = md.rstrip() + "\n\n" + patch + "\n"
+
+    else:
+        # fallback
+        _, _, md = build_initial_artifact(agent_id=r.agent_id, input_payload=r.input_payload)
+        if "## Unknowns / Assumptions" not in md:
+            md = md.rstrip() + "\n\n## Unknowns / Assumptions\n- Evidence-based citations require LLM mode.\n"
+        if "## Sources" not in md:
+            md = md.rstrip() + "\n\n" + sources_section_md + "\n"
+        if not body_has_inline_citations(md):
+            md = md.rstrip() + "\n\n" + build_inline_citation_patch(normalized) + "\n"
+
+    # Next version for this logical_key
+    max_ver = db.execute(
+        select(Artifact.version)
+        .where(Artifact.run_id == r.id, Artifact.logical_key == artifact_type)
+        .order_by(Artifact.version.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    next_ver = int(max_ver or 0) + 1
+
+    new_art = Artifact(
+        run_id=r.id,
+        type=artifact_type,
+        title=title,
+        content_md=md,
+        logical_key=artifact_type,
+        version=next_ver,
+        status="draft",
+    )
+    db.add(new_art)
+
+    r.output_summary = f"Auto-regenerated via pipeline using {len(ev_items)} evidence item(s). Latest version: v{next_ver}."
+    db.add(r)
+    db.commit()
+
+
 def _execute_one_step(
     db: Session,
     ws: Workspace,
@@ -330,12 +519,8 @@ def _execute_one_step(
     pr: PipelineRun,
     steps: List[PipelineStep],
     step: PipelineStep,
+    auto_regen: bool,
 ) -> str:
-    """
-    Executes exactly one pipeline step by creating a completed Run + artifact.
-    Step 17A: auto-add prev_artifact as evidence to the created run.
-    Returns created run_id.
-    """
     step.status = "running"
     step.started_at = datetime.now(timezone.utc)
     db.add(step)
@@ -353,7 +538,6 @@ def _execute_one_step(
     prev_run_id: Optional[str] = None
     prev_artifact: Optional[Dict[str, Any]] = None
 
-    # Attach previous step context (run_id + latest artifact excerpt)
     if step.step_index > 0:
         prev_step = steps[step.step_index - 1]
         prev_run_id = str(prev_step.run_id) if prev_step.run_id else None
@@ -365,7 +549,6 @@ def _execute_one_step(
                 prev_artifact = snap
                 run_input["_pipeline"]["prev_artifact"] = snap
 
-    # Create run + initial artifact (COMPLETED)
     new_run = _create_completed_run_with_artifact(
         db=db,
         ws=ws,
@@ -387,7 +570,10 @@ def _execute_one_step(
             prev_artifact=prev_artifact,
         )
 
-    # Mark step completed and link
+    # Step 18: auto-regenerate with evidence (only for step 1+)
+    if auto_regen and step.step_index > 0:
+        _regenerate_run_with_evidence_internal(db=db, run_uuid=new_run.id)
+
     step.run_id = new_run.id
     step.status = "completed"
     step.completed_at = datetime.now(timezone.utc)
@@ -527,7 +713,7 @@ def start_pipeline_run(
     db.refresh(pr)
 
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
-    return _run_to_out(pr, steps)
+    return _run_to_out(db, pr, steps)
 
 
 @router.get("/pipelines/runs/{pipeline_run_id}", response_model=PipelineRunOut)
@@ -546,7 +732,7 @@ def get_pipeline_run(
         raise HTTPException(status_code=404, detail="Pipeline run not found")
 
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
-    return _run_to_out(pr, steps)
+    return _run_to_out(db, pr, steps)
 
 
 @router.post("/pipelines/runs/{pipeline_run_id}/next", response_model=PipelineNextOut)
@@ -564,6 +750,10 @@ def run_next_step(
     if not ws or ws.owner_user_id != user.id:
         raise HTTPException(status_code=404, detail="Pipeline run not found")
 
+    tpl = db.get(PipelineTemplate, pr.template_id)
+    definition = (tpl.definition_json or {}) if tpl else {}
+    auto_regen = bool(definition.get("auto_regenerate_with_evidence", True))
+
     steps = db.execute(
         select(PipelineStep)
         .where(PipelineStep.pipeline_run_id == pr.id)
@@ -576,7 +766,7 @@ def run_next_step(
         pr.status = "completed"
         db.add(pr)
         db.commit()
-        return PipelineNextOut(ok=True, pipeline_run=_run_to_out(pr, steps), created_run_id=None)
+        return PipelineNextOut(ok=True, pipeline_run=_run_to_out(db, pr, steps), created_run_id=None)
 
     step = steps[pr.current_step_index]
 
@@ -585,9 +775,9 @@ def run_next_step(
         db.add(pr)
         db.commit()
         steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
-        return PipelineNextOut(ok=True, pipeline_run=_run_to_out(pr, steps), created_run_id=None)
+        return PipelineNextOut(ok=True, pipeline_run=_run_to_out(db, pr, steps), created_run_id=None)
 
-    created_run_id = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step)
+    created_run_id = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step, auto_regen=auto_regen)
 
     pr.current_step_index += 1
     if pr.current_step_index >= len(steps):
@@ -597,7 +787,7 @@ def run_next_step(
     db.refresh(pr)
 
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
-    return PipelineNextOut(ok=True, pipeline_run=_run_to_out(pr, steps), created_run_id=created_run_id)
+    return PipelineNextOut(ok=True, pipeline_run=_run_to_out(db, pr, steps), created_run_id=created_run_id)
 
 
 @router.post("/pipelines/runs/{pipeline_run_id}/execute-all", response_model=PipelineExecuteAllOut)
@@ -614,6 +804,10 @@ def execute_all_steps(
     ws = db.get(Workspace, pr.workspace_id)
     if not ws or ws.owner_user_id != user.id:
         raise HTTPException(status_code=404, detail="Pipeline run not found")
+
+    tpl = db.get(PipelineTemplate, pr.template_id)
+    definition = (tpl.definition_json or {}) if tpl else {}
+    auto_regen = bool(definition.get("auto_regenerate_with_evidence", True))
 
     steps = db.execute(
         select(PipelineStep)
@@ -632,10 +826,9 @@ def execute_all_steps(
             pr.current_step_index += 1
             continue
 
-        rid = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step)
+        rid = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step, auto_regen=auto_regen)
         created_run_ids.append(rid)
 
-        # Reload steps so prev_run_id and run_id are consistent for next iteration
         steps = db.execute(
             select(PipelineStep)
             .where(PipelineStep.pipeline_run_id == pr.id)
@@ -652,6 +845,6 @@ def execute_all_steps(
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
     return PipelineExecuteAllOut(
         ok=True,
-        pipeline_run=_run_to_out(pr, steps),
+        pipeline_run=_run_to_out(db, pr, steps),
         created_run_ids=created_run_ids,
     )

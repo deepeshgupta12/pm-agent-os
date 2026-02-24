@@ -42,6 +42,16 @@ class PipelineStepOut(BaseModel):
     input_payload: Dict[str, Any]
     run_id: Optional[str] = None
 
+    # Existing flag (Step 17A+)
+    prev_context_attached: Optional[bool] = None
+
+    # Step 18: auto-regenerate status + latest artifact metadata
+    auto_regenerated: Optional[bool] = None
+    latest_artifact_id: Optional[str] = None
+    latest_artifact_version: Optional[int] = None
+    latest_artifact_type: Optional[str] = None
+    latest_artifact_title: Optional[str] = None
+
 
 class PipelineRunOut(BaseModel):
     id: str
