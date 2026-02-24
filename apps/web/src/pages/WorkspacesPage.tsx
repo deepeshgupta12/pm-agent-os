@@ -90,9 +90,14 @@ export default function WorkspacesPage() {
                         {w.id}
                       </Text>
                     </Stack>
-                    <Button component={Link} to={`/workspaces/${w.id}`}>
-                      Open
-                    </Button>
+                    <Group>
+                      <Button component={Link} to={`/workspaces/${w.id}/pipelines`} variant="light">
+                        Pipelines
+                      </Button>
+                      <Button component={Link} to={`/workspaces/${w.id}`}>
+                        Open
+                      </Button>
+                    </Group>
                   </Group>
                 </Card>
               ))}

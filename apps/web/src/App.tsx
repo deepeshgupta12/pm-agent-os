@@ -4,6 +4,8 @@ import WorkspacesPage from "./pages/WorkspacesPage";
 import WorkspaceDetailPage from "./pages/WorkspaceDetailPage";
 import RunDetailPage from "./pages/RunDetailPage";
 import ArtifactDetailPage from "./pages/ArtifactDetailPage";
+import PipelinesPage from "./pages/PipelinesPage";
+import PipelineRunDetailPage from "./pages/PipelineRunDetailPage";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Me from "./pages/Me";
@@ -57,6 +59,12 @@ export default function App() {
           {/* Platform */}
           <Route path="/workspaces" element={<WorkspacesPage />} />
           <Route path="/workspaces/:workspaceId" element={<WorkspaceDetailPage />} />
+
+          {/* Pipelines */}
+          <Route path="/workspaces/:workspaceId/pipelines" element={<PipelinesPage />} />
+          <Route path="/pipelines/runs/:pipelineRunId" element={<PipelineRunDetailPage />} />
+
+          {/* Runs/Artifacts */}
           <Route path="/runs/:runId" element={<RunDetailPage />} />
           <Route path="/artifacts/:artifactId" element={<ArtifactDetailPage />} />
 
