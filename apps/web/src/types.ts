@@ -16,8 +16,26 @@ export type Run = {
   agent_id: string;
   created_by_user_id: string;
   status: string;
-  input_payload: Record<string, unknown>;
+  input_payload: Record<string, unknown> & { _pipeline?: RunPipelineMeta };
   output_summary?: string | null;
+};
+
+export type PipelinePrevArtifact = {
+  artifact_id: string;
+  type: string;
+  title: string;
+  version: number;
+  status: string;
+  content_md_excerpt: string;
+};
+
+export type RunPipelineMeta = {
+  pipeline_run_id: string;
+  step_index: number;
+  step_name: string;
+  template_id: string;
+  prev_run_id?: string | null;
+  prev_artifact?: PipelinePrevArtifact;
 };
 
 export type Artifact = {
@@ -60,6 +78,9 @@ export type PipelineStep = {
   status: string;
   input_payload: Record<string, unknown>;
   run_id?: string | null;
+
+  // Step 16B: computed server-side (null if run not created)
+  prev_context_attached?: boolean | null;
 };
 
 export type PipelineRun = {
