@@ -1,6 +1,6 @@
 """restore retrieval fts and pgvector columns
 
-Revision ID: REPLACE_WITH_NEW_REVISION_ID
+Revision ID: 517e08771069
 Revises: ffe4784a0fac
 Create Date: 2026-02-24
 
@@ -10,7 +10,7 @@ from alembic import op
 
 
 # revision identifiers, used by Alembic.
-revision: str = "REPLACE_WITH_NEW_REVISION_ID"
+revision: str = "517e08771069"
 down_revision: Union[str, None] = "ffe4784a0fac"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
