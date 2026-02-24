@@ -120,13 +120,16 @@ def embed_document_chunks(
 
     chunk_ids = [c.id for c in chunks]
 
-    # 1) Repair/backfill: if an embedding exists (for this model) but embedding_vec is NULL,
+    # 1) Repair/backfill: if an embedding exists but embedding_vec is NULL,
     #    fill embedding_vec from the stored JSON embedding.
-    repair_rows = db.execute(
+    #
+    # NOTE: jsonb can't be cast directly to vector. We convert to text first:
+    #   embedding::text -> "[0.1,0.2,...]" which pgvector parses as a vector literal.
+    db.execute(
         sql_text(
             """
             UPDATE embeddings
-            SET embedding_vec = CAST(embedding AS vector)
+            SET embedding_vec = (embedding::text)::vector
             WHERE model = :model
               AND chunk_id = ANY(:chunk_ids)
               AND embedding_vec IS NULL
