@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -18,6 +18,7 @@ from app.db.models import (
     PipelineRun,
     PipelineStep,
     Run,
+    Artifact,
 )
 from app.schemas.pipelines import (
     PipelineTemplateIn,
@@ -27,6 +28,7 @@ from app.schemas.pipelines import (
     PipelineRunOut,
     PipelineStepOut,
     PipelineNextOut,
+    PipelineExecuteAllOut,
 )
 
 router = APIRouter(tags=["pipelines"])
@@ -149,12 +151,6 @@ def _validate_pipeline_definition(db: Session, steps_def: Any) -> None:
 
 
 def _seed_canonical_templates_for_workspace(db: Session, ws: Workspace) -> Tuple[List[PipelineTemplate], List[PipelineTemplate]]:
-    """
-    Idempotent seed:
-    - if template with same name already exists in the workspace, we treat as existing
-    - otherwise create it
-    Returns (created, existing).
-    """
     existing = db.execute(
         select(PipelineTemplate).where(PipelineTemplate.workspace_id == ws.id)
     ).scalars().all()
@@ -287,7 +283,6 @@ def start_pipeline_run(
         if not agent_id:
             raise HTTPException(status_code=400, detail=f"Invalid step at index {idx}: missing agent_id")
 
-        # Validate agent exists (already validated, but keep it safe)
         agent = db.get(AgentDefinition, agent_id)
         if not agent:
             raise HTTPException(status_code=400, detail=f"Invalid agent_id in pipeline step: {agent_id}")
@@ -341,20 +336,43 @@ def get_pipeline_run(
     return _run_to_out(pr, steps)
 
 
-@router.post("/pipelines/runs/{pipeline_run_id}/next", response_model=PipelineNextOut)
-def run_next_step(
-    pipeline_run_id: str,
-    db: Session = Depends(get_db),
-    user: User = Depends(require_user),
-):
-    pr_uuid = uuid.UUID(pipeline_run_id)
-    pr = db.get(PipelineRun, pr_uuid)
-    if not pr:
-        raise HTTPException(status_code=404, detail="Pipeline run not found")
+def _latest_artifact_snapshot(db: Session, run_id: uuid.UUID, max_chars: int = 1400) -> Optional[Dict[str, Any]]:
+    a = (
+        db.execute(
+            select(Artifact)
+            .where(Artifact.run_id == run_id)
+            .order_by(Artifact.version.desc(), Artifact.created_at.desc())
+        )
+        .scalars()
+        .first()
+    )
+    if not a:
+        return None
 
+    md = (a.content_md or "").strip()
+    excerpt = md[:max_chars]
+    if len(md) > max_chars:
+        excerpt += "\n\n…(truncated)…"
+
+    return {
+        "artifact_id": str(a.id),
+        "type": a.type,
+        "title": a.title,
+        "version": int(a.version),
+        "status": a.status,
+        "content_md_excerpt": excerpt,
+    }
+
+
+def _ensure_pipeline_run_access(db: Session, pr: PipelineRun, user: User) -> Workspace:
     ws = db.get(Workspace, pr.workspace_id)
     if not ws or ws.owner_user_id != user.id:
         raise HTTPException(status_code=404, detail="Pipeline run not found")
+    return ws
+
+
+def _execute_one_step(db: Session, pr: PipelineRun, user: User) -> Tuple[PipelineRun, List[PipelineStep], Optional[str]]:
+    ws = _ensure_pipeline_run_access(db, pr, user)
 
     steps = db.execute(
         select(PipelineStep)
@@ -368,17 +386,21 @@ def run_next_step(
         pr.status = "completed"
         db.add(pr)
         db.commit()
-        return PipelineNextOut(ok=True, pipeline_run=_run_to_out(pr, steps), created_run_id=None)
+        db.refresh(pr)
+        return pr, steps, None
 
     step = steps[pr.current_step_index]
 
     if step.status == "completed":
         pr.current_step_index += 1
+        if pr.current_step_index >= len(steps):
+            pr.status = "completed"
         db.add(pr)
         db.commit()
-        return PipelineNextOut(ok=True, pipeline_run=_run_to_out(pr, steps), created_run_id=None)
+        db.refresh(pr)
+        steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
+        return pr, steps, None
 
-    # Create a normal Run for this step
     step.status = "running"
     step.started_at = datetime.utcnow()
     db.add(step)
@@ -388,14 +410,19 @@ def run_next_step(
     run_input: Dict[str, Any] = dict(pr.input_payload or {})
     run_input["_pipeline"] = {
         "pipeline_run_id": str(pr.id),
-        "step_index": step.step_index,
+        "step_index": int(step.step_index),
         "step_name": step.step_name,
         "template_id": str(pr.template_id),
     }
 
+    # carry forward prev run + latest artifact snapshot
     if step.step_index > 0:
         prev = steps[step.step_index - 1]
         run_input["_pipeline"]["prev_run_id"] = str(prev.run_id) if prev.run_id else None
+        if prev.run_id:
+            snap = _latest_artifact_snapshot(db, prev.run_id)
+            if snap:
+                run_input["_pipeline"]["prev_artifact"] = snap
 
     new_run = Run(
         workspace_id=ws.id,
@@ -416,9 +443,64 @@ def run_next_step(
     pr.current_step_index += 1
     if pr.current_step_index >= len(steps):
         pr.status = "completed"
+    else:
+        pr.status = "running"
+
     db.add(pr)
     db.commit()
     db.refresh(pr)
 
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
-    return PipelineNextOut(ok=True, pipeline_run=_run_to_out(pr, steps), created_run_id=str(new_run.id))
+    return pr, steps, str(new_run.id)
+
+
+@router.post("/pipelines/runs/{pipeline_run_id}/next", response_model=PipelineNextOut)
+def run_next_step(
+    pipeline_run_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    pr_uuid = uuid.UUID(pipeline_run_id)
+    pr = db.get(PipelineRun, pr_uuid)
+    if not pr:
+        raise HTTPException(status_code=404, detail="Pipeline run not found")
+
+    pr2, steps, created = _execute_one_step(db, pr, user)
+    return PipelineNextOut(ok=True, pipeline_run=_run_to_out(pr2, steps), created_run_id=created)
+
+
+@router.post("/pipelines/runs/{pipeline_run_id}/execute-all", response_model=PipelineExecuteAllOut)
+def execute_all_remaining_steps(
+    pipeline_run_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    pr_uuid = uuid.UUID(pipeline_run_id)
+    pr = db.get(PipelineRun, pr_uuid)
+    if not pr:
+        raise HTTPException(status_code=404, detail="Pipeline run not found")
+
+    _ensure_pipeline_run_access(db, pr, user)
+
+    created_ids: List[str] = []
+    safety = 0
+
+    while True:
+        safety += 1
+        if safety > 50:
+            raise HTTPException(status_code=500, detail="Safety stop: too many pipeline iterations")
+
+        pr = db.get(PipelineRun, pr_uuid)
+        if not pr:
+            raise HTTPException(status_code=404, detail="Pipeline run not found")
+
+        if (pr.status or "").lower() == "completed":
+            steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
+            return PipelineExecuteAllOut(ok=True, pipeline_run=_run_to_out(pr, steps), created_run_ids=created_ids)
+
+        pr2, steps, created = _execute_one_step(db, pr, user)
+        if created:
+            created_ids.append(created)
+
+        if (pr2.status or "").lower() == "completed":
+            return PipelineExecuteAllOut(ok=True, pipeline_run=_run_to_out(pr2, steps), created_run_ids=created_ids)

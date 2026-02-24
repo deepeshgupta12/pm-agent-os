@@ -58,3 +58,9 @@ class PipelineNextOut(BaseModel):
     ok: bool = True
     pipeline_run: PipelineRunOut
     created_run_id: Optional[str] = None
+
+
+class PipelineExecuteAllOut(BaseModel):
+    ok: bool = True
+    pipeline_run: PipelineRunOut
+    created_run_ids: List[str] = Field(default_factory=list)
