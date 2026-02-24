@@ -44,6 +44,14 @@ class Workspace(Base):
     owner: Mapped["User"] = relationship(back_populates="workspaces")
     runs: Mapped[List["Run"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
 
+    # Pipelines
+    pipeline_templates: Mapped[List["PipelineTemplate"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+    pipeline_runs: Mapped[List["PipelineRun"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+
 
 class AgentDefinition(Base):
     __tablename__ = "agent_definitions"
@@ -89,6 +97,9 @@ class Run(Base):
 
     artifacts: Mapped[List["Artifact"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     evidence_items: Mapped[List["Evidence"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+
+    # Pipeline linkage (optional, filled when a pipeline step triggers a run)
+    pipeline_steps: Mapped[List["PipelineStep"]] = relationship(back_populates="run")
 
 
 class Artifact(Base):
@@ -148,3 +159,92 @@ class RefreshToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     user: Mapped["User"] = relationship(back_populates="refresh_tokens")
+
+
+# ------------------------
+# Pipelines (V1)
+# ------------------------
+
+class PipelineTemplate(Base):
+    """
+    A reusable pipeline definition (JSON) within a workspace.
+
+    definition_json format example:
+    {
+      "steps": [
+        {"agent_id":"discovery","name":"Discovery","inputs":["goal","context"]},
+        {"agent_id":"strategy_memo","name":"Strategy","also_include_prev_artifact": true},
+        {"agent_id":"prd","name":"PRD","also_include_prev_artifact": true}
+      ]
+    }
+    """
+    __tablename__ = "pipeline_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=False, index=True)
+
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    definition_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="pipeline_templates")
+    runs: Mapped[List["PipelineRun"]] = relationship(back_populates="template", cascade="all, delete-orphan")
+
+
+class PipelineRun(Base):
+    """
+    An execution instance of a pipeline template.
+    """
+    __tablename__ = "pipeline_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=False, index=True)
+    template_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("pipeline_templates.id"), nullable=False, index=True)
+
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="created")  # created|running|completed|failed|canceled
+    current_step_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    input_payload: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)  # initial pipeline inputs
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="pipeline_runs")
+    template: Mapped["PipelineTemplate"] = relationship(back_populates="runs")
+    steps: Mapped[List["PipelineStep"]] = relationship(back_populates="pipeline_run", cascade="all, delete-orphan")
+
+
+class PipelineStep(Base):
+    """
+    A single step within a pipeline run.
+    Each step may create exactly one Run (our existing run engine).
+    """
+    __tablename__ = "pipeline_steps"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    pipeline_run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("pipeline_runs.id"), nullable=False, index=True)
+
+    step_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    step_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    agent_id: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    input_payload: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="created")  # created|running|completed|failed|skipped
+
+    run_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id"), nullable=True, index=True)
+
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    pipeline_run: Mapped["PipelineRun"] = relationship(back_populates="steps")
+    run: Mapped[Optional["Run"]] = relationship(back_populates="pipeline_steps")
