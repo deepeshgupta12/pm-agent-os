@@ -42,11 +42,15 @@ class PipelineStepOut(BaseModel):
     input_payload: Dict[str, Any]
     run_id: Optional[str] = None
 
-    # Step 16B:
-    # True when pipeline prev-artifact context was attached to the step's run
-    # via Evidence(source_name='pipeline_prev_artifact').
-    # Null when run_id is null (step not executed yet).
+    # Existing flag (Step 17A+)
     prev_context_attached: Optional[bool] = None
+
+    # Step 18: auto-regenerate status + latest artifact metadata
+    auto_regenerated: Optional[bool] = None
+    latest_artifact_id: Optional[str] = None
+    latest_artifact_version: Optional[int] = None
+    latest_artifact_type: Optional[str] = None
+    latest_artifact_title: Optional[str] = None
 
 
 class PipelineRunOut(BaseModel):
