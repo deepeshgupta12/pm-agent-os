@@ -11,6 +11,8 @@ import {
   TextInput,
   Textarea,
   Title,
+  NumberInput,
+  Divider,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import type { Artifact, Evidence, Run } from "../types";
@@ -57,6 +59,12 @@ export default function RunDetailPage() {
   const [excerpt, setExcerpt] = useState("Evidence excerpt…");
   const [metaJson, setMetaJson] = useState("{}");
   const [creatingEvidence, setCreatingEvidence] = useState(false);
+
+  // Auto evidence (NEW)
+  const [autoQuery, setAutoQuery] = useState("");
+  const [autoK, setAutoK] = useState<number>(6);
+  const [autoAlpha, setAutoAlpha] = useState<number>(0.65);
+  const [autoLoading, setAutoLoading] = useState(false);
 
   // Regenerate
   const [regenLoading, setRegenLoading] = useState(false);
@@ -156,6 +164,33 @@ export default function RunDetailPage() {
     await loadAll();
   }
 
+  async function autoAddEvidence() {
+    if (!autoQuery.trim()) {
+      setErr("Enter a query to auto-add evidence.");
+      return;
+    }
+    setAutoLoading(true);
+    setErr(null);
+
+    const res = await apiFetch<Evidence[]>(`/runs/${rid}/evidence/auto`, {
+      method: "POST",
+      body: JSON.stringify({
+        query: autoQuery.trim(),
+        k: autoK,
+        alpha: autoAlpha,
+      }),
+    });
+
+    setAutoLoading(false);
+
+    if (!res.ok) {
+      setErr(`Auto evidence failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    await loadAll();
+  }
+
   async function regenerate() {
     setRegenLoading(true);
     setErr(null);
@@ -207,11 +242,7 @@ export default function RunDetailPage() {
             {run.output_summary ? <Text c="dimmed">{run.output_summary}</Text> : null}
 
             <Group gap="sm">
-              <Button
-                onClick={regenerate}
-                loading={regenLoading}
-                disabled={evidence.length === 0}
-              >
+              <Button onClick={regenerate} loading={regenLoading} disabled={evidence.length === 0}>
                 Regenerate using evidence
               </Button>
               <Text size="sm" c="dimmed">
@@ -248,6 +279,47 @@ export default function RunDetailPage() {
           <Text c="red">{err}</Text>
         </Card>
       )}
+
+      {/* NEW: Auto-add evidence card */}
+      <Card withBorder>
+        <Stack gap="sm">
+          <Text fw={700}>Auto-add Evidence (from Retrieval)</Text>
+          <Text size="sm" c="dimmed">
+            Provide a query. We’ll fetch top retrieval chunks (docs/issues/manual) and attach them as evidence.
+          </Text>
+
+          <Divider />
+
+          <TextInput
+            label="Query"
+            value={autoQuery}
+            onChange={(e) => setAutoQuery(e.currentTarget.value)}
+            placeholder='e.g., "Issue #1 github integration" or "refresh tokens"'
+          />
+
+          <Group grow>
+            <NumberInput
+              label="Top K"
+              value={autoK}
+              min={1}
+              max={20}
+              onChange={(v) => setAutoK(Number(v) || 6)}
+            />
+            <NumberInput
+              label="Alpha (vector weight)"
+              value={autoAlpha}
+              min={0}
+              max={1}
+              step={0.05}
+              onChange={(v) => setAutoAlpha(Number(v) || 0.65)}
+            />
+          </Group>
+
+          <Button onClick={autoAddEvidence} loading={autoLoading}>
+            Fetch & attach evidence
+          </Button>
+        </Stack>
+      </Card>
 
       <Card withBorder>
         <Stack gap="sm">
