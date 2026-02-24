@@ -11,6 +11,7 @@ import {
   Title,
   SimpleGrid,
   Divider,
+  Badge,
 } from "@mantine/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -32,6 +33,10 @@ export default function ArtifactDetailPage() {
   const [saving, setSaving] = useState(false);
   const [newVerLoading, setNewVerLoading] = useState(false);
   const [copyMsg, setCopyMsg] = useState<string | null>(null);
+  const [publishing, setPublishing] = useState(false);
+  const [unpublishing, setUnpublishing] = useState(false);
+
+  const isFinal = status === "final";
 
   async function load() {
     setErr(null);
@@ -47,6 +52,7 @@ export default function ArtifactDetailPage() {
   }
 
   async function saveInPlace() {
+    if (isFinal) return;
     setSaving(true);
     setErr(null);
 
@@ -61,12 +67,11 @@ export default function ArtifactDetailPage() {
       setErr(`Save failed: ${res.status} ${res.error}`);
       return;
     }
-
     setArt(res.data);
   }
 
   async function saveNewVersion() {
-    if (!art) return;
+    if (!art || isFinal) return;
     setNewVerLoading(true);
     setErr(null);
 
@@ -90,6 +95,50 @@ export default function ArtifactDetailPage() {
     window.history.replaceState({}, "", `/artifacts/${res.data.id}`);
   }
 
+  async function publish() {
+    setPublishing(true);
+    setErr(null);
+
+    const res = await apiFetch<Artifact>(`/artifacts/${aid}/publish`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+
+    setPublishing(false);
+
+    if (!res.ok) {
+      setErr(`Publish failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setArt(res.data);
+    setTitle(res.data.title);
+    setContentMd(res.data.content_md);
+    setStatus(res.data.status);
+  }
+
+  async function unpublish() {
+    setUnpublishing(true);
+    setErr(null);
+
+    const res = await apiFetch<Artifact>(`/artifacts/${aid}/unpublish`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+
+    setUnpublishing(false);
+
+    if (!res.ok) {
+      setErr(`Unpublish failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setArt(res.data);
+    setTitle(res.data.title);
+    setContentMd(res.data.content_md);
+    setStatus(res.data.status);
+  }
+
   async function copyMarkdown() {
     try {
       await navigator.clipboard.writeText(contentMd);
@@ -102,8 +151,6 @@ export default function ArtifactDetailPage() {
   }
 
   function exportPdf() {
-    // Opens the server endpoint that returns a PDF attachment.
-    // Cookies will be sent automatically by the browser for same-site localhost.
     window.open(`${API_BASE}/artifacts/${aid}/export/pdf`, "_blank");
   }
 
@@ -132,24 +179,38 @@ export default function ArtifactDetailPage() {
         <Card withBorder>
           <Stack gap="sm">
             <Group justify="space-between">
-              <Text fw={700}>
-                {art.type} · v{art.version} · {art.logical_key}
-              </Text>
+              <Group gap="sm">
+                <Text fw={700}>
+                  {art.type} · v{art.version} · {art.logical_key}
+                </Text>
+                <Badge>{status}</Badge>
+                {isFinal ? <Badge color="green">locked</Badge> : null}
+              </Group>
               <Text size="xs" c="dimmed">
                 {art.id}
               </Text>
             </Group>
 
             <Group grow>
-              <TextInput label="Title" value={title} onChange={(e) => setTitle(e.currentTarget.value)} />
-              <TextInput label="Status" value={status} onChange={(e) => setStatus(e.currentTarget.value)} />
+              <TextInput
+                label="Title"
+                value={title}
+                onChange={(e) => setTitle(e.currentTarget.value)}
+                disabled={isFinal}
+              />
+              <TextInput
+                label="Status"
+                value={status}
+                onChange={(e) => setStatus(e.currentTarget.value)}
+                disabled
+              />
             </Group>
 
             <Group>
-              <Button onClick={saveInPlace} loading={saving}>
+              <Button onClick={saveInPlace} loading={saving} disabled={isFinal}>
                 Save (same version)
               </Button>
-              <Button variant="light" onClick={saveNewVersion} loading={newVerLoading}>
+              <Button variant="light" onClick={saveNewVersion} loading={newVerLoading} disabled={isFinal}>
                 Save as new version
               </Button>
               <Button variant="default" onClick={copyMarkdown}>
@@ -158,6 +219,17 @@ export default function ArtifactDetailPage() {
               <Button variant="default" onClick={exportPdf}>
                 Export PDF
               </Button>
+
+              {!isFinal ? (
+                <Button color="green" onClick={publish} loading={publishing}>
+                  Publish (final)
+                </Button>
+              ) : (
+                <Button color="yellow" onClick={unpublish} loading={unpublishing}>
+                  Unpublish (back to draft)
+                </Button>
+              )}
+
               {copyMsg ? (
                 <Text size="sm" c="dimmed">
                   {copyMsg}
@@ -175,6 +247,7 @@ export default function ArtifactDetailPage() {
                   minRows={18}
                   value={contentMd}
                   onChange={(e) => setContentMd(e.currentTarget.value)}
+                  disabled={isFinal}
                 />
               </div>
 
@@ -187,6 +260,12 @@ export default function ArtifactDetailPage() {
                 </Card>
               </div>
             </SimpleGrid>
+
+            {isFinal ? (
+              <Text size="sm" c="dimmed">
+                This artifact is published (final) and locked. Unpublish to edit.
+              </Text>
+            ) : null}
           </Stack>
         </Card>
       ) : (

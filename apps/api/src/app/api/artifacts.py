@@ -11,11 +11,34 @@ from app.schemas.core import ArtifactCreateIn, ArtifactOut, ArtifactUpdateIn, Ar
 
 router = APIRouter(tags=["artifacts"])
 
+ALLOWED_STATUSES = {"draft", "in_review", "final"}
+
 
 def _ensure_run_access(db: Session, run: Run, user: User) -> None:
     ws = db.get(Workspace, run.workspace_id)
     if not ws or ws.owner_user_id != user.id:
         raise HTTPException(status_code=404, detail="Run not found")
+
+
+def _ensure_artifact_access(db: Session, art: Artifact, user: User) -> Run:
+    run = db.get(Run, art.run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    _ensure_run_access(db, run, user)
+    return run
+
+
+def _to_out(a: Artifact) -> ArtifactOut:
+    return ArtifactOut(
+        id=str(a.id),
+        run_id=str(a.run_id),
+        type=a.type,
+        title=a.title,
+        content_md=a.content_md,
+        logical_key=a.logical_key,
+        version=a.version,
+        status=a.status,
+    )
 
 
 @router.post("/runs/{run_id}/artifacts", response_model=ArtifactOut)
@@ -25,12 +48,12 @@ def create_artifact(run_id: str, payload: ArtifactCreateIn, db: Session = Depend
         raise HTTPException(status_code=404, detail="Run not found")
     _ensure_run_access(db, run, user)
 
-    # version = max version for logical_key + 1
     max_ver = db.execute(
         select(func.max(Artifact.version)).where(Artifact.run_id == run.id, Artifact.logical_key == payload.logical_key)
     ).scalar_one_or_none()
     next_ver = int(max_ver or 0) + 1
 
+    status = "draft"
     art = Artifact(
         run_id=run.id,
         type=payload.type,
@@ -38,22 +61,12 @@ def create_artifact(run_id: str, payload: ArtifactCreateIn, db: Session = Depend
         content_md=payload.content_md or "",
         logical_key=payload.logical_key,
         version=next_ver,
-        status="draft",
+        status=status,
     )
     db.add(art)
     db.commit()
     db.refresh(art)
-
-    return ArtifactOut(
-        id=str(art.id),
-        run_id=str(art.run_id),
-        type=art.type,
-        title=art.title,
-        content_md=art.content_md,
-        logical_key=art.logical_key,
-        version=art.version,
-        status=art.status,
-    )
+    return _to_out(art)
 
 
 @router.get("/runs/{run_id}/artifacts", response_model=list[ArtifactOut])
@@ -64,19 +77,7 @@ def list_artifacts(run_id: str, db: Session = Depends(get_db), user: User = Depe
     _ensure_run_access(db, run, user)
 
     arts = db.execute(select(Artifact).where(Artifact.run_id == run.id).order_by(Artifact.created_at.desc())).scalars().all()
-    return [
-        ArtifactOut(
-            id=str(a.id),
-            run_id=str(a.run_id),
-            type=a.type,
-            title=a.title,
-            content_md=a.content_md,
-            logical_key=a.logical_key,
-            version=a.version,
-            status=a.status,
-        )
-        for a in arts
-    ]
+    return [_to_out(a) for a in arts]
 
 
 @router.get("/artifacts/{artifact_id}", response_model=ArtifactOut)
@@ -84,22 +85,8 @@ def get_artifact(artifact_id: str, db: Session = Depends(get_db), user: User = D
     art = db.get(Artifact, artifact_id)
     if not art:
         raise HTTPException(status_code=404, detail="Artifact not found")
-
-    run = db.get(Run, art.run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    _ensure_run_access(db, run, user)
-
-    return ArtifactOut(
-        id=str(art.id),
-        run_id=str(art.run_id),
-        type=art.type,
-        title=art.title,
-        content_md=art.content_md,
-        logical_key=art.logical_key,
-        version=art.version,
-        status=art.status,
-    )
+    _ensure_artifact_access(db, art, user)
+    return _to_out(art)
 
 
 @router.put("/artifacts/{artifact_id}", response_model=ArtifactOut)
@@ -107,11 +94,13 @@ def update_artifact(artifact_id: str, payload: ArtifactUpdateIn, db: Session = D
     art = db.get(Artifact, artifact_id)
     if not art:
         raise HTTPException(status_code=404, detail="Artifact not found")
+    _ensure_artifact_access(db, art, user)
 
-    run = db.get(Run, art.run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    _ensure_run_access(db, run, user)
+    if art.status == "final":
+        raise HTTPException(status_code=409, detail="Artifact is final and cannot be edited")
+
+    if payload.status is not None and payload.status not in ALLOWED_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid status")
 
     if payload.title is not None:
         art.title = payload.title
@@ -123,17 +112,7 @@ def update_artifact(artifact_id: str, payload: ArtifactUpdateIn, db: Session = D
     db.add(art)
     db.commit()
     db.refresh(art)
-
-    return ArtifactOut(
-        id=str(art.id),
-        run_id=str(art.run_id),
-        type=art.type,
-        title=art.title,
-        content_md=art.content_md,
-        logical_key=art.logical_key,
-        version=art.version,
-        status=art.status,
-    )
+    return _to_out(art)
 
 
 @router.post("/artifacts/{artifact_id}/versions", response_model=ArtifactOut)
@@ -141,11 +120,13 @@ def new_artifact_version(artifact_id: str, payload: ArtifactNewVersionIn, db: Se
     art = db.get(Artifact, artifact_id)
     if not art:
         raise HTTPException(status_code=404, detail="Artifact not found")
+    _ensure_artifact_access(db, art, user)
 
-    run = db.get(Run, art.run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    _ensure_run_access(db, run, user)
+    if art.status == "final":
+        raise HTTPException(status_code=409, detail="Artifact is final; unpublish or create a new draft from prior version")
+
+    if payload.status not in ALLOWED_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid status")
 
     max_ver = db.execute(
         select(func.max(Artifact.version)).where(Artifact.run_id == art.run_id, Artifact.logical_key == art.logical_key)
@@ -164,14 +145,40 @@ def new_artifact_version(artifact_id: str, payload: ArtifactNewVersionIn, db: Se
     db.add(new_art)
     db.commit()
     db.refresh(new_art)
+    return _to_out(new_art)
 
-    return ArtifactOut(
-        id=str(new_art.id),
-        run_id=str(new_art.run_id),
-        type=new_art.type,
-        title=new_art.title,
-        content_md=new_art.content_md,
-        logical_key=new_art.logical_key,
-        version=new_art.version,
-        status=new_art.status,
-    )
+
+@router.post("/artifacts/{artifact_id}/publish", response_model=ArtifactOut)
+def publish_artifact(artifact_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    art = db.get(Artifact, artifact_id)
+    if not art:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    _ensure_artifact_access(db, art, user)
+
+    # must be latest version for this logical_key
+    max_ver = db.execute(
+        select(func.max(Artifact.version)).where(Artifact.run_id == art.run_id, Artifact.logical_key == art.logical_key)
+    ).scalar_one()
+    if art.version != int(max_ver):
+        raise HTTPException(status_code=409, detail="Only the latest version can be published. Create a new version first.")
+
+    art.status = "final"
+    db.add(art)
+    db.commit()
+    db.refresh(art)
+    return _to_out(art)
+
+
+@router.post("/artifacts/{artifact_id}/unpublish", response_model=ArtifactOut)
+def unpublish_artifact(artifact_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    art = db.get(Artifact, artifact_id)
+    if not art:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    _ensure_artifact_access(db, art, user)
+
+    # allowed for speed in V1
+    art.status = "draft"
+    db.add(art)
+    db.commit()
+    db.refresh(art)
+    return _to_out(art)
