@@ -17,6 +17,8 @@ import remarkGfm from "remark-gfm";
 import { apiFetch } from "../apiClient";
 import type { Artifact } from "../types";
 
+const API_BASE = import.meta.env.VITE_API_BASE_URL as string;
+
 export default function ArtifactDetailPage() {
   const { artifactId } = useParams();
   const aid = artifactId || "";
@@ -85,7 +87,6 @@ export default function ArtifactDetailPage() {
     setContentMd(res.data.content_md);
     setStatus(res.data.status);
 
-    // update URL to new artifact id
     window.history.replaceState({}, "", `/artifacts/${res.data.id}`);
   }
 
@@ -98,6 +99,12 @@ export default function ArtifactDetailPage() {
       setCopyMsg("Copy failed");
       setTimeout(() => setCopyMsg(null), 1200);
     }
+  }
+
+  function exportPdf() {
+    // Opens the server endpoint that returns a PDF attachment.
+    // Cookies will be sent automatically by the browser for same-site localhost.
+    window.open(`${API_BASE}/artifacts/${aid}/export/pdf`, "_blank");
   }
 
   useEffect(() => {
@@ -148,7 +155,14 @@ export default function ArtifactDetailPage() {
               <Button variant="default" onClick={copyMarkdown}>
                 Copy Markdown
               </Button>
-              {copyMsg ? <Text size="sm" c="dimmed">{copyMsg}</Text> : null}
+              <Button variant="default" onClick={exportPdf}>
+                Export PDF
+              </Button>
+              {copyMsg ? (
+                <Text size="sm" c="dimmed">
+                  {copyMsg}
+                </Text>
+              ) : null}
             </Group>
 
             <Divider />
