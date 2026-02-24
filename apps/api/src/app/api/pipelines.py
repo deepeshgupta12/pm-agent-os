@@ -115,7 +115,12 @@ def _template_to_out(t: PipelineTemplate) -> PipelineTemplateOut:
     )
 
 
-def _step_to_out(s: PipelineStep) -> PipelineStepOut:
+def _step_to_out(s: PipelineStep, prev_attached_map: Dict[str, bool]) -> PipelineStepOut:
+    run_id_str = str(s.run_id) if s.run_id else None
+    prev_ctx = None
+    if run_id_str:
+        prev_ctx = bool(prev_attached_map.get(run_id_str, False))
+
     return PipelineStepOut(
         id=str(s.id),
         pipeline_run_id=str(s.pipeline_run_id),
@@ -124,11 +129,38 @@ def _step_to_out(s: PipelineStep) -> PipelineStepOut:
         agent_id=s.agent_id,
         status=s.status,
         input_payload=s.input_payload or {},
-        run_id=str(s.run_id) if s.run_id else None,
+        run_id=run_id_str,
+        prev_context_attached=prev_ctx,
     )
 
+def _prev_context_attached_map(db: Session, steps: List[PipelineStep]) -> Dict[str, bool]:
+    """
+    One query to decide which step runs have pipeline prev-artifact evidence attached.
+    """
+    run_ids = [s.run_id for s in steps if s.run_id is not None and s.step_index > 0]
+    if not run_ids:
+        return {}
 
-def _run_to_out(pr: PipelineRun, steps: List[PipelineStep]) -> PipelineRunOut:
+    rows = (
+        db.execute(
+            select(Evidence.run_id)
+            .where(
+                Evidence.run_id.in_(run_ids),
+                Evidence.source_name == "pipeline_prev_artifact",
+            )
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+
+    # rows are UUIDs; map as str for easy lookup
+    return {str(rid): True for rid in rows}
+
+
+def _run_to_out(db: Session, pr: PipelineRun, steps: List[PipelineStep]) -> PipelineRunOut:
+    prev_map = _prev_context_attached_map(db, steps)
+
     return PipelineRunOut(
         id=str(pr.id),
         workspace_id=str(pr.workspace_id),
@@ -137,7 +169,7 @@ def _run_to_out(pr: PipelineRun, steps: List[PipelineStep]) -> PipelineRunOut:
         status=pr.status,
         current_step_index=pr.current_step_index,
         input_payload=pr.input_payload or {},
-        steps=[_step_to_out(s) for s in sorted(steps, key=lambda x: x.step_index)],
+        steps=[_step_to_out(s, prev_map) for s in sorted(steps, key=lambda x: x.step_index)],
     )
 
 
@@ -527,7 +559,7 @@ def start_pipeline_run(
     db.refresh(pr)
 
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
-    return _run_to_out(pr, steps)
+    return _run_to_out(db, pr, steps)
 
 
 @router.get("/pipelines/runs/{pipeline_run_id}", response_model=PipelineRunOut)
@@ -546,7 +578,7 @@ def get_pipeline_run(
         raise HTTPException(status_code=404, detail="Pipeline run not found")
 
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
-    return _run_to_out(pr, steps)
+    return _run_to_out(db, pr, steps)
 
 
 @router.post("/pipelines/runs/{pipeline_run_id}/next", response_model=PipelineNextOut)
@@ -576,7 +608,7 @@ def run_next_step(
         pr.status = "completed"
         db.add(pr)
         db.commit()
-        return PipelineNextOut(ok=True, pipeline_run=_run_to_out(pr, steps), created_run_id=None)
+        return PipelineNextOut(ok=True, pipeline_run=_run_to_out(db, pr, steps), created_run_id=None)
 
     step = steps[pr.current_step_index]
 
@@ -585,7 +617,7 @@ def run_next_step(
         db.add(pr)
         db.commit()
         steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
-        return PipelineNextOut(ok=True, pipeline_run=_run_to_out(pr, steps), created_run_id=None)
+        return PipelineNextOut(ok=True, pipeline_run=_run_to_out(db, pr, steps), created_run_id=None)
 
     created_run_id = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step)
 
@@ -597,7 +629,7 @@ def run_next_step(
     db.refresh(pr)
 
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
-    return PipelineNextOut(ok=True, pipeline_run=_run_to_out(pr, steps), created_run_id=created_run_id)
+    return PipelineNextOut(ok=True, pipeline_run=_run_to_out(db, pr, steps), created_run_id=created_run_id)
 
 
 @router.post("/pipelines/runs/{pipeline_run_id}/execute-all", response_model=PipelineExecuteAllOut)
@@ -652,6 +684,6 @@ def execute_all_steps(
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
     return PipelineExecuteAllOut(
         ok=True,
-        pipeline_run=_run_to_out(pr, steps),
+        pipeline_run=_run_to_out(db, pr, steps),
         created_run_ids=created_run_ids,
     )
