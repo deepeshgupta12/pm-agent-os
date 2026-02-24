@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -22,6 +22,7 @@ from app.db.models import (
 from app.schemas.pipelines import (
     PipelineTemplateIn,
     PipelineTemplateOut,
+    PipelineTemplatesSeedOut,
     PipelineRunCreateIn,
     PipelineRunOut,
     PipelineStepOut,
@@ -29,6 +30,65 @@ from app.schemas.pipelines import (
 )
 
 router = APIRouter(tags=["pipelines"])
+
+
+# -------------------------
+# Canonical templates (V1)
+# -------------------------
+CANONICAL_PIPELINES: List[Dict[str, Any]] = [
+    {
+        "key": "discovery_strategy_prd",
+        "name": "Discovery → Strategy → PRD",
+        "description": "Go from discovery insights to a strategy memo and a PRD.",
+        "definition_json": {
+            "version": "v1",
+            "steps": [
+                {"name": "Discovery", "agent_id": "discovery"},
+                {"name": "Strategy", "agent_id": "strategy_memo"},
+                {"name": "PRD", "agent_id": "prd"},
+            ],
+        },
+    },
+    {
+        "key": "prd_ux_feasibility",
+        "name": "PRD → UX → Feasibility",
+        "description": "Turn a PRD into UX spec and feasibility/tech brief.",
+        "definition_json": {
+            "version": "v1",
+            "steps": [
+                {"name": "PRD", "agent_id": "prd"},
+                {"name": "UX", "agent_id": "ux_spec"},
+                {"name": "Feasibility", "agent_id": "tech_brief"},
+            ],
+        },
+    },
+    {
+        "key": "analytics_qa_launch",
+        "name": "Analytics → QA → Launch",
+        "description": "Use analytics to plan QA coverage and produce a launch plan.",
+        "definition_json": {
+            "version": "v1",
+            "steps": [
+                {"name": "Analytics", "agent_id": "analytics_experiment"},
+                {"name": "QA", "agent_id": "qa_suite"},
+                {"name": "Launch", "agent_id": "launch_plan"},
+            ],
+        },
+    },
+    {
+        "key": "launch_monitoring_stakeholder",
+        "name": "Launch → Monitoring → Stakeholder",
+        "description": "Post-launch workflow: monitoring report and stakeholder update.",
+        "definition_json": {
+            "version": "v1",
+            "steps": [
+                {"name": "Launch", "agent_id": "launch_plan"},
+                {"name": "Monitoring", "agent_id": "health_report"},
+                {"name": "Stakeholder", "agent_id": "stakeholder_update"},
+            ],
+        },
+    },
+]
 
 
 def _ensure_workspace_access(db: Session, workspace_id: str, user: User) -> Workspace:
@@ -74,6 +134,81 @@ def _run_to_out(pr: PipelineRun, steps: List[PipelineStep]) -> PipelineRunOut:
     )
 
 
+def _validate_pipeline_definition(db: Session, steps_def: Any) -> None:
+    if not isinstance(steps_def, list) or len(steps_def) == 0:
+        raise HTTPException(status_code=400, detail="Template has no steps")
+
+    for idx, sd in enumerate(steps_def):
+        agent_id = (sd or {}).get("agent_id")
+        if not agent_id:
+            raise HTTPException(status_code=400, detail=f"Invalid step at index {idx}: missing agent_id")
+
+        agent = db.get(AgentDefinition, agent_id)
+        if not agent:
+            raise HTTPException(status_code=400, detail=f"Invalid agent_id in pipeline step: {agent_id}")
+
+
+def _seed_canonical_templates_for_workspace(db: Session, ws: Workspace) -> Tuple[List[PipelineTemplate], List[PipelineTemplate]]:
+    """
+    Idempotent seed:
+    - if template with same name already exists in the workspace, we treat as existing
+    - otherwise create it
+    Returns (created, existing).
+    """
+    existing = db.execute(
+        select(PipelineTemplate).where(PipelineTemplate.workspace_id == ws.id)
+    ).scalars().all()
+
+    by_name = {t.name.strip().lower(): t for t in existing}
+
+    created: List[PipelineTemplate] = []
+    existing_out: List[PipelineTemplate] = []
+
+    for tpl in CANONICAL_PIPELINES:
+        name = str(tpl["name"]).strip()
+        key = name.lower()
+        if key in by_name:
+            existing_out.append(by_name[key])
+            continue
+
+        definition = tpl.get("definition_json") or {}
+        steps_def = definition.get("steps") or []
+        _validate_pipeline_definition(db, steps_def)
+
+        t = PipelineTemplate(
+            workspace_id=ws.id,
+            name=name,
+            description=str(tpl.get("description") or ""),
+            definition_json=definition,
+        )
+        db.add(t)
+        db.commit()
+        db.refresh(t)
+        created.append(t)
+
+    return created, existing_out
+
+
+@router.post("/workspaces/{workspace_id}/pipelines/templates/seed", response_model=PipelineTemplatesSeedOut)
+def seed_pipeline_templates(
+    workspace_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    ws = _ensure_workspace_access(db, workspace_id, user)
+
+    created, existing = _seed_canonical_templates_for_workspace(db, ws)
+
+    return PipelineTemplatesSeedOut(
+        ok=True,
+        workspace_id=str(ws.id),
+        created_count=len(created),
+        existing_count=len(existing),
+        created_template_ids=[str(t.id) for t in created],
+        existing_template_ids=[str(t.id) for t in existing],
+    )
+
+
 @router.post("/workspaces/{workspace_id}/pipelines/templates", response_model=PipelineTemplateOut)
 def create_pipeline_template(
     workspace_id: str,
@@ -82,6 +217,10 @@ def create_pipeline_template(
     user: User = Depends(require_user),
 ):
     ws = _ensure_workspace_access(db, workspace_id, user)
+
+    definition = payload.definition_json or {}
+    steps_def = definition.get("steps") or []
+    _validate_pipeline_definition(db, steps_def)
 
     t = PipelineTemplate(
         workspace_id=ws.id,
@@ -103,7 +242,9 @@ def list_pipeline_templates(
 ):
     ws = _ensure_workspace_access(db, workspace_id, user)
     items = db.execute(
-        select(PipelineTemplate).where(PipelineTemplate.workspace_id == ws.id).order_by(PipelineTemplate.created_at.desc())
+        select(PipelineTemplate)
+        .where(PipelineTemplate.workspace_id == ws.id)
+        .order_by(PipelineTemplate.created_at.desc())
     ).scalars().all()
     return [_template_to_out(t) for t in items]
 
@@ -124,8 +265,7 @@ def start_pipeline_run(
 
     definition = t.definition_json or {}
     steps_def = definition.get("steps") or []
-    if not isinstance(steps_def, list) or len(steps_def) == 0:
-        raise HTTPException(status_code=400, detail="Template has no steps")
+    _validate_pipeline_definition(db, steps_def)
 
     pr = PipelineRun(
         workspace_id=ws.id,
@@ -147,7 +287,7 @@ def start_pipeline_run(
         if not agent_id:
             raise HTTPException(status_code=400, detail=f"Invalid step at index {idx}: missing agent_id")
 
-        # Validate agent exists
+        # Validate agent exists (already validated, but keep it safe)
         agent = db.get(AgentDefinition, agent_id)
         if not agent:
             raise HTTPException(status_code=400, detail=f"Invalid agent_id in pipeline step: {agent_id}")
@@ -216,7 +356,11 @@ def run_next_step(
     if not ws or ws.owner_user_id != user.id:
         raise HTTPException(status_code=404, detail="Pipeline run not found")
 
-    steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id).order_by(PipelineStep.step_index.asc())).scalars().all()
+    steps = db.execute(
+        select(PipelineStep)
+        .where(PipelineStep.pipeline_run_id == pr.id)
+        .order_by(PipelineStep.step_index.asc())
+    ).scalars().all()
     if not steps:
         raise HTTPException(status_code=400, detail="Pipeline has no steps")
 
@@ -234,14 +378,13 @@ def run_next_step(
         db.commit()
         return PipelineNextOut(ok=True, pipeline_run=_run_to_out(pr, steps), created_run_id=None)
 
-    # Create a normal Run for this step using existing model directly
+    # Create a normal Run for this step
     step.status = "running"
     step.started_at = datetime.utcnow()
     db.add(step)
     db.commit()
     db.refresh(step)
 
-    # Build run input: carry pipeline input + previous step artifact ids if any
     run_input: Dict[str, Any] = dict(pr.input_payload or {})
     run_input["_pipeline"] = {
         "pipeline_run_id": str(pr.id),
@@ -250,7 +393,6 @@ def run_next_step(
         "template_id": str(pr.template_id),
     }
 
-    # Link previous step run/artifact
     if step.step_index > 0:
         prev = steps[step.step_index - 1]
         run_input["_pipeline"]["prev_run_id"] = str(prev.run_id) if prev.run_id else None
@@ -266,7 +408,6 @@ def run_next_step(
     db.commit()
     db.refresh(new_run)
 
-    # Mark step completed and link
     step.run_id = new_run.id
     step.status = "completed"
     step.completed_at = datetime.utcnow()

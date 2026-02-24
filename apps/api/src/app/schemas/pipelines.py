@@ -18,6 +18,15 @@ class PipelineTemplateOut(BaseModel):
     definition_json: Dict[str, Any]
 
 
+class PipelineTemplatesSeedOut(BaseModel):
+    ok: bool = True
+    workspace_id: str
+    created_count: int
+    existing_count: int
+    created_template_ids: List[str] = Field(default_factory=list)
+    existing_template_ids: List[str] = Field(default_factory=list)
+
+
 class PipelineRunCreateIn(BaseModel):
     template_id: str
     input_payload: Dict[str, Any] = Field(default_factory=dict)
