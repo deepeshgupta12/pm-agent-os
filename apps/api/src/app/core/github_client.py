@@ -41,7 +41,11 @@ class GitHubClient:
                 body = r.json()
             except Exception:
                 body = {"message": r.text}
-            raise GitHubAPIError(r.status_code, body.get("message", "GitHub API error"), details={"debug": debug, "body": body})
+            raise GitHubAPIError(
+                r.status_code,
+                body.get("message", "GitHub API error"),
+                details={"debug": debug, "body": body},
+            )
 
         return r.json(), debug
 
@@ -54,3 +58,12 @@ class GitHubClient:
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         url = f"{self.base}/repos/{owner}/{repo}/pulls"
         return self._get_json(url, params={"state": state, "per_page": per_page, "sort": "updated"})
+
+    def list_issues(
+        self, owner: str, repo: str, state: str = "all", per_page: int = 50
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """
+        GitHub issues API returns BOTH issues and PRs. We'll filter PRs out at ingestion time.
+        """
+        url = f"{self.base}/repos/{owner}/{repo}/issues"
+        return self._get_json(url, params={"state": state, "per_page": per_page, "sort": "updated", "direction": "desc"})
