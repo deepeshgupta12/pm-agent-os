@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Badge, Button, Card, Group, Stack, Text, Title } from "@mantine/core";
 import { apiFetch } from "../apiClient";
-import type { PipelineRun, PipelineStep } from "../types";
+import type { PipelineRun, PipelineStep, Run } from "../types";
 
 type NextResponse = {
   ok: boolean;
@@ -24,6 +24,12 @@ function stepColor(status: string): string {
   return "gray";
 }
 
+function hasPrevArtifact(run: Run): boolean {
+  const p: any = (run as any)?.input_payload;
+  const pipeline = p?._pipeline;
+  return !!pipeline?.prev_artifact;
+}
+
 export default function PipelineRunDetailPage() {
   const { pipelineRunId } = useParams();
   const prid = pipelineRunId || "";
@@ -36,6 +42,10 @@ export default function PipelineRunDetailPage() {
 
   const [lastCreatedRunId, setLastCreatedRunId] = useState<string | null>(null);
   const [createdRunIds, setCreatedRunIds] = useState<string[]>([]);
+
+  // map: run_id -> whether _pipeline.prev_artifact exists
+  const [prevCtxByRunId, setPrevCtxByRunId] = useState<Record<string, boolean>>({});
+  const [prevCtxLoadingByRunId, setPrevCtxLoadingByRunId] = useState<Record<string, boolean>>({});
 
   const canExecute = useMemo(() => {
     if (!pr) return false;
@@ -59,6 +69,35 @@ export default function PipelineRunDetailPage() {
     setPr(res.data);
   }
 
+  async function hydratePrevContextFlags(pipelineRun: PipelineRun) {
+    const steps = pipelineRun.steps || [];
+    const targets = steps.filter((s) => s.run_id && s.step_index > 0).map((s) => s.run_id as string);
+
+    // Avoid refetching run ids we already know
+    const todo = targets.filter((rid) => prevCtxByRunId[rid] === undefined && !prevCtxLoadingByRunId[rid]);
+    if (todo.length === 0) return;
+
+    // mark loading
+    setPrevCtxLoadingByRunId((prev) => {
+      const next = { ...prev };
+      for (const rid of todo) next[rid] = true;
+      return next;
+    });
+
+    // fetch sequentially (small N) to keep it simple and safe
+    for (const rid of todo) {
+      const r = await apiFetch<Run>(`/runs/${rid}`, { method: "GET" });
+      if (r.ok) {
+        const ok = hasPrevArtifact(r.data);
+        setPrevCtxByRunId((prev) => ({ ...prev, [rid]: ok }));
+      } else {
+        // if run load fails, treat as unknown/false
+        setPrevCtxByRunId((prev) => ({ ...prev, [rid]: false }));
+      }
+      setPrevCtxLoadingByRunId((prev) => ({ ...prev, [rid]: false }));
+    }
+  }
+
   async function executeNext() {
     if (!prid) return;
     setErr(null);
@@ -77,12 +116,16 @@ export default function PipelineRunDetailPage() {
     }
 
     setPr(res.data.pipeline_run);
+
     const rid = res.data.created_run_id ?? null;
     setLastCreatedRunId(rid);
 
     if (rid) {
       setCreatedRunIds((prev) => [rid, ...prev.filter((x) => x !== rid)]);
     }
+
+    // hydrate context flags for any newly completed steps
+    await hydratePrevContextFlags(res.data.pipeline_run);
   }
 
   async function executeAll() {
@@ -109,7 +152,6 @@ export default function PipelineRunDetailPage() {
       setLastCreatedRunId(ids[ids.length - 1] ?? null);
       setCreatedRunIds((prev) => {
         const merged = [...ids, ...prev];
-        // de-dupe preserve order
         const seen = new Set<string>();
         return merged.filter((x) => {
           if (seen.has(x)) return false;
@@ -118,12 +160,22 @@ export default function PipelineRunDetailPage() {
         });
       });
     }
+
+    // hydrate context flags for all steps now completed
+    await hydratePrevContextFlags(res.data.pipeline_run);
   }
 
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prid]);
+
+  // whenever pipeline run changes, attempt to hydrate flags
+  useEffect(() => {
+    if (!pr) return;
+    void hydratePrevContextFlags(pr);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pr?.id, pr?.steps?.map((s) => `${s.step_index}:${s.run_id}:${s.status}`).join("|")]);
 
   const workspaceId = pr?.workspace_id ?? "";
 
@@ -179,12 +231,7 @@ export default function PipelineRunDetailPage() {
               <Button onClick={executeNext} disabled={!canExecute} loading={execLoading}>
                 Execute next step
               </Button>
-              <Button
-                onClick={executeAll}
-                disabled={!canExecute}
-                loading={execAllLoading}
-                variant="light"
-              >
+              <Button onClick={executeAll} disabled={!canExecute} loading={execAllLoading} variant="light">
                 Execute all remaining
               </Button>
               <Button variant="light" onClick={load} loading={loading}>
@@ -243,33 +290,60 @@ export default function PipelineRunDetailPage() {
               <Text c="dimmed">No steps found in this pipeline run.</Text>
             ) : (
               <Stack gap="xs">
-                {pr.steps.map((s: PipelineStep) => (
-                  <Card key={s.id} withBorder>
-                    <Group justify="space-between" align="flex-start">
-                      <Stack gap={2}>
-                        <Group gap="sm">
-                          <Badge variant="light">#{s.step_index}</Badge>
-                          <Badge color={stepColor(s.status)}>{s.status}</Badge>
-                          <Text fw={700}>{s.step_name}</Text>
-                          <Text size="sm" c="dimmed">
-                            agent: {s.agent_id}
-                          </Text>
-                        </Group>
-                        <Text size="xs" c="dimmed">
-                          step_id={s.id}
-                        </Text>
-                      </Stack>
+                {pr.steps.map((s: PipelineStep) => {
+                  const rid = s.run_id || "";
+                  const ctxKnown = !!rid && prevCtxByRunId[rid] !== undefined;
+                  const ctxLoading = !!rid && !!prevCtxLoadingByRunId[rid];
+                  const ctxAttached = !!rid && !!prevCtxByRunId[rid];
 
-                      {s.run_id ? (
-                        <Button component={Link} to={`/runs/${s.run_id}`}>
-                          Open Run
-                        </Button>
-                      ) : (
-                        <Badge variant="outline">run_id: null</Badge>
-                      )}
-                    </Group>
-                  </Card>
-                ))}
+                  let ctxLabel = "Prev artifact context: N/A";
+                  if (s.step_index === 0) {
+                    ctxLabel = "Prev artifact context: N/A (step 0)";
+                  } else if (!s.run_id) {
+                    ctxLabel = "Prev artifact context: — (run not created yet)";
+                  } else if (ctxLoading) {
+                    ctxLabel = "Prev artifact context: checking…";
+                  } else if (ctxKnown && ctxAttached) {
+                    ctxLabel = "Prev artifact context attached ✅";
+                  } else if (ctxKnown && !ctxAttached) {
+                    ctxLabel = "Prev artifact context: not attached";
+                  } else {
+                    ctxLabel = "Prev artifact context: unknown";
+                  }
+
+                  return (
+                    <Card key={s.id} withBorder>
+                      <Group justify="space-between" align="flex-start">
+                        <Stack gap={4}>
+                          <Group gap="sm">
+                            <Badge variant="light">#{s.step_index}</Badge>
+                            <Badge color={stepColor(s.status)}>{s.status}</Badge>
+                            <Text fw={700}>{s.step_name}</Text>
+                            <Text size="sm" c="dimmed">
+                              agent: {s.agent_id}
+                            </Text>
+                          </Group>
+
+                          <Text size="xs" c="dimmed">
+                            step_id={s.id}
+                          </Text>
+
+                          <Text size="sm" c="dimmed">
+                            {ctxLabel}
+                          </Text>
+                        </Stack>
+
+                        {s.run_id ? (
+                          <Button component={Link} to={`/runs/${s.run_id}`}>
+                            Open Run
+                          </Button>
+                        ) : (
+                          <Badge variant="outline">run_id: null</Badge>
+                        )}
+                      </Group>
+                    </Card>
+                  );
+                })}
               </Stack>
             )}
           </Stack>
