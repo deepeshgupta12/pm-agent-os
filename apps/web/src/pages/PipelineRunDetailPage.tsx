@@ -238,6 +238,7 @@ export default function PipelineRunDetailPage() {
             ) : (
               <Stack gap="xs">
                 {pr.steps.map((s: PipelineStep) => {
+                  // Prev context label (existing)
                   let ctxLabel = "Prev artifact context: N/A";
                   if (s.step_index === 0) {
                     ctxLabel = "Prev artifact context: N/A (step 0)";
@@ -251,10 +252,27 @@ export default function PipelineRunDetailPage() {
                     ctxLabel = "Prev artifact context: unknown";
                   }
 
+                  // Regeneration label (new)
+                  let regenLabel = "Regeneration: —";
+                  if (s.step_index === 0) {
+                    regenLabel = "Regeneration: N/A (step 0)";
+                  } else if (!s.run_id) {
+                    regenLabel = "Regeneration: — (run not created yet)";
+                  } else if (s.auto_regenerated === true) {
+                    const v = s.latest_artifact_version ?? null;
+                    regenLabel = v ? `Regenerated ✅ (latest v${v})` : "Regenerated ✅";
+                  } else if (s.auto_regenerated === false) {
+                    regenLabel = "Regeneration: not regenerated";
+                  } else {
+                    regenLabel = "Regeneration: unknown";
+                  }
+
+                  const hasLatestArtifact = !!s.latest_artifact_id;
+
                   return (
                     <Card key={s.id} withBorder>
                       <Group justify="space-between" align="flex-start">
-                        <Stack gap={4}>
+                        <Stack gap={6}>
                           <Group gap="sm">
                             <Badge variant="light">#{s.step_index}</Badge>
                             <Badge color={stepColor(s.status)}>{s.status}</Badge>
@@ -262,6 +280,12 @@ export default function PipelineRunDetailPage() {
                             <Text size="sm" c="dimmed">
                               agent: {s.agent_id}
                             </Text>
+
+                            {s.auto_regenerated === true ? (
+                              <Badge color="green" variant="light">
+                                Regenerated ✅
+                              </Badge>
+                            ) : null}
                           </Group>
 
                           <Text size="xs" c="dimmed">
@@ -271,15 +295,38 @@ export default function PipelineRunDetailPage() {
                           <Text size="sm" c="dimmed">
                             {ctxLabel}
                           </Text>
+
+                          <Text size="sm" c="dimmed">
+                            {regenLabel}
+                          </Text>
+
+                          {hasLatestArtifact ? (
+                            <Text size="xs" c="dimmed">
+                              Latest artifact: {s.latest_artifact_title ?? "(untitled)"}{" "}
+                              {s.latest_artifact_type ? `(${s.latest_artifact_type})` : ""}
+                            </Text>
+                          ) : null}
                         </Stack>
 
-                        {s.run_id ? (
-                          <Button component={Link} to={`/runs/${s.run_id}`}>
-                            Open Run
-                          </Button>
-                        ) : (
-                          <Badge variant="outline">run_id: null</Badge>
-                        )}
+                        <Stack gap="xs" align="flex-end">
+                          {s.run_id ? (
+                            <Button component={Link} to={`/runs/${s.run_id}`}>
+                              Open Run
+                            </Button>
+                          ) : (
+                            <Badge variant="outline">run_id: null</Badge>
+                          )}
+
+                          {hasLatestArtifact ? (
+                            <Button
+                              component={Link}
+                              to={`/artifacts/${s.latest_artifact_id}`}
+                              variant="light"
+                            >
+                              Open Latest Artifact
+                            </Button>
+                          ) : null}
+                        </Stack>
                       </Group>
                     </Card>
                   );
