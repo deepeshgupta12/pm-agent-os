@@ -58,15 +58,17 @@ export default function RunDetailPage() {
   const [metaJson, setMetaJson] = useState("{}");
   const [creatingEvidence, setCreatingEvidence] = useState(false);
 
+  // Regenerate
+  const [regenLoading, setRegenLoading] = useState(false);
+
   const artifactTypeOptions = useMemo(
     () => ARTIFACT_TYPES.map((t) => ({ value: t, label: t })),
     []
   );
 
-  const autoArtifact = useMemo(() => {
+  const latestArtifact = useMemo(() => {
     if (artifacts.length === 0) return null;
-    // heuristic: newest is first (we fetch desc), use first
-    return artifacts[0];
+    return artifacts[0]; // we fetch newest first
   }, [artifacts]);
 
   async function loadAll() {
@@ -154,6 +156,26 @@ export default function RunDetailPage() {
     await loadAll();
   }
 
+  async function regenerate() {
+    setRegenLoading(true);
+    setErr(null);
+
+    const res = await apiFetch<Run>(`/runs/${rid}/regenerate`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+
+    setRegenLoading(false);
+
+    if (!res.ok) {
+      setErr(`Regenerate failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    // refresh everything (new artifact version expected)
+    await loadAll();
+  }
+
   useEffect(() => {
     if (!rid) return;
     void loadAll();
@@ -184,6 +206,21 @@ export default function RunDetailPage() {
 
             {run.output_summary ? <Text c="dimmed">{run.output_summary}</Text> : null}
 
+            <Group gap="sm">
+              <Button
+                onClick={regenerate}
+                loading={regenLoading}
+                disabled={evidence.length === 0}
+              >
+                Regenerate using evidence
+              </Button>
+              <Text size="sm" c="dimmed">
+                {evidence.length === 0
+                  ? "Add evidence first to enable regenerate."
+                  : `Uses ${evidence.length} evidence item(s). Creates a new artifact version.`}
+              </Text>
+            </Group>
+
             <Card withBorder>
               <Text fw={600} mb={6}>
                 Input payload
@@ -193,9 +230,9 @@ export default function RunDetailPage() {
               </pre>
             </Card>
 
-            {autoArtifact ? (
+            {latestArtifact ? (
               <Group>
-                <Button component={Link} to={`/artifacts/${autoArtifact.id}`}>
+                <Button component={Link} to={`/artifacts/${latestArtifact.id}`}>
                   Open latest artifact
                 </Button>
               </Group>
@@ -290,7 +327,11 @@ export default function RunDetailPage() {
               value={ekind}
               onChange={setEkind}
             />
-            <TextInput label="Source name" value={sourceName} onChange={(e) => setSourceName(e.currentTarget.value)} />
+            <TextInput
+              label="Source name"
+              value={sourceName}
+              onChange={(e) => setSourceName(e.currentTarget.value)}
+            />
           </Group>
 
           <TextInput
