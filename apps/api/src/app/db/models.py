@@ -24,8 +24,8 @@ class User(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
-    # relationships
     workspaces: Mapped[List["Workspace"]] = relationship(back_populates="owner", cascade="all, delete-orphan")
+    refresh_tokens: Mapped[List["RefreshToken"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class Workspace(Base):
@@ -46,18 +46,13 @@ class Workspace(Base):
 
 
 class AgentDefinition(Base):
-    """
-    Represents an agent 'capability' (one of the 16).
-    Seeded into DB for visibility + future customization.
-    """
     __tablename__ = "agent_definitions"
 
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # e.g., "prd"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     version: Mapped[str] = mapped_column(String(32), nullable=False, default="v0")
 
-    # JSON schema-like definitions for future. For V0, store minimal.
     input_schema: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     output_artifact_types: Mapped[List[str]] = mapped_column(JSONB, nullable=False, default=list)
 
@@ -79,7 +74,7 @@ class Run(Base):
 
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
 
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="created")  # created|running|completed|failed
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="created")
     input_payload: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
     output_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -103,17 +98,15 @@ class Artifact(Base):
 
     run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False, index=True)
 
-    type: Mapped[str] = mapped_column(String(64), nullable=False)  # e.g., "prd"
+    type: Mapped[str] = mapped_column(String(64), nullable=False)
     title: Mapped[str] = mapped_column(String(240), nullable=False, default="Untitled")
 
-    # Markdown content for V0
     content_md: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
-    # Versioning model: each row is one version; group by logical_key
-    logical_key: Mapped[str] = mapped_column(String(64), nullable=False)  # stable key within a run, e.g., "prd"
+    logical_key: Mapped[str] = mapped_column(String(64), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")  # draft|final
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")  # draft|in_review|final
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -130,13 +123,28 @@ class Evidence(Base):
 
     run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False, index=True)
 
-    # V0 minimal: evidence tied to a run; later we can tie to artifact + citations.
-    kind: Mapped[str] = mapped_column(String(32), nullable=False)  # metric|snippet|link
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
     source_name: Mapped[str] = mapped_column(String(120), nullable=False, default="manual")
-    source_ref: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)  # url/id
+    source_ref: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     excerpt: Mapped[str] = mapped_column(Text, nullable=False, default="")
     meta: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     run: Mapped["Run"] = relationship(back_populates="evidence_items")
+
+
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    user: Mapped["User"] = relationship(back_populates="refresh_tokens")

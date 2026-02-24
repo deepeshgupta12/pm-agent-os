@@ -7,26 +7,24 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file="../../.env", extra="ignore")
 
-    # Environment
     ENV: str = "dev"
 
-    # API
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8010
 
-    # CORS
     CORS_ORIGINS: str = "http://localhost:5174"
 
-    # Cookies
     COOKIE_SECURE: bool = False
     COOKIE_SAMESITE: str = "lax"  # lax|strict|none
 
-    # JWT
+    # Access token
     JWT_SECRET: str = "change_me"
     JWT_ALG: str = "HS256"
-    JWT_EXPIRES_MINUTES: int = 60
+    ACCESS_EXPIRES_MINUTES: int = 15
 
-    # Database
+    # Refresh token
+    REFRESH_EXPIRES_DAYS: int = 14
+
     DATABASE_URL: str = "postgresql+psycopg://pm_agent_os_user:pm_agent_os_password@localhost:5434/pm_agent_os"
 
     # OpenAI / LLM
