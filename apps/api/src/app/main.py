@@ -12,6 +12,7 @@ from app.api.agents import router as agents_router
 from app.api.runs import router as runs_router
 from app.api.artifacts import router as artifacts_router
 from app.api.evidence import router as evidence_router
+from app.api.export import router as export_router
 
 app = FastAPI(title="PM Agent OS API", version="0.0.1")
 
@@ -31,3 +32,4 @@ app.include_router(agents_router)
 app.include_router(runs_router)
 app.include_router(artifacts_router)
 app.include_router(evidence_router)
+app.include_router(export_router)
