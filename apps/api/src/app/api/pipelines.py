@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_user
@@ -20,6 +20,7 @@ from app.db.models import (
     PipelineStep,
     Run,
     Artifact,
+    Evidence,
 )
 from app.schemas.pipelines import (
     PipelineTemplateIn,
@@ -154,7 +155,9 @@ def _validate_pipeline_definition(db: Session, steps_def: Any) -> None:
             raise HTTPException(status_code=400, detail=f"Invalid agent_id in pipeline step: {agent_id}")
 
 
-def _seed_canonical_templates_for_workspace(db: Session, ws: Workspace) -> Tuple[List[PipelineTemplate], List[PipelineTemplate]]:
+def _seed_canonical_templates_for_workspace(
+    db: Session, ws: Workspace
+) -> Tuple[List[PipelineTemplate], List[PipelineTemplate]]:
     existing = db.execute(select(PipelineTemplate).where(PipelineTemplate.workspace_id == ws.id)).scalars().all()
     by_name = {t.name.strip().lower(): t for t in existing}
 
@@ -225,7 +228,7 @@ def _create_completed_run_with_artifact(
     input_payload: Dict[str, Any],
 ) -> Run:
     """
-    Mirrors apps/api/src/app/api/runs.py:create_run behavior:
+    Mirrors runs.py:create_run behavior:
     - creates Run
     - marks running
     - generates initial artifact
@@ -274,6 +277,52 @@ def _create_completed_run_with_artifact(
     return r
 
 
+def _auto_attach_prev_artifact_as_evidence(
+    db: Session,
+    new_run_id: uuid.UUID,
+    pipeline_run_id: uuid.UUID,
+    step_index: int,
+    step_name: str,
+    template_id: uuid.UUID,
+    prev_run_id: Optional[str],
+    prev_artifact: Dict[str, Any],
+) -> None:
+    """
+    Step 17A:
+    If _pipeline.prev_artifact exists, attach it as an Evidence row for the new run.
+    """
+    artifact_id = str(prev_artifact.get("artifact_id") or "").strip()
+    excerpt = (prev_artifact.get("content_md_excerpt") or "").strip()
+
+    if not artifact_id or not excerpt:
+        return
+
+    # Keep evidence excerpt reasonably sized for DB + prompts
+    safe_excerpt = excerpt[:2000].strip()
+
+    ev = Evidence(
+        run_id=new_run_id,
+        kind="snippet",
+        source_name="pipeline_prev_artifact",
+        source_ref=f"artifact:{artifact_id}",
+        excerpt=safe_excerpt,
+        meta={
+            "pipeline_run_id": str(pipeline_run_id),
+            "template_id": str(template_id),
+            "step_index": step_index,
+            "step_name": step_name,
+            "prev_run_id": prev_run_id,
+            "prev_artifact_id": artifact_id,
+            "prev_artifact_type": prev_artifact.get("type"),
+            "prev_artifact_title": prev_artifact.get("title"),
+            "prev_artifact_version": prev_artifact.get("version"),
+            "prev_artifact_status": prev_artifact.get("status"),
+        },
+    )
+    db.add(ev)
+    db.commit()
+
+
 def _execute_one_step(
     db: Session,
     ws: Workspace,
@@ -284,6 +333,7 @@ def _execute_one_step(
 ) -> str:
     """
     Executes exactly one pipeline step by creating a completed Run + artifact.
+    Step 17A: auto-add prev_artifact as evidence to the created run.
     Returns created run_id.
     """
     step.status = "running"
@@ -300,14 +350,19 @@ def _execute_one_step(
         "template_id": str(pr.template_id),
     }
 
+    prev_run_id: Optional[str] = None
+    prev_artifact: Optional[Dict[str, Any]] = None
+
     # Attach previous step context (run_id + latest artifact excerpt)
     if step.step_index > 0:
         prev_step = steps[step.step_index - 1]
-        run_input["_pipeline"]["prev_run_id"] = str(prev_step.run_id) if prev_step.run_id else None
+        prev_run_id = str(prev_step.run_id) if prev_step.run_id else None
+        run_input["_pipeline"]["prev_run_id"] = prev_run_id
 
         if prev_step.run_id:
             snap = _latest_artifact_snapshot(db, prev_step.run_id)
             if snap:
+                prev_artifact = snap
                 run_input["_pipeline"]["prev_artifact"] = snap
 
     # Create run + initial artifact (COMPLETED)
@@ -318,6 +373,19 @@ def _execute_one_step(
         agent_id=step.agent_id,
         input_payload=run_input,
     )
+
+    # Step 17A: auto-evidence
+    if prev_artifact is not None:
+        _auto_attach_prev_artifact_as_evidence(
+            db=db,
+            new_run_id=new_run.id,
+            pipeline_run_id=pr.id,
+            step_index=step.step_index,
+            step_name=step.step_name,
+            template_id=pr.template_id,
+            prev_run_id=prev_run_id,
+            prev_artifact=prev_artifact,
+        )
 
     # Mark step completed and link
     step.run_id = new_run.id
@@ -557,7 +625,6 @@ def execute_all_steps(
 
     created_run_ids: List[str] = []
 
-    # Execute remaining steps starting from current_step_index
     while pr.current_step_index < len(steps):
         step = steps[pr.current_step_index]
 
