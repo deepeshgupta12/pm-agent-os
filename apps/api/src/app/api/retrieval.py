@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, text as sql_text
 from sqlalchemy.orm import Session
 
@@ -98,6 +98,7 @@ def ingest_manual_markdown(
 @router.post("/documents/{document_id}/embed", response_model=EmbedResult)
 def embed_document_chunks(
     document_id: str,
+    force: bool = Query(default=False, description="If true, re-embed even if embeddings exist."),
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
@@ -117,20 +118,41 @@ def embed_document_chunks(
     if not chunks:
         raise HTTPException(status_code=400, detail="No chunks to embed")
 
-    # Doc-scoped idempotency: only consider embeddings for chunks in THIS document
     chunk_ids = [c.id for c in chunks]
-    existing_chunk_ids = set(
-        db.execute(
-            select(Embedding.chunk_id).where(
-                Embedding.model == settings.EMBEDDINGS_MODEL,
-                Embedding.chunk_id.in_(chunk_ids),
-            )
-        )
-        .scalars()
-        .all()
-    )
 
-    todo = [c for c in chunks if c.id not in existing_chunk_ids]
+    # 1) Repair/backfill: if an embedding exists (for this model) but embedding_vec is NULL,
+    #    fill embedding_vec from the stored JSON embedding.
+    repair_rows = db.execute(
+        sql_text(
+            """
+            UPDATE embeddings
+            SET embedding_vec = CAST(embedding AS vector)
+            WHERE model = :model
+              AND chunk_id = ANY(:chunk_ids)
+              AND embedding_vec IS NULL
+              AND embedding IS NOT NULL
+            """
+        ),
+        {"model": settings.EMBEDDINGS_MODEL, "chunk_ids": chunk_ids},
+    )
+    db.commit()
+
+    # 2) Determine which chunks still need embedding rows
+    if force:
+        todo = chunks
+    else:
+        existing_chunk_ids = set(
+            db.execute(
+                select(Embedding.chunk_id).where(
+                    Embedding.model == settings.EMBEDDINGS_MODEL,
+                    Embedding.chunk_id.in_(chunk_ids),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        todo = [c for c in chunks if c.id not in existing_chunk_ids]
+
     if not todo:
         return EmbedResult(document_id=str(doc.id), model=settings.EMBEDDINGS_MODEL, chunks_embedded=0)
 
@@ -145,7 +167,6 @@ def embed_document_chunks(
         db.commit()
         db.refresh(emb)
 
-        # IMPORTANT: do not use :v::vector (breaks bind parsing). Use CAST(:v AS vector)
         db.execute(
             sql_text("UPDATE embeddings SET embedding_vec = CAST(:v AS vector) WHERE id = :id"),
             {"v": vec, "id": str(emb.id)},
