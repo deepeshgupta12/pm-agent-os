@@ -79,8 +79,16 @@ export type PipelineStep = {
   input_payload: Record<string, unknown>;
   run_id?: string | null;
 
-  // Step 16B: computed server-side (null if run not created)
+  // Step 16B (server-side)
   prev_context_attached?: boolean | null;
+
+  // Step 19 (server-side, optional fields)
+  auto_regenerated?: boolean | null;
+
+  latest_artifact_id?: string | null;
+  latest_artifact_version?: number | null;
+  latest_artifact_type?: string | null;
+  latest_artifact_title?: string | null;
 };
 
 export type PipelineRun = {
@@ -92,4 +100,15 @@ export type PipelineRun = {
   current_step_index: number;
   input_payload: Record<string, unknown>;
   steps: PipelineStep[];
+};
+
+export type WorkspaceMember = {
+  user_id: string;
+  email: string;
+  role: "admin" | "member" | "viewer";
+};
+
+export type WorkspaceRole = {
+  workspace_id: string;
+  role: "admin" | "member" | "viewer";
 };

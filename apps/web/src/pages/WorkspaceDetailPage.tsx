@@ -9,34 +9,37 @@ import {
   Stack,
   Text,
   Textarea,
+  TextInput,
   Title,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
-import type { Agent, Run, Workspace } from "../types";
+import type { Agent, Run, Workspace, WorkspaceMember, WorkspaceRole } from "../types";
 
 export default function WorkspaceDetailPage() {
   const { workspaceId } = useParams();
   const wid = workspaceId || "";
 
   const [ws, setWs] = useState<Workspace | null>(null);
+  const [myRole, setMyRole] = useState<WorkspaceRole | null>(null);
+
+  const [members, setMembers] = useState<WorkspaceMember[]>([]);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<"admin" | "member" | "viewer">("member");
+  const [membersLoading, setMembersLoading] = useState(false);
+
   const [agents, setAgents] = useState<Agent[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
   const [agentId, setAgentId] = useState<string | null>(null);
   const [inputJson, setInputJson] = useState<string>(
-    JSON.stringify(
-      { goal: "Describe what you want the agent to do", context: "", constraints: "" },
-      null,
-      2
-    )
+    JSON.stringify({ goal: "Describe what you want the agent to do", context: "", constraints: "" }, null, 2)
   );
   const [creating, setCreating] = useState(false);
 
-  const selectedAgent = useMemo(
-    () => agents.find((a) => a.id === agentId) || null,
-    [agents, agentId]
-  );
+  const isAdmin = (myRole?.role || "").toLowerCase() === "admin";
+
+  const selectedAgent = useMemo(() => agents.find((a) => a.id === agentId) || null, [agents, agentId]);
 
   const agentOptions = useMemo(
     () =>
@@ -57,6 +60,13 @@ export default function WorkspaceDetailPage() {
     }
     setWs(wsRes.data);
 
+    const roleRes = await apiFetch<WorkspaceRole>(`/workspaces/${wid}/my-role`, { method: "GET" });
+    if (!roleRes.ok) {
+      setErr(`Role load failed: ${roleRes.status} ${roleRes.error}`);
+      return;
+    }
+    setMyRole(roleRes.data);
+
     const agentsRes = await apiFetch<Agent[]>("/agents", { method: "GET" });
     if (!agentsRes.ok) {
       setErr(`Agents load failed: ${agentsRes.status} ${agentsRes.error}`);
@@ -71,6 +81,83 @@ export default function WorkspaceDetailPage() {
       return;
     }
     setRuns(runsRes.data);
+
+    await loadMembers();
+  }
+
+  async function loadMembers() {
+    if (!wid) return;
+    setMembersLoading(true);
+    const res = await apiFetch<WorkspaceMember[]>(`/workspaces/${wid}/members`, { method: "GET" });
+    setMembersLoading(false);
+
+    if (!res.ok) {
+      setErr(`Members load failed: ${res.status} ${res.error}`);
+      setMembers([]);
+      return;
+    }
+    setMembers(res.data);
+  }
+
+  async function inviteMember() {
+    if (!wid) return;
+    setErr(null);
+    setMembersLoading(true);
+
+    const res = await apiFetch<WorkspaceMember>(`/workspaces/${wid}/members`, {
+      method: "POST",
+      body: JSON.stringify({ email: inviteEmail, role: inviteRole }),
+    });
+
+    setMembersLoading(false);
+
+    if (!res.ok) {
+      setErr(`Invite failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setInviteEmail("");
+    setInviteRole("member");
+    await loadMembers();
+  }
+
+  async function updateMemberRole(userId: string, role: "admin" | "member" | "viewer") {
+    if (!wid) return;
+    setErr(null);
+    setMembersLoading(true);
+
+    const res = await apiFetch<WorkspaceMember>(`/workspaces/${wid}/members/${userId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ email: "ignored", role }),
+    });
+
+    setMembersLoading(false);
+
+    if (!res.ok) {
+      setErr(`Role update failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    await loadMembers();
+  }
+
+  async function removeMember(userId: string) {
+    if (!wid) return;
+    setErr(null);
+    setMembersLoading(true);
+
+    const res = await apiFetch<{ ok: boolean }>(`/workspaces/${wid}/members/${userId}`, {
+      method: "DELETE",
+    });
+
+    setMembersLoading(false);
+
+    if (!res.ok) {
+      setErr(`Remove failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    await loadMembers();
   }
 
   async function createRun() {
@@ -119,14 +206,110 @@ export default function WorkspaceDetailPage() {
 
       {ws ? (
         <Card withBorder>
-          <Text fw={700}>{ws.name}</Text>
-          <Text size="xs" c="dimmed">
-            {ws.id}
-          </Text>
+          <Group justify="space-between">
+            <Stack gap={2}>
+              <Text fw={700}>{ws.name}</Text>
+              <Text size="xs" c="dimmed">
+                {ws.id}
+              </Text>
+            </Stack>
+            {myRole ? <Badge variant="light">role: {myRole.role}</Badge> : null}
+          </Group>
         </Card>
       ) : (
         <Text c="dimmed">Loading workspace…</Text>
       )}
+
+      <Card withBorder>
+        <Stack gap="sm">
+          <Group justify="space-between">
+            <Text fw={700}>Members</Text>
+            <Button variant="light" onClick={loadMembers} loading={membersLoading}>
+              Refresh
+            </Button>
+          </Group>
+
+          {isAdmin ? (
+            <Card withBorder>
+              <Stack gap="sm">
+                <Text fw={600}>Invite member</Text>
+                <Group align="end">
+                  <TextInput
+                    label="Email"
+                    value={inviteEmail}
+                    onChange={(e) => setInviteEmail(e.currentTarget.value)}
+                    placeholder="name@company.com"
+                    style={{ flex: 1 }}
+                  />
+                  <Select
+                    label="Role"
+                    data={[
+                      { value: "admin", label: "admin" },
+                      { value: "member", label: "member" },
+                      { value: "viewer", label: "viewer" },
+                    ]}
+                    value={inviteRole}
+                    onChange={(v) => setInviteRole((v as any) || "member")}
+                    style={{ width: 160 }}
+                  />
+                  <Button onClick={inviteMember} disabled={!inviteEmail.trim()} loading={membersLoading}>
+                    Invite
+                  </Button>
+                </Group>
+                <Text size="xs" c="dimmed">
+                  Note: users must already exist in the system (registered) for invite-by-email in V0.
+                </Text>
+              </Stack>
+            </Card>
+          ) : (
+            <Text size="sm" c="dimmed">
+              You are not an admin — member management is disabled.
+            </Text>
+          )}
+
+          {members.length === 0 ? (
+            <Text c="dimmed">No members found.</Text>
+          ) : (
+            <Stack gap="xs">
+              {members.map((m) => (
+                <Card key={m.user_id} withBorder>
+                  <Group justify="space-between" align="center">
+                    <Stack gap={2}>
+                      <Text fw={600}>{m.email}</Text>
+                      <Text size="xs" c="dimmed">
+                        {m.user_id}
+                      </Text>
+                    </Stack>
+
+                    <Group>
+                      <Badge variant="light">{m.role}</Badge>
+
+                      {isAdmin && m.role !== "admin" ? (
+                        <Select
+                          data={[
+                            { value: "admin", label: "admin" },
+                            { value: "member", label: "member" },
+                            { value: "viewer", label: "viewer" },
+                          ]}
+                          value={m.role}
+                          onChange={(v) => v && updateMemberRole(m.user_id, v as any)}
+                          style={{ width: 140 }}
+                        />
+                      ) : null}
+
+                      {isAdmin && m.role !== "admin" ? (
+                        <Button variant="light" color="red" onClick={() => removeMember(m.user_id)}>
+                          Remove
+                        </Button>
+                      ) : null}
+                    </Group>
+                  </Group>
+                </Card>
+              ))}
+            </Stack>
+          )}
+        </Stack>
+      </Card>
 
       <Card withBorder>
         <Stack gap="sm">
@@ -176,6 +359,7 @@ export default function WorkspaceDetailPage() {
               Refresh
             </Button>
           </Group>
+
           {err && <Text c="red">{err}</Text>}
         </Stack>
       </Card>
