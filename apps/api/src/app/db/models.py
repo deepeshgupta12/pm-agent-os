@@ -64,6 +64,17 @@ class Workspace(Base):
         back_populates="workspace", cascade="all, delete-orphan"
     )
 
+        # V1: connectors + ingestion jobs + retrieval trace
+    connectors: Mapped[List["Connector"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+    ingestion_jobs: Mapped[List["IngestionJob"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+    retrieval_requests: Mapped[List["RetrievalRequest"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+
 
 class WorkspaceMember(Base):
     __tablename__ = "workspace_members"
@@ -267,6 +278,173 @@ class RunLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     run: Mapped["Run"] = relationship(back_populates="logs")
+
+class Connector(Base):
+    __tablename__ = "connectors"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # docs|jira|github|slack|support|analytics
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+
+    # disconnected|connected|error
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="disconnected")
+
+    config: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    last_sync_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="connectors")
+    jobs: Mapped[List["IngestionJob"]] = relationship(back_populates="connector")
+
+
+class IngestionJob(Base):
+    __tablename__ = "ingestion_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    connector_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("connectors.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # links to retrieval "sources" table (uuid), optional
+    source_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("sources.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # docs_sync|jira_sync|manual_ingest
+    kind: Mapped[str] = mapped_column(String(64), nullable=False, default="manual")
+
+    # queued|running|success|failed
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+
+    timeframe: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    params: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    stats: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="ingestion_jobs")
+    connector: Mapped[Optional["Connector"]] = relationship(back_populates="jobs")
+
+
+class RetrievalRequest(Base):
+    __tablename__ = "retrieval_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    q: Mapped[str] = mapped_column(String(500), nullable=False)
+    k: Mapped[int] = mapped_column(Integer, nullable=False, default=8)
+    alpha: Mapped[float] = mapped_column(nullable=False, default=0.65)
+
+    # comma-separated
+    source_types: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+
+    timeframe: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="retrieval_requests")
+    items: Mapped[List["RetrievalRequestItem"]] = relationship(
+        back_populates="request", cascade="all, delete-orphan"
+    )
+
+
+class RetrievalRequestItem(Base):
+    __tablename__ = "retrieval_request_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("retrieval_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    chunk_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("chunks.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    document_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    source_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("sources.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    snippet: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    meta: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    score_fts: Mapped[float] = mapped_column(nullable=False, default=0.0)
+    score_vec: Mapped[float] = mapped_column(nullable=False, default=0.0)
+    score_hybrid: Mapped[float] = mapped_column(nullable=False, default=0.0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    request: Mapped["RetrievalRequest"] = relationship(back_populates="items")
 
 
 # ------------------------
