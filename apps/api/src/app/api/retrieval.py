@@ -290,19 +290,26 @@ def retrieve(
     user: User = Depends(require_user),
 ):
     # viewer+ ok
-    require_workspace_access(workspace_id, db, user)
+    ws, _role = require_workspace_access(workspace_id, db, user)
 
-    # Optional filter by source types (V0 metadata)
-    allowed_types = None
+    # Parse optional filter
+    allowed_types: list[str] = []
     if source_types:
         allowed_types = [t.strip() for t in source_types.split(",") if t.strip()]
 
-    items = hybrid_retrieve(
-        db,
-        workspace_id=workspace_id,
-        q=q,
-        k=k,
-        alpha=alpha,
-        source_types=allowed_types,  # hybrid_retrieve can ignore if not implemented
-    )
+    # Call hybrid_retrieve WITHOUT source_types (since core function doesn't support it yet)
+    items = hybrid_retrieve(db, workspace_id=workspace_id, q=q, k=k, alpha=alpha)
+
+    # V0: API-layer filtering by source type (no change to retrieval core)
+    if allowed_types:
+        allowed_source_ids = set(
+            str(x)
+            for x in db.execute(
+                select(Source.id).where(Source.workspace_id == ws.id, Source.type.in_(allowed_types))
+            )
+            .scalars()
+            .all()
+        )
+        items = [it for it in items if str(it.get("source_id", "")) in allowed_source_ids]
+
     return RetrieveResponse(ok=True, q=q, k=k, alpha=alpha, items=items)
