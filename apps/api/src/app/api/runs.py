@@ -17,8 +17,14 @@ from app.core.citations import (
     build_inline_citation_patch,
 )
 from app.db.session import get_db
-from app.db.models import Workspace, Run, AgentDefinition, Artifact, Evidence, User
+from app.db.models import Workspace, Run, RunLog, AgentDefinition, Artifact, Evidence, User
 from app.schemas.core import RunCreateIn, RunOut, RunStatusUpdateIn
+
+from app.schemas.core import (
+    RunLogCreateIn,
+    RunLogOut,
+    RunTimelineEventOut,
+)
 
 router = APIRouter(tags=["runs"])
 
@@ -296,3 +302,148 @@ Evidence Pack (cite as [n]):
         input_payload=r.input_payload,
         output_summary=r.output_summary,
     )
+
+def _to_log_out(l: RunLog) -> RunLogOut:
+    return RunLogOut(
+        id=str(l.id),
+        run_id=str(l.run_id),
+        level=l.level,
+        message=l.message,
+        meta=l.meta or {},
+        created_at=l.created_at,
+    )
+
+
+@router.get("/runs/{run_id}/logs", response_model=list[RunLogOut])
+def list_run_logs(run_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    r = db.get(Run, run_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    _ensure_run_workspace_access(db, r, user)
+
+    rows = (
+        db.execute(select(RunLog).where(RunLog.run_id == r.id).order_by(RunLog.created_at.desc()))
+        .scalars()
+        .all()
+    )
+    return [_to_log_out(x) for x in rows]
+
+
+@router.post("/runs/{run_id}/logs", response_model=RunLogOut)
+def create_run_log(run_id: str, payload: RunLogCreateIn, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    run_uuid = _parse_uuid(run_id)
+    r = db.get(Run, run_uuid)
+    if not r:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    # member+ only (write)
+    require_workspace_role_min(str(r.workspace_id), "member", db, user)
+
+    level = (payload.level or "info").strip().lower()
+    if level not in {"info", "warn", "error", "debug"}:
+        raise HTTPException(status_code=400, detail="Invalid log level")
+
+    l = RunLog(
+        run_id=r.id,
+        level=level,
+        message=payload.message,
+        meta=payload.meta or {},
+    )
+    db.add(l)
+    db.commit()
+    db.refresh(l)
+    return _to_log_out(l)
+
+
+@router.get("/runs/{run_id}/timeline", response_model=list[RunTimelineEventOut])
+def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    """
+    Viewer+ read ok.
+    Timeline is a merged view: run lifecycle + artifacts + evidence + logs.
+    """
+    r = db.get(Run, run_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    _ensure_run_workspace_access(db, r, user)
+
+    events: list[RunTimelineEventOut] = []
+
+    # Run created
+    events.append(
+        RunTimelineEventOut(
+            ts=r.created_at,
+            kind="run",
+            label=f"Run created (agent={r.agent_id})",
+            ref_id=str(r.id),
+            meta={"status": r.status},
+        )
+    )
+
+    # Run updated/status snapshot (best-effort; we don't store transitions yet)
+    if r.updated_at and r.updated_at != r.created_at:
+        events.append(
+            RunTimelineEventOut(
+                ts=r.updated_at,
+                kind="status",
+                label=f"Run status now: {r.status}",
+                ref_id=str(r.id),
+                meta={"output_summary": r.output_summary or ""},
+            )
+        )
+
+    # Artifacts
+    arts = (
+        db.execute(select(Artifact).where(Artifact.run_id == r.id).order_by(Artifact.created_at.desc()))
+        .scalars()
+        .all()
+    )
+    for a in arts:
+        events.append(
+            RunTimelineEventOut(
+                ts=a.created_at,
+                kind="artifact",
+                label=f"Artifact created: {a.type} v{a.version} ({a.status}) — {a.title}",
+                ref_id=str(a.id),
+                meta={"logical_key": a.logical_key, "version": int(a.version), "status": a.status},
+            )
+        )
+
+    # Evidence
+    evs = (
+        db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc()))
+        .scalars()
+        .all()
+    )
+    for e in evs:
+        events.append(
+            RunTimelineEventOut(
+                ts=e.created_at,
+                kind="evidence",
+                label=f"Evidence attached: {e.kind} from {e.source_name}",
+                ref_id=str(e.id),
+                meta={"source_ref": e.source_ref, "meta": e.meta or {}},
+            )
+        )
+
+    # Logs
+    logs = (
+        db.execute(select(RunLog).where(RunLog.run_id == r.id).order_by(RunLog.created_at.desc()))
+        .scalars()
+        .all()
+    )
+    for l in logs:
+        events.append(
+            RunTimelineEventOut(
+                ts=l.created_at,
+                kind="log",
+                label=f"[{l.level}] {l.message}",
+                ref_id=str(l.id),
+                meta=l.meta or {},
+            )
+        )
+
+    # Sort newest first
+    events.sort(key=lambda x: x.ts, reverse=True)
+    return events

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
+from datetime import datetime
 
 
 # -------- Workspaces --------
@@ -95,3 +96,26 @@ class EvidenceOut(BaseModel):
     source_ref: Optional[str]
     excerpt: str
     meta: Dict[str, Any]
+
+# -------- Run Logs + Timeline --------
+class RunLogCreateIn(BaseModel):
+    level: str = Field(default="info", max_length=16)
+    message: str = Field(default="", min_length=1)
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RunLogOut(BaseModel):
+    id: str
+    run_id: str
+    level: str
+    message: str
+    meta: Dict[str, Any]
+    created_at: datetime
+
+
+class RunTimelineEventOut(BaseModel):
+    ts: datetime
+    kind: str  # run|status|artifact|evidence|log
+    label: str
+    ref_id: Optional[str] = None
+    meta: Dict[str, Any] = Field(default_factory=dict)

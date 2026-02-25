@@ -133,6 +133,7 @@ class Run(Base):
 
     artifacts: Mapped[List["Artifact"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     evidence_items: Mapped[List["Evidence"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+    logs: Mapped[List["RunLog"]] = relationship(back_populates="run", cascade="all, delete-orphan")
 
     pipeline_steps: Mapped[List["PipelineStep"]] = relationship(back_populates="run")
 
@@ -194,6 +195,27 @@ class RefreshToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     user: Mapped["User"] = relationship(back_populates="refresh_tokens")
+
+class RunLog(Base):
+    __tablename__ = "run_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # info|warn|error|debug
+    level: Mapped[str] = mapped_column(String(16), nullable=False, default="info")
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    meta: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    run: Mapped["Run"] = relationship(back_populates="logs")
 
 
 # ------------------------

@@ -112,3 +112,20 @@ export type WorkspaceRole = {
   workspace_id: string;
   role: "admin" | "member" | "viewer";
 };
+
+export type RunLog = {
+  id: string;
+  run_id: string;
+  level: "info" | "warn" | "error" | "debug";
+  message: string;
+  meta: Record<string, unknown>;
+  created_at: string; // ISO string
+};
+
+export type RunTimelineEvent = {
+  ts: string; // ISO string
+  kind: "run" | "status" | "artifact" | "evidence" | "log";
+  label: string;
+  ref_id?: string | null;
+  meta: Record<string, unknown>;
+};
