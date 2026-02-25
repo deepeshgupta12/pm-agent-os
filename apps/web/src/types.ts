@@ -49,6 +49,34 @@ export type Artifact = {
   status: string;
 };
 
+export type ArtifactDiffMeta = {
+  id: string;
+  run_id: string;
+  type: string;
+  title: string;
+  logical_key: string;
+  version: number;
+  status: string;
+};
+
+export type ArtifactDiff = {
+  a: ArtifactDiffMeta;
+  b: ArtifactDiffMeta;
+  unified_diff: string;
+};
+
+export type ArtifactReview = {
+  id: string;
+  artifact_id: string;
+  state: "requested" | "approved" | "rejected";
+  requested_by_user_id: string;
+  requested_at: string; // ISO
+  request_comment?: string | null;
+  decided_by_user_id?: string | null;
+  decided_at?: string | null; // ISO
+  decision_comment?: string | null;
+};
+
 export type Evidence = {
   id: string;
   run_id: string;
@@ -111,4 +139,21 @@ export type WorkspaceMember = {
 export type WorkspaceRole = {
   workspace_id: string;
   role: "admin" | "member" | "viewer";
+};
+
+export type RunLog = {
+  id: string;
+  run_id: string;
+  level: "info" | "warn" | "error" | "debug";
+  message: string;
+  meta: Record<string, unknown>;
+  created_at: string; // ISO string
+};
+
+export type RunTimelineEvent = {
+  ts: string; // ISO string
+  kind: "run" | "status" | "artifact" | "evidence" | "log";
+  label: string;
+  ref_id?: string | null;
+  meta: Record<string, unknown>;
 };

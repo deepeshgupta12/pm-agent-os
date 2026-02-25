@@ -15,7 +15,7 @@ import {
   Divider,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
-import type { Artifact, Evidence, Run } from "../types";
+import type { Artifact, Evidence, Run, RunLog, RunTimelineEvent } from "../types";
 
 const ARTIFACT_TYPES = [
   "problem_brief",
@@ -36,6 +36,21 @@ const ARTIFACT_TYPES = [
   "safety_spec",
 ];
 
+function eventBadgeColor(kind: string): string {
+  if (kind === "artifact") return "grape";
+  if (kind === "evidence") return "teal";
+  if (kind === "log") return "gray";
+  if (kind === "status") return "blue";
+  return "dark";
+}
+
+function logBadgeColor(level: string): string {
+  if (level === "error") return "red";
+  if (level === "warn") return "yellow";
+  if (level === "debug") return "gray";
+  return "blue";
+}
+
 export default function RunDetailPage() {
   const { runId } = useParams();
   const rid = runId || "";
@@ -43,6 +58,8 @@ export default function RunDetailPage() {
   const [run, setRun] = useState<Run | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [evidence, setEvidence] = useState<Evidence[]>([]);
+  const [timeline, setTimeline] = useState<RunTimelineEvent[]>([]);
+  const [logs, setLogs] = useState<RunLog[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
   // Create artifact form
@@ -60,7 +77,7 @@ export default function RunDetailPage() {
   const [metaJson, setMetaJson] = useState("{}");
   const [creatingEvidence, setCreatingEvidence] = useState(false);
 
-  // Auto evidence (NEW)
+  // Auto evidence
   const [autoQuery, setAutoQuery] = useState("");
   const [autoK, setAutoK] = useState<number>(6);
   const [autoAlpha, setAutoAlpha] = useState<number>(0.65);
@@ -69,6 +86,15 @@ export default function RunDetailPage() {
   // Regenerate
   const [regenLoading, setRegenLoading] = useState(false);
 
+  // Logs (create)
+  const [logLevel, setLogLevel] = useState<string | null>("info");
+  const [logMessage, setLogMessage] = useState<string>("Ran quick check");
+  const [logMetaJson, setLogMetaJson] = useState<string>("{}");
+  const [creatingLog, setCreatingLog] = useState(false);
+
+  // Logs filter
+  const [logFilter, setLogFilter] = useState<string | null>("all");
+
   const artifactTypeOptions = useMemo(
     () => ARTIFACT_TYPES.map((t) => ({ value: t, label: t })),
     []
@@ -76,8 +102,13 @@ export default function RunDetailPage() {
 
   const latestArtifact = useMemo(() => {
     if (artifacts.length === 0) return null;
-    return artifacts[0]; // we fetch newest first
+    return artifacts[0]; // newest first
   }, [artifacts]);
+
+  const filteredLogs = useMemo(() => {
+    if (logFilter === "all") return logs;
+    return logs.filter((l) => l.level === logFilter);
+  }, [logs, logFilter]);
 
   async function loadAll() {
     setErr(null);
@@ -102,6 +133,22 @@ export default function RunDetailPage() {
       return;
     }
     setEvidence(evRes.data);
+
+    // Timeline
+    const tlRes = await apiFetch<RunTimelineEvent[]>(`/runs/${rid}/timeline`, { method: "GET" });
+    if (!tlRes.ok) {
+      setErr(`Timeline load failed: ${tlRes.status} ${tlRes.error}`);
+      return;
+    }
+    setTimeline(tlRes.data);
+
+    // Logs
+    const logsRes = await apiFetch<RunLog[]>(`/runs/${rid}/logs`, { method: "GET" });
+    if (!logsRes.ok) {
+      setErr(`Logs load failed: ${logsRes.status} ${logsRes.error}`);
+      return;
+    }
+    setLogs(logsRes.data);
   }
 
   async function createArtifact() {
@@ -207,7 +254,44 @@ export default function RunDetailPage() {
       return;
     }
 
-    // refresh everything (new artifact version expected)
+    await loadAll();
+  }
+
+  async function createLog() {
+    if (!logLevel) return;
+    if (!logMessage.trim()) {
+      setErr("Log message cannot be empty.");
+      return;
+    }
+
+    setCreatingLog(true);
+    setErr(null);
+
+    let meta: any = {};
+    try {
+      meta = logMetaJson.trim() ? JSON.parse(logMetaJson) : {};
+    } catch {
+      setCreatingLog(false);
+      setErr("Log meta JSON is invalid.");
+      return;
+    }
+
+    const res = await apiFetch<RunLog>(`/runs/${rid}/logs`, {
+      method: "POST",
+      body: JSON.stringify({
+        level: logLevel,
+        message: logMessage.trim(),
+        meta,
+      }),
+    });
+
+    setCreatingLog(false);
+
+    if (!res.ok) {
+      setErr(`Create log failed: ${res.status} ${res.error}`);
+      return;
+    }
+
     await loadAll();
   }
 
@@ -280,7 +364,140 @@ export default function RunDetailPage() {
         </Card>
       )}
 
-      {/* NEW: Auto-add evidence card */}
+      {/* NEW: Timeline */}
+      <Card withBorder>
+        <Stack gap="sm">
+          <Group justify="space-between">
+            <Text fw={700}>Timeline</Text>
+            <Button variant="light" onClick={loadAll}>
+              Refresh
+            </Button>
+          </Group>
+
+          {timeline.length === 0 ? (
+            <Text c="dimmed">No timeline events yet.</Text>
+          ) : (
+            <Stack gap="xs">
+              {timeline.map((ev, idx) => (
+                <Card key={`${ev.kind}:${ev.ref_id ?? "x"}:${idx}`} withBorder>
+                  <Group justify="space-between" align="flex-start">
+                    <Stack gap={2}>
+                      <Group gap="sm">
+                        <Badge color={eventBadgeColor(ev.kind)} variant="light">
+                          {ev.kind}
+                        </Badge>
+                        <Text fw={600}>{ev.label}</Text>
+                      </Group>
+                      <Text size="xs" c="dimmed">
+                        {new Date(ev.ts).toLocaleString()}
+                        {ev.ref_id ? ` · ref=${ev.ref_id}` : ""}
+                      </Text>
+                    </Stack>
+
+                    {/* Quick action if artifact */}
+                    {ev.kind === "artifact" && ev.ref_id ? (
+                      <Button size="xs" variant="light" component={Link} to={`/artifacts/${ev.ref_id}`}>
+                        Open
+                      </Button>
+                    ) : null}
+                  </Group>
+                </Card>
+              ))}
+            </Stack>
+          )}
+        </Stack>
+      </Card>
+
+      {/* NEW: Logs */}
+      <Card withBorder>
+        <Stack gap="sm">
+          <Group justify="space-between">
+            <Text fw={700}>Logs</Text>
+            <Group>
+              <Select
+                data={[
+                  { value: "all", label: "all" },
+                  { value: "info", label: "info" },
+                  { value: "warn", label: "warn" },
+                  { value: "error", label: "error" },
+                  { value: "debug", label: "debug" },
+                ]}
+                value={logFilter}
+                onChange={setLogFilter}
+                w={160}
+              />
+              <Button variant="light" onClick={loadAll}>
+                Refresh
+              </Button>
+            </Group>
+          </Group>
+
+          <Divider />
+
+          <Text fw={600}>Add log (member+)</Text>
+          <Group grow>
+            <Select
+              label="Level"
+              data={[
+                { value: "info", label: "info" },
+                { value: "warn", label: "warn" },
+                { value: "error", label: "error" },
+                { value: "debug", label: "debug" },
+              ]}
+              value={logLevel}
+              onChange={setLogLevel}
+            />
+            <TextInput
+              label="Message"
+              value={logMessage}
+              onChange={(e) => setLogMessage(e.currentTarget.value)}
+            />
+          </Group>
+
+          <Textarea
+            label="Meta (JSON)"
+            autosize
+            minRows={2}
+            value={logMetaJson}
+            onChange={(e) => setLogMetaJson(e.currentTarget.value)}
+          />
+
+          <Button onClick={createLog} loading={creatingLog}>
+            Add Log
+          </Button>
+
+          <Divider />
+
+          {filteredLogs.length === 0 ? (
+            <Text c="dimmed">No logs yet.</Text>
+          ) : (
+            <Stack gap="xs">
+              {filteredLogs.map((l) => (
+                <Card key={l.id} withBorder>
+                  <Stack gap={4}>
+                    <Group gap="sm">
+                      <Badge color={logBadgeColor(l.level)} variant="light">
+                        {l.level}
+                      </Badge>
+                      <Text fw={600}>{l.message}</Text>
+                    </Group>
+                    <Text size="xs" c="dimmed">
+                      {new Date(l.created_at).toLocaleString()} · {l.id}
+                    </Text>
+                    {l.meta && Object.keys(l.meta).length > 0 ? (
+                      <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+                        {JSON.stringify(l.meta, null, 2)}
+                      </pre>
+                    ) : null}
+                  </Stack>
+                </Card>
+              ))}
+            </Stack>
+          )}
+        </Stack>
+      </Card>
+
+      {/* Auto evidence */}
       <Card withBorder>
         <Stack gap="sm">
           <Text fw={700}>Auto-add Evidence (from Retrieval)</Text>
@@ -294,7 +511,7 @@ export default function RunDetailPage() {
             label="Query"
             value={autoQuery}
             onChange={(e) => setAutoQuery(e.currentTarget.value)}
-            placeholder='e.g., "Issue #1 github integration" or "refresh tokens"'
+            placeholder='e.g., "refresh tokens"'
           />
 
           <Group grow>
@@ -321,6 +538,7 @@ export default function RunDetailPage() {
         </Stack>
       </Card>
 
+      {/* Create artifact */}
       <Card withBorder>
         <Stack gap="sm">
           <Text fw={700}>Create Artifact</Text>
@@ -346,6 +564,7 @@ export default function RunDetailPage() {
         </Stack>
       </Card>
 
+      {/* Artifacts list */}
       <Card withBorder>
         <Stack gap="sm">
           <Group justify="space-between">
@@ -385,6 +604,7 @@ export default function RunDetailPage() {
         </Stack>
       </Card>
 
+      {/* Evidence create */}
       <Card withBorder>
         <Stack gap="sm">
           <Text fw={700}>Add Evidence</Text>
@@ -432,6 +652,7 @@ export default function RunDetailPage() {
         </Stack>
       </Card>
 
+      {/* Evidence list */}
       <Card withBorder>
         <Stack gap="sm">
           <Group justify="space-between">

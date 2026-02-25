@@ -7,10 +7,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_user
+from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
 from app.core.retrieval_search import hybrid_retrieve
 from app.db.session import get_db
-from app.db.models import Workspace, Run, Evidence, User
+from app.db.models import Run, Evidence, User
 from app.schemas.core import EvidenceCreateIn, EvidenceOut
 
 router = APIRouter(tags=["evidence"])
@@ -29,11 +29,12 @@ def _parse_uuid(id_str: str) -> uuid.UUID:
         raise HTTPException(status_code=404, detail="Run not found")
 
 
-def _ensure_run_access(db: Session, run: Run, user: User) -> None:
-    ws = db.get(Workspace, run.workspace_id)
-    if not ws or ws.owner_user_id != user.id:
-        # don't leak existence
+def _get_run_or_404(db: Session, run_id: str) -> Run:
+    run_uuid = _parse_uuid(run_id)
+    run = db.get(Run, run_uuid)
+    if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    return run
 
 
 @router.post("/runs/{run_id}/evidence", response_model=EvidenceOut)
@@ -43,12 +44,10 @@ def add_evidence(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    run_uuid = _parse_uuid(run_id)
+    run = _get_run_or_404(db, run_id)
 
-    run = db.get(Run, run_uuid)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    _ensure_run_access(db, run, user)
+    # member+ only
+    require_workspace_role_min(str(run.workspace_id), "member", db, user)
 
     ev = Evidence(
         run_id=run.id,
@@ -75,12 +74,10 @@ def add_evidence(
 
 @router.get("/runs/{run_id}/evidence", response_model=list[EvidenceOut])
 def list_evidence(run_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
-    run_uuid = _parse_uuid(run_id)
+    run = _get_run_or_404(db, run_id)
 
-    run = db.get(Run, run_uuid)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    _ensure_run_access(db, run, user)
+    # viewer+ read ok
+    require_workspace_access(str(run.workspace_id), db, user)
 
     items = (
         db.execute(select(Evidence).where(Evidence.run_id == run.id).order_by(Evidence.created_at.desc()))
@@ -108,12 +105,10 @@ def auto_add_evidence(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    run_uuid = _parse_uuid(run_id)
+    run = _get_run_or_404(db, run_id)
 
-    run = db.get(Run, run_uuid)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    _ensure_run_access(db, run, user)
+    # member+ only
+    require_workspace_role_min(str(run.workspace_id), "member", db, user)
 
     items = hybrid_retrieve(
         db,
@@ -122,7 +117,6 @@ def auto_add_evidence(
         k=payload.k,
         alpha=payload.alpha,
     )
-
     if not items:
         return []
 
