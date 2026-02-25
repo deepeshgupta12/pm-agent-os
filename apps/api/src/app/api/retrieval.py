@@ -14,16 +14,13 @@ from app.core.config import settings
 from app.core.embeddings import embed_texts
 from app.core.retrieval_search import hybrid_retrieve
 from app.db.session import get_db
-from app.db.models import User
+from app.db.models import User, RetrievalRequest, RetrievalRequestItem
 from app.db.retrieval_models import Source, Document, Chunk, Embedding
 from app.schemas.retrieval import IngestResult, EmbedResult, RetrieveResponse, DocumentOut
 
 router = APIRouter(tags=["retrieval"])
 
 
-# -------------------------
-# V0 Docs: simple ingestion models
-# -------------------------
 class DocIngestIn(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     text: str = Field(min_length=1)
@@ -64,16 +61,12 @@ def _doc_out(doc: Document) -> DocumentOut:
     )
 
 
-# -------------------------
-# Sources: Docs + Manual
-# -------------------------
 @router.get("/workspaces/{workspace_id}/sources", response_model=list[SourceOut])
 def list_sources(
     workspace_id: str,
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    # viewer+ ok
     ws, _role = require_workspace_access(workspace_id, db, user)
 
     rows = (
@@ -100,11 +93,9 @@ def create_or_get_docs_source(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    # member+ only (write)
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
     s = _get_or_create_source(db, ws.id, "docs", payload.name.strip() or "Docs")
-    # Update name if previously default and user wants custom
     if payload.name.strip() and s.name != payload.name.strip():
         s.name = payload.name.strip()
         db.add(s)
@@ -120,9 +111,7 @@ def create_or_get_docs_source(
     )
 
 
-# -------------------------
-# V0 Docs ingestion (read-only connector replacement)
-# -------------------------
+# V0 docs ingestion (kept for backward compatibility)
 @router.post("/workspaces/{workspace_id}/documents/docs", response_model=IngestResult)
 def ingest_docs_text(
     workspace_id: str,
@@ -130,7 +119,6 @@ def ingest_docs_text(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    # member+ only
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
     src = _get_or_create_source(db, ws.id, "docs", "Docs")
@@ -181,13 +169,11 @@ def list_documents(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    # viewer+ ok
     ws, _role = require_workspace_access(workspace_id, db, user)
 
     q = select(Document).where(Document.workspace_id == ws.id)
 
     if source_type:
-        # join on sources for type filter
         q = q.join(Source, Source.id == Document.source_id).where(Source.type == source_type)
 
     q = q.order_by(Document.created_at.desc())
@@ -195,9 +181,6 @@ def list_documents(
     return [_doc_out(d) for d in docs]
 
 
-# -------------------------
-# Embeddings (optional in V0, already present)
-# -------------------------
 @router.post("/documents/{document_id}/embed", response_model=EmbedResult)
 def embed_document_chunks(
     document_id: str,
@@ -209,7 +192,6 @@ def embed_document_chunks(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # member+ (write)
     require_workspace_role_min(str(doc.workspace_id), "member", db, user)
 
     chunks = (
@@ -222,7 +204,6 @@ def embed_document_chunks(
 
     chunk_ids = [c.id for c in chunks]
 
-    # Repair/backfill: jsonb -> text -> vector
     db.execute(
         sql_text(
             """
@@ -276,9 +257,6 @@ def embed_document_chunks(
     return EmbedResult(document_id=str(doc.id), model=settings.EMBEDDINGS_MODEL, chunks_embedded=embedded_count)
 
 
-# -------------------------
-# Retrieval (viewer+)
-# -------------------------
 @router.get("/workspaces/{workspace_id}/retrieve", response_model=RetrieveResponse)
 def retrieve(
     workspace_id: str,
@@ -289,18 +267,16 @@ def retrieve(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    # viewer+ ok
     ws, _role = require_workspace_access(workspace_id, db, user)
 
-    # Parse optional filter
     allowed_types: list[str] = []
     if source_types:
         allowed_types = [t.strip() for t in source_types.split(",") if t.strip()]
 
-    # Call hybrid_retrieve WITHOUT source_types (since core function doesn't support it yet)
+    # Run retrieval
     items = hybrid_retrieve(db, workspace_id=workspace_id, q=q, k=k, alpha=alpha)
 
-    # V0: API-layer filtering by source type (no change to retrieval core)
+    # Optional filter
     if allowed_types:
         allowed_source_ids = set(
             str(x)
@@ -312,4 +288,51 @@ def retrieve(
         )
         items = [it for it in items if str(it.get("source_id", "")) in allowed_source_ids]
 
-    return RetrieveResponse(ok=True, q=q, k=k, alpha=alpha, items=items)
+    # ---- V1 traceability: store retrieval request + items
+    rr = RetrievalRequest(
+        workspace_id=ws.id,
+        created_by_user_id=user.id,
+        q=q,
+        k=int(k),
+        alpha=float(alpha),
+        source_types=source_types,
+        timeframe={},  # V1 timeframe wiring into ranking comes later (Step 3+)
+    )
+    db.add(rr)
+    db.commit()
+    db.refresh(rr)
+
+    # store top-k returned (post-filter)
+    out_items = []
+    for idx, it in enumerate(items, start=1):
+        try:
+            chunk_uuid = uuid.UUID(str(it.get("chunk_id"))) if it.get("chunk_id") else None
+        except Exception:
+            chunk_uuid = None
+        try:
+            doc_uuid = uuid.UUID(str(it.get("document_id"))) if it.get("document_id") else None
+        except Exception:
+            doc_uuid = None
+        try:
+            src_uuid = uuid.UUID(str(it.get("source_id"))) if it.get("source_id") else None
+        except Exception:
+            src_uuid = None
+
+        ri = RetrievalRequestItem(
+            request_id=rr.id,
+            rank=int(idx),
+            chunk_id=chunk_uuid,
+            document_id=doc_uuid,
+            source_id=src_uuid,
+            snippet=str(it.get("snippet") or ""),
+            meta=it.get("meta") or {},
+            score_fts=float(it.get("score_fts") or 0.0),
+            score_vec=float(it.get("score_vec") or 0.0),
+            score_hybrid=float(it.get("score_hybrid") or 0.0),
+        )
+        db.add(ri)
+        out_items.append(it)
+
+    db.commit()
+
+    return RetrieveResponse(ok=True, q=q, k=k, alpha=alpha, items=out_items)
