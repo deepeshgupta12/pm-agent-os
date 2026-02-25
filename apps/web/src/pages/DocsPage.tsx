@@ -15,6 +15,11 @@ import {
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 
+type WorkspaceRole = {
+  workspace_id: string;
+  role: "admin" | "member" | "viewer";
+};
+
 type SourceOut = {
   id: string;
   workspace_id: string;
@@ -68,6 +73,10 @@ export default function DocsPage() {
 
   const [err, setErr] = useState<string | null>(null);
 
+  // Role
+  const [myRole, setMyRole] = useState<WorkspaceRole | null>(null);
+  const canWrite = (myRole?.role || "").toLowerCase() !== "viewer";
+
   // Create docs source
   const [sourceName, setSourceName] = useState("Team Docs");
   const [creatingSource, setCreatingSource] = useState(false);
@@ -89,13 +98,29 @@ export default function DocsPage() {
   const [results, setResults] = useState<RetrieveResponse | null>(null);
 
   const canIngest = useMemo(() => {
-    // In V0, you can ingest even without creating a source first, because backend will create one on demand only for manual.
-    // For docs ingestion, we require /sources/docs created first (since endpoint uses docs source).
-    return Boolean(docsSource?.id);
-  }, [docsSource]);
+    // UI requirement: force explicit docs source creation before ingest (makes “source shell” visible + named).
+    return Boolean(docsSource?.id) && canWrite;
+  }, [docsSource, canWrite]);
+
+  async function loadMyRole() {
+    if (!wid) return;
+    const res = await apiFetch<WorkspaceRole>(`/workspaces/${wid}/my-role`, { method: "GET" });
+    if (!res.ok) {
+      // If role fetch fails, treat as no-write to avoid exposing write actions.
+      setMyRole(null);
+      setErr(`Role load failed: ${res.status} ${res.error}`);
+      return;
+    }
+    setMyRole(res.data);
+  }
 
   async function createDocsSource() {
     if (!wid) return;
+    if (!canWrite) {
+      setErr("You are a viewer. Docs source creation is disabled.");
+      return;
+    }
+
     setErr(null);
     setCreatingSource(true);
 
@@ -116,6 +141,10 @@ export default function DocsPage() {
 
   async function ingestDoc() {
     if (!wid) return;
+    if (!canWrite) {
+      setErr("You are a viewer. Docs ingestion is disabled.");
+      return;
+    }
     if (!docsSource?.id) {
       setErr("Create a Docs source first.");
       return;
@@ -181,6 +210,11 @@ export default function DocsPage() {
     setDocsSource(null);
     setLastIngest(null);
     setResults(null);
+    setMyRole(null);
+
+    if (!wid) return;
+    void loadMyRole();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wid]);
 
   return (
@@ -200,6 +234,18 @@ export default function DocsPage() {
       {!wid ? (
         <Card withBorder>
           <Text c="red">Missing workspaceId in route.</Text>
+        </Card>
+      ) : null}
+
+      {myRole ? (
+        <Card withBorder>
+          <Group justify="space-between">
+            <Text fw={700}>Workspace role</Text>
+            <Badge variant="light">{myRole.role}</Badge>
+          </Group>
+          <Text size="sm" c="dimmed">
+            Viewer can retrieve/search. Member/Admin can create sources + ingest docs.
+          </Text>
         </Card>
       ) : null}
 
@@ -223,11 +269,18 @@ export default function DocsPage() {
               onChange={(e) => setSourceName(e.currentTarget.value)}
               placeholder="e.g., Team Docs"
               style={{ flex: 1 }}
+              disabled={!canWrite}
             />
-            <Button onClick={createDocsSource} loading={creatingSource} disabled={!wid}>
+            <Button onClick={createDocsSource} loading={creatingSource} disabled={!wid || !canWrite}>
               Create source
             </Button>
           </Group>
+
+          {!canWrite ? (
+            <Text size="sm" c="dimmed">
+              You are a viewer — source creation is disabled.
+            </Text>
+          ) : null}
 
           {docsSource ? (
             <Group gap="sm">
@@ -253,12 +306,18 @@ export default function DocsPage() {
           </Text>
 
           <Group grow>
-            <TextInput label="Title" value={docTitle} onChange={(e) => setDocTitle(e.currentTarget.value)} />
+            <TextInput
+              label="Title"
+              value={docTitle}
+              onChange={(e) => setDocTitle(e.currentTarget.value)}
+              disabled={!canWrite}
+            />
             <TextInput
               label="External ID (optional)"
               value={docExternalId}
               onChange={(e) => setDocExternalId(e.currentTarget.value)}
               placeholder="doc-123"
+              disabled={!canWrite}
             />
           </Group>
 
@@ -268,13 +327,18 @@ export default function DocsPage() {
             minRows={6}
             value={docText}
             onChange={(e) => setDocText(e.currentTarget.value)}
+            disabled={!canWrite}
           />
 
           <Button onClick={ingestDoc} loading={ingesting} disabled={!canIngest}>
             Ingest doc
           </Button>
 
-          {!canIngest ? (
+          {!canWrite ? (
+            <Text size="sm" c="dimmed">
+              You are a viewer — ingestion is disabled.
+            </Text>
+          ) : !docsSource?.id ? (
             <Text size="sm" c="dimmed">
               Create a Docs source first to enable ingestion.
             </Text>
@@ -325,10 +389,7 @@ export default function DocsPage() {
           </Group>
 
           <Group>
-            <Button
-              variant={onlyDocs ? "filled" : "light"}
-              onClick={() => setOnlyDocs((x) => !x)}
-            >
+            <Button variant={onlyDocs ? "filled" : "light"} onClick={() => setOnlyDocs((x) => !x)}>
               {onlyDocs ? "Docs only: ON" : "Docs only: OFF"}
             </Button>
 

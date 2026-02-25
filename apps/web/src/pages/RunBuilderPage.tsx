@@ -19,6 +19,11 @@ import {
 import { apiFetch } from "../apiClient";
 import type { Agent, PipelineTemplate, Run, PipelineRun } from "../types";
 
+type WorkspaceRole = {
+  workspace_id: string;
+  role: "admin" | "member" | "viewer";
+};
+
 type RetrieveItem = {
   chunk_id: string;
   document_id: string;
@@ -55,6 +60,10 @@ export default function RunBuilderPage() {
   const nav = useNavigate();
 
   const [err, setErr] = useState<string | null>(null);
+
+  // Role
+  const [myRole, setMyRole] = useState<WorkspaceRole | null>(null);
+  const canWrite = (myRole?.role || "").toLowerCase() !== "viewer";
 
   // Mode: single agent run vs pipeline run
   const [mode, setMode] = useState<"agent" | "pipeline">("agent");
@@ -132,6 +141,17 @@ export default function RunBuilderPage() {
     };
   }, [goal, context, constraints, timeframePayload, selectedSources]);
 
+  async function loadMyRole() {
+    if (!wid) return;
+    const res = await apiFetch<WorkspaceRole>(`/workspaces/${wid}/my-role`, { method: "GET" });
+    if (!res.ok) {
+      setMyRole(null);
+      setErr(`Role load failed: ${res.status} ${res.error}`);
+      return;
+    }
+    setMyRole(res.data);
+  }
+
   async function loadAgents() {
     const res = await apiFetch<Agent[]>("/agents", { method: "GET" });
     if (!res.ok) {
@@ -151,7 +171,6 @@ export default function RunBuilderPage() {
 
     if (!res.ok) {
       setTemplates([]);
-      // not fatal; allow manual template id
       setErr(`Templates load failed: ${res.status} ${res.error}`);
       return;
     }
@@ -163,6 +182,12 @@ export default function RunBuilderPage() {
 
   async function create() {
     if (!wid) return;
+
+    if (!canWrite) {
+      setErr("You are a viewer. Creating runs/pipelines is disabled.");
+      return;
+    }
+
     setErr(null);
     setCreating(true);
 
@@ -225,7 +250,7 @@ export default function RunBuilderPage() {
     params.set("k", String(rk || 5));
     params.set("alpha", String(ralpha ?? 0.65));
 
-    // IMPORTANT: backend supports source_types as comma-separated
+    // backend supports source_types as comma-separated
     if (selectedSources.length > 0) {
       params.set("source_types", selectedSources.join(","));
     }
@@ -247,6 +272,8 @@ export default function RunBuilderPage() {
 
   useEffect(() => {
     setErr(null);
+    setMyRole(null);
+    void loadMyRole();
     void loadAgents();
     void loadTemplates();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -265,6 +292,18 @@ export default function RunBuilderPage() {
           </Button>
         </Group>
       </Group>
+
+      {myRole ? (
+        <Card withBorder>
+          <Group justify="space-between">
+            <Text fw={700}>Workspace role</Text>
+            <Badge variant="light">{myRole.role}</Badge>
+          </Group>
+          <Text size="sm" c="dimmed">
+            Viewer can test retrieval. Member/Admin can create runs and pipeline runs.
+          </Text>
+        </Card>
+      ) : null}
 
       {err ? (
         <Card withBorder>
@@ -290,6 +329,7 @@ export default function RunBuilderPage() {
               onChange={setAgentId}
               searchable
               nothingFoundMessage="No agents"
+              disabled={!canWrite}
             />
           ) : (
             <Stack gap="xs">
@@ -302,8 +342,9 @@ export default function RunBuilderPage() {
                   searchable
                   nothingFoundMessage="No templates"
                   style={{ flex: 1 }}
+                  disabled={!canWrite}
                 />
-                <Button variant="light" onClick={loadTemplates} loading={loadingTemplates}>
+                <Button variant="light" onClick={loadTemplates} loading={loadingTemplates} disabled={!canWrite}>
                   Refresh templates
                 </Button>
               </Group>
@@ -314,10 +355,17 @@ export default function RunBuilderPage() {
                   value={templateId ?? ""}
                   onChange={(e) => setTemplateId(e.currentTarget.value)}
                   placeholder="Paste template UUID"
+                  disabled={!canWrite}
                 />
               ) : null}
             </Stack>
           )}
+
+          {!canWrite ? (
+            <Text size="sm" c="dimmed">
+              You are a viewer — creating runs/pipelines is disabled.
+            </Text>
+          ) : null}
 
           {mode === "agent" && selectedAgent ? (
             <Card withBorder>
@@ -344,13 +392,19 @@ export default function RunBuilderPage() {
 
           <Text fw={700}>Payload</Text>
           <Group grow>
-            <TextInput label="Goal" value={goal} onChange={(e) => setGoal(e.currentTarget.value)} />
-            <TextInput label="Context" value={context} onChange={(e) => setContext(e.currentTarget.value)} />
+            <TextInput label="Goal" value={goal} onChange={(e) => setGoal(e.currentTarget.value)} disabled={!canWrite} />
+            <TextInput
+              label="Context"
+              value={context}
+              onChange={(e) => setContext(e.currentTarget.value)}
+              disabled={!canWrite}
+            />
           </Group>
           <TextInput
             label="Constraints (optional)"
             value={constraints}
             onChange={(e) => setConstraints(e.currentTarget.value)}
+            disabled={!canWrite}
           />
 
           <Divider />
@@ -367,6 +421,7 @@ export default function RunBuilderPage() {
               { value: "custom", label: "Custom" },
             ]}
             style={{ maxWidth: 280 }}
+            disabled={!canWrite}
           />
           {preset === "custom" ? (
             <Group grow>
@@ -374,11 +429,13 @@ export default function RunBuilderPage() {
                 label="Start date (YYYY-MM-DD)"
                 value={startDate}
                 onChange={(e) => setStartDate(e.currentTarget.value)}
+                disabled={!canWrite}
               />
               <TextInput
                 label="End date (YYYY-MM-DD)"
                 value={endDate}
                 onChange={(e) => setEndDate(e.currentTarget.value)}
+                disabled={!canWrite}
               />
             </Group>
           ) : null}
@@ -409,7 +466,7 @@ export default function RunBuilderPage() {
           />
 
           <Group>
-            <Button onClick={create} loading={creating}>
+            <Button onClick={create} loading={creating} disabled={!canWrite}>
               Create {mode === "agent" ? "Run" : "Pipeline Run"}
             </Button>
           </Group>
