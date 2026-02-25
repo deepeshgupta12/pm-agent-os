@@ -1,69 +1,154 @@
 from __future__ import annotations
 
 import uuid
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select, text as sql_text
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_user
+from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
 from app.core.chunker import chunk_text
 from app.core.config import settings
 from app.core.embeddings import embed_texts
 from app.core.retrieval_search import hybrid_retrieve
 from app.db.session import get_db
-from app.db.models import Workspace, User
+from app.db.models import User
 from app.db.retrieval_models import Source, Document, Chunk, Embedding
-from app.schemas.retrieval import DocumentIn, IngestResult, EmbedResult, RetrieveResponse
+from app.schemas.retrieval import IngestResult, EmbedResult, RetrieveResponse, DocumentOut
 
 router = APIRouter(tags=["retrieval"])
 
 
-def _ensure_workspace_access(db: Session, workspace_id: str, user: User) -> Workspace:
-    ws = db.get(Workspace, workspace_id)
-    if not ws or ws.owner_user_id != user.id:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-    return ws
+# -------------------------
+# V0 Docs: simple ingestion models
+# -------------------------
+class DocIngestIn(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+    text: str = Field(min_length=1)
+    external_id: Optional[str] = Field(default=None, max_length=256)
 
 
-def _get_or_create_manual_source(db: Session, workspace_id: uuid.UUID) -> Source:
-    s = db.execute(
-        select(Source).where(Source.workspace_id == workspace_id, Source.type == "manual")
-    ).scalar_one_or_none()
+class SourceCreateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class SourceOut(BaseModel):
+    id: str
+    workspace_id: str
+    type: str
+    name: str
+    config: dict
+
+
+def _get_or_create_source(db: Session, workspace_id: uuid.UUID, stype: str, default_name: str) -> Source:
+    s = db.execute(select(Source).where(Source.workspace_id == workspace_id, Source.type == stype)).scalar_one_or_none()
     if s:
         return s
-    s = Source(workspace_id=workspace_id, type="manual", name="Manual Uploads", config={})
+    s = Source(workspace_id=workspace_id, type=stype, name=default_name, config={})
     db.add(s)
     db.commit()
     db.refresh(s)
     return s
 
 
-@router.post("/workspaces/{workspace_id}/documents/manual", response_model=IngestResult)
-def ingest_manual_markdown(
+def _doc_out(doc: Document) -> DocumentOut:
+    return DocumentOut(
+        id=str(doc.id),
+        workspace_id=str(doc.workspace_id),
+        source_id=str(doc.source_id),
+        title=doc.title,
+        external_id=doc.external_id,
+        meta=doc.meta or {},
+    )
+
+
+# -------------------------
+# Sources: Docs + Manual
+# -------------------------
+@router.get("/workspaces/{workspace_id}/sources", response_model=list[SourceOut])
+def list_sources(
     workspace_id: str,
-    payload: DocumentIn,
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    ws = _ensure_workspace_access(db, workspace_id, user)
-    src = _get_or_create_manual_source(db, ws.id)
+    # viewer+ ok
+    ws, _role = require_workspace_access(workspace_id, db, user)
+
+    rows = (
+        db.execute(select(Source).where(Source.workspace_id == ws.id).order_by(Source.created_at.desc()))
+        .scalars()
+        .all()
+    )
+    return [
+        SourceOut(
+            id=str(s.id),
+            workspace_id=str(s.workspace_id),
+            type=s.type,
+            name=s.name,
+            config=s.config or {},
+        )
+        for s in rows
+    ]
+
+
+@router.post("/workspaces/{workspace_id}/sources/docs", response_model=SourceOut)
+def create_or_get_docs_source(
+    workspace_id: str,
+    payload: SourceCreateIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    # member+ only (write)
+    ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
+
+    s = _get_or_create_source(db, ws.id, "docs", payload.name.strip() or "Docs")
+    # Update name if previously default and user wants custom
+    if payload.name.strip() and s.name != payload.name.strip():
+        s.name = payload.name.strip()
+        db.add(s)
+        db.commit()
+        db.refresh(s)
+
+    return SourceOut(
+        id=str(s.id),
+        workspace_id=str(s.workspace_id),
+        type=s.type,
+        name=s.name,
+        config=s.config or {},
+    )
+
+
+# -------------------------
+# V0 Docs ingestion (read-only connector replacement)
+# -------------------------
+@router.post("/workspaces/{workspace_id}/documents/docs", response_model=IngestResult)
+def ingest_docs_text(
+    workspace_id: str,
+    payload: DocIngestIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    # member+ only
+    ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
+
+    src = _get_or_create_source(db, ws.id, "docs", "Docs")
 
     doc = Document(
         workspace_id=ws.id,
         source_id=src.id,
-        external_id=None,
+        external_id=payload.external_id,
         title=payload.title,
-        raw_text=payload.markdown,
-        meta={"format": "markdown"},
+        raw_text=payload.text,
+        meta={"format": "text", "connector": "docs_v0_manual"},
     )
     db.add(doc)
     db.commit()
     db.refresh(doc)
 
     parts = chunk_text(
-        payload.markdown,
+        payload.text,
         chunk_size=settings.CHUNK_SIZE_CHARS,
         overlap=settings.CHUNK_OVERLAP_CHARS,
     )
@@ -84,18 +169,35 @@ def ingest_manual_markdown(
         db.commit()
 
     return IngestResult(
-        document={
-            "id": str(doc.id),
-            "workspace_id": str(doc.workspace_id),
-            "source_id": str(doc.source_id),
-            "title": doc.title,
-            "external_id": doc.external_id,
-            "meta": doc.meta,
-        },
+        document=_doc_out(doc),
         chunks_created=len(chunks),
     )
 
 
+@router.get("/workspaces/{workspace_id}/documents", response_model=list[DocumentOut])
+def list_documents(
+    workspace_id: str,
+    source_type: Optional[str] = Query(default=None, description="Filter by source type (docs/manual/github/...)"),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    # viewer+ ok
+    ws, _role = require_workspace_access(workspace_id, db, user)
+
+    q = select(Document).where(Document.workspace_id == ws.id)
+
+    if source_type:
+        # join on sources for type filter
+        q = q.join(Source, Source.id == Document.source_id).where(Source.type == source_type)
+
+    q = q.order_by(Document.created_at.desc())
+    docs = db.execute(q).scalars().all()
+    return [_doc_out(d) for d in docs]
+
+
+# -------------------------
+# Embeddings (optional in V0, already present)
+# -------------------------
 @router.post("/documents/{document_id}/embed", response_model=EmbedResult)
 def embed_document_chunks(
     document_id: str,
@@ -107,9 +209,8 @@ def embed_document_chunks(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    ws = db.get(Workspace, doc.workspace_id)
-    if not ws or ws.owner_user_id != user.id:
-        raise HTTPException(status_code=404, detail="Document not found")
+    # member+ (write)
+    require_workspace_role_min(str(doc.workspace_id), "member", db, user)
 
     chunks = (
         db.execute(select(Chunk).where(Chunk.document_id == doc.id).order_by(Chunk.chunk_index.asc()))
@@ -175,16 +276,33 @@ def embed_document_chunks(
     return EmbedResult(document_id=str(doc.id), model=settings.EMBEDDINGS_MODEL, chunks_embedded=embedded_count)
 
 
+# -------------------------
+# Retrieval (viewer+)
+# -------------------------
 @router.get("/workspaces/{workspace_id}/retrieve", response_model=RetrieveResponse)
 def retrieve(
     workspace_id: str,
     q: str = Query(min_length=1, max_length=500),
     k: int = Query(default=8, ge=1, le=50),
     alpha: float = Query(default=0.65, ge=0.0, le=1.0),
+    source_types: Optional[str] = Query(default=None, description="Comma-separated source types, e.g. docs,manual"),
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    _ensure_workspace_access(db, workspace_id, user)
+    # viewer+ ok
+    require_workspace_access(workspace_id, db, user)
 
-    items = hybrid_retrieve(db, workspace_id=workspace_id, q=q, k=k, alpha=alpha)
+    # Optional filter by source types (V0 metadata)
+    allowed_types = None
+    if source_types:
+        allowed_types = [t.strip() for t in source_types.split(",") if t.strip()]
+
+    items = hybrid_retrieve(
+        db,
+        workspace_id=workspace_id,
+        q=q,
+        k=k,
+        alpha=alpha,
+        source_types=allowed_types,  # hybrid_retrieve can ignore if not implemented
+    )
     return RetrieveResponse(ok=True, q=q, k=k, alpha=alpha, items=items)
