@@ -101,3 +101,14 @@ export type PipelineRun = {
   input_payload: Record<string, unknown>;
   steps: PipelineStep[];
 };
+
+export type WorkspaceMember = {
+  user_id: string;
+  email: string;
+  role: "admin" | "member" | "viewer";
+};
+
+export type WorkspaceRole = {
+  workspace_id: string;
+  role: "admin" | "member" | "viewer";
+};
