@@ -49,6 +49,22 @@ export type Artifact = {
   status: string;
 };
 
+export type ArtifactDiffMeta = {
+  id: string;
+  run_id: string;
+  type: string;
+  title: string;
+  logical_key: string;
+  version: number;
+  status: string;
+};
+
+export type ArtifactDiff = {
+  a: ArtifactDiffMeta;
+  b: ArtifactDiffMeta;
+  unified_diff: string;
+};
+
 export type Evidence = {
   id: string;
   run_id: string;

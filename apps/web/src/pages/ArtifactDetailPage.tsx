@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import {
   Button,
@@ -12,11 +12,12 @@ import {
   SimpleGrid,
   Divider,
   Badge,
+  Select,
 } from "@mantine/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { apiFetch } from "../apiClient";
-import type { Artifact } from "../types";
+import type { Artifact, ArtifactDiff } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL as string;
 
@@ -36,19 +37,53 @@ export default function ArtifactDetailPage() {
   const [publishing, setPublishing] = useState(false);
   const [unpublishing, setUnpublishing] = useState(false);
 
+  // Diff (V0 basic)
+  const [siblings, setSiblings] = useState<Artifact[]>([]);
+  const [otherId, setOtherId] = useState<string | null>(null);
+  const [diffText, setDiffText] = useState<string>("");
+  const [diffLoading, setDiffLoading] = useState(false);
+
   const isFinal = status === "final";
+
+  const diffOptions = useMemo(() => {
+    return siblings.map((a) => ({
+      value: a.id,
+      label: `v${a.version} · ${a.title} (${a.status})`,
+    }));
+  }, [siblings]);
 
   async function load() {
     setErr(null);
+    setDiffText("");
+
     const res = await apiFetch<Artifact>(`/artifacts/${aid}`, { method: "GET" });
     if (!res.ok) {
       setErr(`Load failed: ${res.status} ${res.error}`);
       return;
     }
-    setArt(res.data);
-    setTitle(res.data.title);
-    setContentMd(res.data.content_md);
-    setStatus(res.data.status);
+
+    const loaded = res.data;
+    setArt(loaded);
+    setTitle(loaded.title);
+    setContentMd(loaded.content_md);
+    setStatus(loaded.status);
+
+    // Load artifacts for same run, then filter to same logical_key (versions)
+    const sibRes = await apiFetch<Artifact[]>(`/runs/${loaded.run_id}/artifacts`, { method: "GET" });
+    if (!sibRes.ok) {
+      // Not fatal; artifact can still render
+      setSiblings([]);
+      setOtherId(null);
+      return;
+    }
+
+    const sameKey = (sibRes.data || [])
+      .filter((x) => x.logical_key === loaded.logical_key)
+      .filter((x) => x.id !== loaded.id)
+      .sort((a, b) => (b.version ?? 0) - (a.version ?? 0)); // higher version first
+
+    setSiblings(sameKey);
+    setOtherId(sameKey.length > 0 ? sameKey[0].id : null);
   }
 
   async function saveInPlace() {
@@ -154,6 +189,24 @@ export default function ArtifactDetailPage() {
     window.open(`${API_BASE}/artifacts/${aid}/export/pdf`, "_blank");
   }
 
+  async function loadDiff() {
+    if (!otherId) return;
+    setDiffLoading(true);
+    setErr(null);
+
+    const res = await apiFetch<ArtifactDiff>(`/artifacts/${aid}/diff?other_id=${otherId}`, { method: "GET" });
+
+    setDiffLoading(false);
+
+    if (!res.ok) {
+      setErr(`Diff failed: ${res.status} ${res.error}`);
+      setDiffText("");
+      return;
+    }
+
+    setDiffText(res.data.unified_diff || "(no diff)");
+  }
+
   useEffect(() => {
     if (!aid) return;
     void load();
@@ -198,12 +251,7 @@ export default function ArtifactDetailPage() {
                 onChange={(e) => setTitle(e.currentTarget.value)}
                 disabled={isFinal}
               />
-              <TextInput
-                label="Status"
-                value={status}
-                onChange={(e) => setStatus(e.currentTarget.value)}
-                disabled
-              />
+              <TextInput label="Status" value={status} onChange={(e) => setStatus(e.currentTarget.value)} disabled />
             </Group>
 
             <Group>
@@ -236,6 +284,45 @@ export default function ArtifactDetailPage() {
                 </Text>
               ) : null}
             </Group>
+
+            <Divider />
+
+            {/* V0: Basic Diff */}
+            <Card withBorder>
+              <Stack gap="sm">
+                <Group justify="space-between" align="flex-end">
+                  <Select
+                    label="Compare with another version (same logical key)"
+                    data={diffOptions}
+                    value={otherId}
+                    onChange={setOtherId}
+                    placeholder={siblings.length === 0 ? "No other versions available" : "Pick a version"}
+                    searchable
+                    nothingFoundMessage="No versions"
+                    disabled={siblings.length === 0}
+                    style={{ flex: 1 }}
+                  />
+                  <Button onClick={loadDiff} loading={diffLoading} disabled={!otherId}>
+                    Show Diff
+                  </Button>
+                </Group>
+
+                {diffText ? (
+                  <Card withBorder style={{ overflow: "auto" }}>
+                    <Text fw={600} mb={6}>
+                      Unified Diff
+                    </Text>
+                    <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{diffText}</pre>
+                  </Card>
+                ) : (
+                  <Text size="sm" c="dimmed">
+                    {siblings.length === 0
+                      ? "Create another version to enable diff."
+                      : "Pick a version and click “Show Diff”."}
+                  </Text>
+                )}
+              </Stack>
+            </Card>
 
             <Divider />
 
