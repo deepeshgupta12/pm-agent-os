@@ -6,10 +6,11 @@ import RunDetailPage from "./pages/RunDetailPage";
 import ArtifactDetailPage from "./pages/ArtifactDetailPage";
 import PipelinesPage from "./pages/PipelinesPage";
 import PipelineRunDetailPage from "./pages/PipelineRunDetailPage";
+import RunBuilderPage from "./pages/RunBuilderPage";
+import DocsPage from "./pages/DocsPage";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Me from "./pages/Me";
-import RunBuilderPage from "./pages/RunBuilderPage";
 
 function TopNav() {
   const loc = useLocation();
@@ -19,9 +20,6 @@ function TopNav() {
         <Text fw={700}>PM Agent OS</Text>
         <Anchor component={Link} to="/workspaces">
           Workspaces
-        </Anchor>
-        <Anchor component={Link} to="/agents">
-          Agents (via Create Run)
         </Anchor>
       </Group>
       <Group gap="md">
@@ -60,7 +58,12 @@ export default function App() {
           {/* Platform */}
           <Route path="/workspaces" element={<WorkspacesPage />} />
           <Route path="/workspaces/:workspaceId" element={<WorkspaceDetailPage />} />
-          <Route path="/workspaces/:workspaceId/run-builder" element={<RunBuilderPage />} />
+
+          {/* Run Builder (V0 close) */}
+          <Route path="/run-builder/:workspaceId" element={<RunBuilderPage />} />
+
+          {/* Docs (V0 close) */}
+          <Route path="/workspaces/:workspaceId/docs" element={<DocsPage />} />
 
           {/* Pipelines */}
           <Route path="/workspaces/:workspaceId/pipelines" element={<PipelinesPage />} />
