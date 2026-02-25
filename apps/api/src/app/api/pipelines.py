@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_user
+from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
 from app.core.generator import build_initial_artifact, build_run_summary, AGENT_TO_DEFAULT_ARTIFACT_TYPE
 from app.core.config import settings
 from app.core.evidence_format import format_evidence_for_prompt
@@ -111,9 +111,7 @@ CANONICAL_PIPELINES: List[Dict[str, Any]] = [
 # Helpers
 # -------------------------
 def _ensure_workspace_access(db: Session, workspace_id: str, user: User) -> Workspace:
-    ws = db.get(Workspace, workspace_id)
-    if not ws or ws.owner_user_id != user.id:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    ws, _role = require_workspace_access(workspace_id, db, user)
     return ws
 
 
@@ -592,7 +590,7 @@ def seed_pipeline_templates(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    ws = _ensure_workspace_access(db, workspace_id, user)
+    ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
     created, existing = _seed_canonical_templates_for_workspace(db, ws)
 
     return PipelineTemplatesSeedOut(
@@ -612,7 +610,7 @@ def create_pipeline_template(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    ws = _ensure_workspace_access(db, workspace_id, user)
+    ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
     definition = payload.definition_json or {}
     steps_def = definition.get("steps") or []
@@ -652,7 +650,7 @@ def start_pipeline_run(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    ws = _ensure_workspace_access(db, workspace_id, user)
+    ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
     template_uuid = uuid.UUID(payload.template_id)
     t = db.get(PipelineTemplate, template_uuid)
@@ -727,9 +725,7 @@ def get_pipeline_run(
     if not pr:
         raise HTTPException(status_code=404, detail="Pipeline run not found")
 
-    ws = db.get(Workspace, pr.workspace_id)
-    if not ws or ws.owner_user_id != user.id:
-        raise HTTPException(status_code=404, detail="Pipeline run not found")
+    require_workspace_access(str(pr.workspace_id), db, user)
 
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
     return _run_to_out(db, pr, steps)
@@ -746,9 +742,7 @@ def run_next_step(
     if not pr:
         raise HTTPException(status_code=404, detail="Pipeline run not found")
 
-    ws = db.get(Workspace, pr.workspace_id)
-    if not ws or ws.owner_user_id != user.id:
-        raise HTTPException(status_code=404, detail="Pipeline run not found")
+    ws, _role = require_workspace_role_min(str(pr.workspace_id), "member", db, user)
 
     tpl = db.get(PipelineTemplate, pr.template_id)
     definition = (tpl.definition_json or {}) if tpl else {}
@@ -801,9 +795,7 @@ def execute_all_steps(
     if not pr:
         raise HTTPException(status_code=404, detail="Pipeline run not found")
 
-    ws = db.get(Workspace, pr.workspace_id)
-    if not ws or ws.owner_user_id != user.id:
-        raise HTTPException(status_code=404, detail="Pipeline run not found")
+    ws, _role = require_workspace_role_min(str(pr.workspace_id), "member", db, user)
 
     tpl = db.get(PipelineTemplate, pr.template_id)
     definition = (tpl.definition_json or {}) if tpl else {}

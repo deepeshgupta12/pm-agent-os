@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_user
+from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
 from app.core.generator import build_initial_artifact, build_run_summary, AGENT_TO_DEFAULT_ARTIFACT_TYPE
 from app.core.config import settings
 from app.core.evidence_format import format_evidence_for_prompt
@@ -18,7 +18,6 @@ from app.core.citations import (
 )
 from app.db.session import get_db
 from app.db.models import Workspace, Run, AgentDefinition, Artifact, Evidence, User
-
 from app.schemas.core import RunCreateIn, RunOut, RunStatusUpdateIn
 
 router = APIRouter(tags=["runs"])
@@ -31,17 +30,21 @@ def _parse_uuid(id_str: str) -> uuid.UUID:
         raise HTTPException(status_code=404, detail="Run not found")
 
 
-def _ensure_run_access(db: Session, run: Run, user: User) -> None:
-    ws = db.get(Workspace, run.workspace_id)
-    if not ws or ws.owner_user_id != user.id:
-        raise HTTPException(status_code=404, detail="Run not found")
+def _ensure_run_workspace_access(db: Session, run: Run, user: User) -> Workspace:
+    # Viewer+ allowed for reads; existence is guarded by workspace access
+    ws, _role = require_workspace_access(str(run.workspace_id), db, user)
+    return ws
 
 
 @router.post("/workspaces/{workspace_id}/runs", response_model=RunOut)
-def create_run(workspace_id: str, payload: RunCreateIn, db: Session = Depends(get_db), user: User = Depends(require_user)):
-    ws = db.get(Workspace, workspace_id)
-    if not ws or ws.owner_user_id != user.id:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+def create_run(
+    workspace_id: str,
+    payload: RunCreateIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    # member+ only
+    ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
     agent = db.get(AgentDefinition, payload.agent_id)
     if not agent:
@@ -96,11 +99,14 @@ def create_run(workspace_id: str, payload: RunCreateIn, db: Session = Depends(ge
 
 @router.get("/workspaces/{workspace_id}/runs", response_model=list[RunOut])
 def list_runs(workspace_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
-    ws = db.get(Workspace, workspace_id)
-    if not ws or ws.owner_user_id != user.id:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    # viewer+ read ok
+    ws, _role = require_workspace_access(workspace_id, db, user)
 
-    runs = db.execute(select(Run).where(Run.workspace_id == ws.id).order_by(Run.created_at.desc())).scalars().all()
+    runs = (
+        db.execute(select(Run).where(Run.workspace_id == ws.id).order_by(Run.created_at.desc()))
+        .scalars()
+        .all()
+    )
     return [
         RunOut(
             id=str(r.id),
@@ -121,7 +127,7 @@ def get_run(run_id: str, db: Session = Depends(get_db), user: User = Depends(req
     if not r:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    _ensure_run_access(db, r, user)
+    _ensure_run_workspace_access(db, r, user)
 
     return RunOut(
         id=str(r.id),
@@ -135,12 +141,19 @@ def get_run(run_id: str, db: Session = Depends(get_db), user: User = Depends(req
 
 
 @router.post("/runs/{run_id}/status", response_model=RunOut)
-def update_run_status(run_id: str, payload: RunStatusUpdateIn, db: Session = Depends(get_db), user: User = Depends(require_user)):
-    r = db.get(Run, run_id)
+def update_run_status(
+    run_id: str,
+    payload: RunStatusUpdateIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    # member+ (write)
+    run_uuid = _parse_uuid(run_id)
+    r = db.get(Run, run_uuid)
     if not r:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    _ensure_run_access(db, r, user)
+    require_workspace_role_min(str(r.workspace_id), "member", db, user)
 
     r.status = payload.status
     r.output_summary = payload.output_summary
@@ -164,15 +177,14 @@ def regenerate_with_evidence(run_id: str, db: Session = Depends(get_db), user: U
     """
     Regenerate draft for this run using attached evidence.
 
-    Step 14: citation-ready output
-    Step 14.1: enforce inline citations in body
+    member+ only (it creates a new artifact version)
     """
     run_uuid = _parse_uuid(run_id)
     r = db.get(Run, run_uuid)
     if not r:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    _ensure_run_access(db, r, user)
+    require_workspace_role_min(str(r.workspace_id), "member", db, user)
 
     # Collect evidence
     ev_items = (
@@ -225,15 +237,12 @@ Evidence Pack (cite as [n]):
         if not md.lstrip().startswith("#"):
             md = f"# {title}\n\n" + md
 
-        # Ensure Unknowns section exists
         if "## Unknowns / Assumptions" not in md:
             md = md.rstrip() + "\n\n## Unknowns / Assumptions\n- None stated.\n"
 
-        # Ensure Sources section exists
         if "## Sources" not in md:
             md = md.rstrip() + "\n\n" + sources_section_md + "\n"
 
-        # If citations exist nowhere, warn and append sources
         if len(ev_items) > 0 and not output_has_any_citations(md):
             md = (
                 md.rstrip()
@@ -244,13 +253,11 @@ Evidence Pack (cite as [n]):
                 + "\n"
             )
 
-        # Step 14.1: If body has no inline citations, inject deterministic citation patch in-body
         if len(ev_items) > 0 and not body_has_inline_citations(md):
             patch = build_inline_citation_patch(normalized)
             md = md.rstrip() + "\n\n" + patch + "\n"
 
     else:
-        # fallback
         _, _, md = build_initial_artifact(agent_id=r.agent_id, input_payload=r.input_payload)
         if "## Unknowns / Assumptions" not in md:
             md = md.rstrip() + "\n\n## Unknowns / Assumptions\n- Evidence-based citations require LLM mode.\n"
@@ -259,7 +266,6 @@ Evidence Pack (cite as [n]):
         if len(ev_items) > 0 and not body_has_inline_citations(md):
             md = md.rstrip() + "\n\n" + build_inline_citation_patch(normalized) + "\n"
 
-    # Next version
     max_ver = db.execute(
         select(func.max(Artifact.version)).where(Artifact.run_id == r.id, Artifact.logical_key == artifact_type)
     ).scalar_one_or_none()

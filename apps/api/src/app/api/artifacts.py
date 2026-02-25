@@ -4,9 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_user
+from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
 from app.db.session import get_db
-from app.db.models import Workspace, Run, Artifact, User
+from app.db.models import Run, Artifact, User
 from app.schemas.core import ArtifactCreateIn, ArtifactOut, ArtifactUpdateIn, ArtifactNewVersionIn
 
 router = APIRouter(tags=["artifacts"])
@@ -14,17 +14,27 @@ router = APIRouter(tags=["artifacts"])
 ALLOWED_STATUSES = {"draft", "in_review", "final"}
 
 
-def _ensure_run_access(db: Session, run: Run, user: User) -> None:
-    ws = db.get(Workspace, run.workspace_id)
-    if not ws or ws.owner_user_id != user.id:
-        raise HTTPException(status_code=404, detail="Run not found")
+def _ensure_run_read_access(db: Session, run: Run, user: User) -> None:
+    require_workspace_access(str(run.workspace_id), db, user)
 
 
-def _ensure_artifact_access(db: Session, art: Artifact, user: User) -> Run:
+def _ensure_run_write_access(db: Session, run: Run, user: User) -> None:
+    require_workspace_role_min(str(run.workspace_id), "member", db, user)
+
+
+def _ensure_artifact_read_access(db: Session, art: Artifact, user: User) -> Run:
     run = db.get(Run, art.run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Artifact not found")
-    _ensure_run_access(db, run, user)
+    _ensure_run_read_access(db, run, user)
+    return run
+
+
+def _ensure_artifact_write_access(db: Session, art: Artifact, user: User) -> Run:
+    run = db.get(Run, art.run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    _ensure_run_write_access(db, run, user)
     return run
 
 
@@ -46,14 +56,15 @@ def create_artifact(run_id: str, payload: ArtifactCreateIn, db: Session = Depend
     run = db.get(Run, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    _ensure_run_access(db, run, user)
+
+    # member+ only
+    _ensure_run_write_access(db, run, user)
 
     max_ver = db.execute(
         select(func.max(Artifact.version)).where(Artifact.run_id == run.id, Artifact.logical_key == payload.logical_key)
     ).scalar_one_or_none()
     next_ver = int(max_ver or 0) + 1
 
-    status = "draft"
     art = Artifact(
         run_id=run.id,
         type=payload.type,
@@ -61,7 +72,7 @@ def create_artifact(run_id: str, payload: ArtifactCreateIn, db: Session = Depend
         content_md=payload.content_md or "",
         logical_key=payload.logical_key,
         version=next_ver,
-        status=status,
+        status="draft",
     )
     db.add(art)
     db.commit()
@@ -74,9 +85,15 @@ def list_artifacts(run_id: str, db: Session = Depends(get_db), user: User = Depe
     run = db.get(Run, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    _ensure_run_access(db, run, user)
 
-    arts = db.execute(select(Artifact).where(Artifact.run_id == run.id).order_by(Artifact.created_at.desc())).scalars().all()
+    # viewer+ ok
+    _ensure_run_read_access(db, run, user)
+
+    arts = (
+        db.execute(select(Artifact).where(Artifact.run_id == run.id).order_by(Artifact.created_at.desc()))
+        .scalars()
+        .all()
+    )
     return [_to_out(a) for a in arts]
 
 
@@ -85,7 +102,8 @@ def get_artifact(artifact_id: str, db: Session = Depends(get_db), user: User = D
     art = db.get(Artifact, artifact_id)
     if not art:
         raise HTTPException(status_code=404, detail="Artifact not found")
-    _ensure_artifact_access(db, art, user)
+
+    _ensure_artifact_read_access(db, art, user)
     return _to_out(art)
 
 
@@ -94,7 +112,9 @@ def update_artifact(artifact_id: str, payload: ArtifactUpdateIn, db: Session = D
     art = db.get(Artifact, artifact_id)
     if not art:
         raise HTTPException(status_code=404, detail="Artifact not found")
-    _ensure_artifact_access(db, art, user)
+
+    # member+ only
+    _ensure_artifact_write_access(db, art, user)
 
     if art.status == "final":
         raise HTTPException(status_code=409, detail="Artifact is final and cannot be edited")
@@ -120,7 +140,9 @@ def new_artifact_version(artifact_id: str, payload: ArtifactNewVersionIn, db: Se
     art = db.get(Artifact, artifact_id)
     if not art:
         raise HTTPException(status_code=404, detail="Artifact not found")
-    _ensure_artifact_access(db, art, user)
+
+    # member+ only
+    _ensure_artifact_write_access(db, art, user)
 
     if art.status == "final":
         raise HTTPException(status_code=409, detail="Artifact is final; unpublish or create a new draft from prior version")
@@ -153,9 +175,10 @@ def publish_artifact(artifact_id: str, db: Session = Depends(get_db), user: User
     art = db.get(Artifact, artifact_id)
     if not art:
         raise HTTPException(status_code=404, detail="Artifact not found")
-    _ensure_artifact_access(db, art, user)
 
-    # must be latest version for this logical_key
+    # member+ only
+    _ensure_artifact_write_access(db, art, user)
+
     max_ver = db.execute(
         select(func.max(Artifact.version)).where(Artifact.run_id == art.run_id, Artifact.logical_key == art.logical_key)
     ).scalar_one()
@@ -174,9 +197,10 @@ def unpublish_artifact(artifact_id: str, db: Session = Depends(get_db), user: Us
     art = db.get(Artifact, artifact_id)
     if not art:
         raise HTTPException(status_code=404, detail="Artifact not found")
-    _ensure_artifact_access(db, art, user)
 
-    # allowed for speed in V1
+    # member+ only
+    _ensure_artifact_write_access(db, art, user)
+
     art.status = "draft"
     db.add(art)
     db.commit()
