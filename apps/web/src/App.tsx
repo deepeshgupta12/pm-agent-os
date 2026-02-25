@@ -9,6 +9,7 @@ import PipelineRunDetailPage from "./pages/PipelineRunDetailPage";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Me from "./pages/Me";
+import RunBuilderPage from "./pages/RunBuilderPage";
 
 function TopNav() {
   const loc = useLocation();
@@ -59,6 +60,7 @@ export default function App() {
           {/* Platform */}
           <Route path="/workspaces" element={<WorkspacesPage />} />
           <Route path="/workspaces/:workspaceId" element={<WorkspaceDetailPage />} />
+          <Route path="/workspaces/:workspaceId/run-builder" element={<RunBuilderPage />} />
 
           {/* Pipelines */}
           <Route path="/workspaces/:workspaceId/pipelines" element={<PipelinesPage />} />

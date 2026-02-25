@@ -91,6 +91,9 @@ export default function WorkspacesPage() {
                       </Text>
                     </Stack>
                     <Group>
+                      <Button component={Link} to={`/workspaces/${w.id}/run-builder`} variant="light">
+                        Run Builder
+                      </Button>
                       <Button component={Link} to={`/workspaces/${w.id}/pipelines`} variant="light">
                         Pipelines
                       </Button>
