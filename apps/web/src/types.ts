@@ -65,6 +65,18 @@ export type ArtifactDiff = {
   unified_diff: string;
 };
 
+export type ArtifactReview = {
+  id: string;
+  artifact_id: string;
+  state: "requested" | "approved" | "rejected";
+  requested_by_user_id: string;
+  requested_at: string; // ISO
+  request_comment?: string | null;
+  decided_by_user_id?: string | null;
+  decided_at?: string | null; // ISO
+  decision_comment?: string | null;
+};
+
 export type Evidence = {
   id: string;
   run_id: string;

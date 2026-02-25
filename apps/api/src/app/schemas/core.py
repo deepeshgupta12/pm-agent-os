@@ -97,6 +97,7 @@ class EvidenceOut(BaseModel):
     excerpt: str
     meta: Dict[str, Any]
 
+
 # -------- Run Logs + Timeline --------
 class RunLogCreateIn(BaseModel):
     level: str = Field(default="info", max_length=16)
@@ -119,3 +120,24 @@ class RunTimelineEventOut(BaseModel):
     label: str
     ref_id: Optional[str] = None
     meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+# -------- Approvals v1 (auditable) --------
+class ArtifactReviewSubmitIn(BaseModel):
+    comment: Optional[str] = Field(default=None, max_length=5000)
+
+
+class ArtifactReviewDecisionIn(BaseModel):
+    comment: Optional[str] = Field(default=None, max_length=5000)
+
+
+class ArtifactReviewOut(BaseModel):
+    id: str
+    artifact_id: str
+    state: str  # requested|approved|rejected
+    requested_by_user_id: str
+    requested_at: datetime
+    request_comment: Optional[str] = None
+    decided_by_user_id: Optional[str] = None
+    decided_at: Optional[datetime] = None
+    decision_comment: Optional[str] = None

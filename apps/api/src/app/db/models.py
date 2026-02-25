@@ -113,10 +113,14 @@ class Run(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
-    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=False, index=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=False, index=True
+    )
     agent_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_definitions.id"), nullable=False, index=True)
 
-    created_by_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
 
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="created")
     input_payload: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
@@ -147,13 +151,13 @@ class Artifact(Base):
 
     type: Mapped[str] = mapped_column(String(64), nullable=False)
     title: Mapped[str] = mapped_column(String(240), nullable=False, default="Untitled")
-
     content_md: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
     logical_key: Mapped[str] = mapped_column(String(64), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")  # draft|in_review|final
+    # draft|in_review|final
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -161,6 +165,53 @@ class Artifact(Base):
     )
 
     run: Mapped["Run"] = relationship(back_populates="artifacts")
+
+    # Approvals (auditable)
+    reviews: Mapped[List["ArtifactReview"]] = relationship(
+        back_populates="artifact", cascade="all, delete-orphan"
+    )
+
+
+class ArtifactReview(Base):
+    """
+    Auditable review record for a specific artifact version (artifact_id).
+    Lifecycle:
+      - requested: created with requested_by + requested_at (+ request_comment)
+      - decided: approved/rejected with decided_by + decided_at (+ decision_comment)
+    """
+    __tablename__ = "artifact_reviews"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    artifact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("artifacts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # requested|approved|rejected
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="requested")
+
+    requested_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    request_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    decided_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=True,
+        index=True,
+    )
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    artifact: Mapped["Artifact"] = relationship(back_populates="reviews")
 
 
 class Evidence(Base):
@@ -196,6 +247,7 @@ class RefreshToken(Base):
 
     user: Mapped["User"] = relationship(back_populates="refresh_tokens")
 
+
 class RunLog(Base):
     __tablename__ = "run_logs"
 
@@ -208,7 +260,6 @@ class RunLog(Base):
         index=True,
     )
 
-    # info|warn|error|debug
     level: Mapped[str] = mapped_column(String(16), nullable=False, default="info")
     message: Mapped[str] = mapped_column(Text, nullable=False, default="")
     meta: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
@@ -221,7 +272,6 @@ class RunLog(Base):
 # ------------------------
 # Pipelines (V1)
 # ------------------------
-# (unchanged below)
 class PipelineTemplate(Base):
     __tablename__ = "pipeline_templates"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
