@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+import difflib
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
@@ -49,6 +53,23 @@ def _to_out(a: Artifact) -> ArtifactOut:
         version=a.version,
         status=a.status,
     )
+
+
+# ---- Diff schema (V0 basic) ----
+class ArtifactDiffMeta(BaseModel):
+    id: str
+    run_id: str
+    type: str
+    title: str
+    logical_key: str
+    version: int
+    status: str
+
+
+class ArtifactDiffOut(BaseModel):
+    a: ArtifactDiffMeta
+    b: ArtifactDiffMeta
+    unified_diff: str
 
 
 @router.post("/runs/{run_id}/artifacts", response_model=ArtifactOut)
@@ -206,3 +227,58 @@ def unpublish_artifact(artifact_id: str, db: Session = Depends(get_db), user: Us
     db.commit()
     db.refresh(art)
     return _to_out(art)
+
+
+# -------------------------
+# V0: Basic artifact diff
+# -------------------------
+@router.get("/artifacts/{artifact_id}/diff", response_model=ArtifactDiffOut)
+def diff_artifacts(
+    artifact_id: str,
+    other_id: str = Query(..., min_length=36, max_length=36),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    """
+    Basic unified diff between two artifact markdown bodies.
+
+    RBAC:
+      - viewer+ can read/diff
+    """
+    a = db.get(Artifact, artifact_id)
+    if not a:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    b = db.get(Artifact, other_id)
+    if not b:
+        raise HTTPException(status_code=404, detail="Other artifact not found")
+
+    # Ensure user can read BOTH artifacts (same workspace access)
+    _ensure_artifact_read_access(db, a, user)
+    _ensure_artifact_read_access(db, b, user)
+
+    a_lines = (a.content_md or "").splitlines(keepends=True)
+    b_lines = (b.content_md or "").splitlines(keepends=True)
+
+    diff_lines = difflib.unified_diff(
+        a_lines,
+        b_lines,
+        fromfile=f"{a.logical_key}-v{a.version}",
+        tofile=f"{b.logical_key}-v{b.version}",
+        lineterm="",
+    )
+
+    unified = "\n".join(diff_lines).strip()
+
+    def _meta(x: Artifact) -> ArtifactDiffMeta:
+        return ArtifactDiffMeta(
+            id=str(x.id),
+            run_id=str(x.run_id),
+            type=x.type,
+            title=x.title,
+            logical_key=x.logical_key,
+            version=int(x.version),
+            status=x.status,
+        )
+
+    return ArtifactDiffOut(a=_meta(a), b=_meta(b), unified_diff=unified)
