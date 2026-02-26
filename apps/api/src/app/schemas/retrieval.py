@@ -65,3 +65,35 @@ class RetrieveResponse(BaseModel):
     k: int
     alpha: float
     items: List[RetrieveItem]
+
+
+# -------------------------
+# V1 traceability schemas
+# -------------------------
+class RetrievalRequestOut(BaseModel):
+    id: str
+    workspace_id: str
+    created_by_user_id: str
+    q: str
+    k: int
+    alpha: float
+    source_types: Optional[str] = None
+    timeframe: Dict[str, Any]
+    created_at: str
+
+
+class RetrievalRequestItemOut(BaseModel):
+    id: str
+    request_id: str
+    rank: int
+
+    chunk_id: Optional[str] = None
+    document_id: Optional[str] = None
+    source_id: Optional[str] = None
+
+    snippet: str
+    meta: Dict[str, Any]
+    score_fts: float
+    score_vec: float
+    score_hybrid: float
+    created_at: str
