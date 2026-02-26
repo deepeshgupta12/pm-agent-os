@@ -28,30 +28,19 @@ class ConnectorOut(BaseModel):
 
 
 # -------------------------
-# V1 Ingestion Job (Docs)
+# V1 Ingestion Jobs (Docs)
 # -------------------------
 class DocsItemIn(BaseModel):
     external_id: str = Field(min_length=1, max_length=256)
     title: str = Field(min_length=1, max_length=300)
     text: str = Field(min_length=1)
-    # optional extra meta fields (kept in doc meta)
     meta: Dict[str, Any] = Field(default_factory=dict)
 
 
-class IngestionTimeframeIn(BaseModel):
-    # Keep flexible for V1, aligns with your run-builder shape
-    preset: Optional[str] = Field(default=None, max_length=32)  # 7d|30d|90d|custom
-    start_date: Optional[str] = Field(default=None, max_length=32)  # YYYY-MM-DD
-    end_date: Optional[str] = Field(default=None, max_length=32)  # YYYY-MM-DD
-
-
 class DocsIngestionJobCreateIn(BaseModel):
-    # V1 “connector fetch” is simulated by sending docs in the request
     docs: List[DocsItemIn] = Field(default_factory=list)
-
-    timeframe: Dict[str, Any] = Field(default_factory=dict)  # stored as-is into ingestion_jobs.timeframe
-    params: Dict[str, Any] = Field(default_factory=dict)  # stored as-is into ingestion_jobs.params
-
+    timeframe: Dict[str, Any] = Field(default_factory=dict)  # stored into ingestion_jobs.timeframe
+    params: Dict[str, Any] = Field(default_factory=dict)  # stored into ingestion_jobs.params
     upsert: bool = True
     embed_after: bool = False
 
@@ -70,3 +59,25 @@ class IngestionJobOut(BaseModel):
     finished_at: Optional[str] = None
     created_by_user_id: str
     created_at: Optional[str] = None
+
+
+# -------------------------
+# V1 Ingestion Jobs (GitHub)
+# -------------------------
+class GitHubIngestionJobCreateIn(BaseModel):
+    """
+    Uses connector.config to decide what to fetch:
+      - owner, repo
+      - prs_state, prs_per_page
+      - releases_per_page
+      - issues_state, issues_per_page
+    """
+    timeframe: Dict[str, Any] = Field(default_factory=dict)  # stored into ingestion_jobs.timeframe
+    params: Dict[str, Any] = Field(default_factory=dict)  # stored into ingestion_jobs.params
+    upsert: bool = True
+    embed_after: bool = False
+
+    # Allow selective ingestion if you want to reduce load
+    include_releases: bool = True
+    include_prs: bool = True
+    include_issues: bool = True
