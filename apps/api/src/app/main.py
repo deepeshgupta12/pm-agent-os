@@ -12,6 +12,7 @@ from app.api.artifacts import router as artifacts_router
 from app.api.evidence import router as evidence_router
 from app.api.agents import router as agents_router
 from app.api.export import router as export_router
+from app.api.connectors import router as connectors_router
 
 from app.api.retrieval import router as retrieval_router
 from app.api.integrations_github import router as github_router
@@ -36,7 +37,7 @@ app.include_router(artifacts_router)
 app.include_router(evidence_router)
 app.include_router(agents_router)
 app.include_router(export_router)
-
+app.include_router(connectors_router)
 app.include_router(retrieval_router)
 app.include_router(github_router)
 
