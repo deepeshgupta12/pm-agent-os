@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     # GitHub (read-only V1)
     GITHUB_TOKEN: str = ""  # classic PAT or fine-grained token with repo read access
 
+    # Google Docs (V1 “real docs”)
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REFRESH_TOKEN: str = ""
+
     def cors_origins_list(self) -> List[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
 

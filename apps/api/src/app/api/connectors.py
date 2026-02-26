@@ -13,6 +13,7 @@ from app.core.github_client import GitHubClient, GitHubAPIError
 from app.core.ingest_common import get_or_create_source, upsert_document, rebuild_chunks, embed_document
 from app.db.session import get_db
 from app.db.models import Connector, IngestionJob, User
+from app.core.google_client import GoogleClient, GoogleAPIError
 from app.schemas.connectors import (
     ConnectorCreateIn,
     ConnectorUpdateIn,
@@ -20,6 +21,7 @@ from app.schemas.connectors import (
     DocsIngestionJobCreateIn,
     GitHubIngestionJobCreateIn,
     IngestionJobOut,
+    GoogleDocsIngestionJobCreateIn,
 )
 
 router = APIRouter(tags=["connectors"])
@@ -568,6 +570,177 @@ def create_github_ingestion_job(
         stats["error_samples"].append({"status": e.status_code, "message": str(e), "details": e.details})
         job.status = "failed"
         c.last_error = f"GitHubAPIError {e.status_code}: {str(e)}"
+    except Exception as e:
+        stats["errors"] += 1
+        stats["error_samples"].append(str(e))
+        job.status = "failed"
+        c.last_error = str(e)
+    finally:
+        job.stats = stats
+        job.finished_at = datetime.now(timezone.utc)
+        db.add(job)
+        db.add(c)
+        db.commit()
+        db.refresh(job)
+
+    return _job_out(job)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/connectors/{connector_id}/ingestion-jobs/gdocs",
+    response_model=IngestionJobOut,
+)
+def create_google_docs_ingestion_job(
+    workspace_id: str,
+    connector_id: str,
+    payload: GoogleDocsIngestionJobCreateIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
+
+    try:
+        cid = uuid.UUID(connector_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    c = db.get(Connector, cid)
+    if not c or str(c.workspace_id) != str(ws.id) or c.type != "docs":
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    cfg = c.config or {}
+    folder_id = cfg.get("folder_id")
+    if not folder_id:
+        raise HTTPException(status_code=400, detail="Docs connector config missing folder_id")
+
+    # OAuth creds can come from connector.config or env
+    client_id = cfg.get("client_id")
+    client_secret = cfg.get("client_secret")
+    refresh_token = cfg.get("refresh_token")
+
+    job = IngestionJob(
+        workspace_id=ws.id,
+        connector_id=c.id,
+        kind="gdocs_sync",
+        status="running",
+        timeframe=payload.timeframe or {},
+        params=payload.params or {},
+        stats={},
+        started_at=datetime.now(timezone.utc),
+        created_by_user_id=user.id,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    # Use retrieval Source type=docs (same bucket)
+    src = get_or_create_source(
+        db,
+        workspace_id=ws.id,
+        type="docs",
+        name=c.name or "Google Docs",
+        config={"provider": "google_docs", "connector_id": str(c.id), **cfg},
+    )
+    job.source_id = src.id
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    stats: Dict[str, Any] = {
+        "errors": 0,
+        "error_samples": [],
+        "docs_seen": 0,
+        "docs_created": 0,
+        "docs_updated": 0,
+        "documents_upserted": 0,
+        "chunks_created": 0,
+        "embedded_chunks": 0,
+        "folder_id": folder_id,
+    }
+
+    try:
+        client = GoogleClient(
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token=refresh_token,
+        )
+
+        fetched = 0
+        page_token: Optional[str] = None
+
+        while True:
+            files, dbg = client.list_google_docs_in_folder(
+                folder_id=str(folder_id),
+                page_size=int(payload.page_size),
+                page_token=page_token,
+            )
+            page_token = dbg.get("nextPageToken")
+
+            for f in files:
+                if fetched >= int(payload.max_docs):
+                    page_token = None
+                    break
+
+                fetched += 1
+                stats["docs_seen"] += 1
+
+                file_id = f.get("id")
+                title = f.get("name") or "Untitled"
+                if not file_id:
+                    continue
+
+                text, _dbg2 = client.export_doc_text(file_id=str(file_id))
+                # Upsert using stable external_id: gdoc:<file_id>
+                ext_id = f"gdoc:{file_id}" if payload.upsert else None
+
+                meta = {
+                    "provider": "google_docs",
+                    "kind": "doc",
+                    "repo": None,
+                    "folder_id": folder_id,
+                    "gdoc_id": file_id,
+                    "drive_file_id": file_id,
+                    "webViewLink": f.get("webViewLink"),
+                    "modifiedTime": f.get("modifiedTime"),
+                    "createdTime": f.get("createdTime"),
+                    "owners": f.get("owners"),
+                    "connector_id": str(c.id),
+                    "ingestion_job_id": str(job.id),
+                    "fetched_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                }
+
+                doc, created = upsert_document(
+                    db,
+                    workspace_id=ws.id,
+                    source_id=src.id,
+                    external_id=ext_id,
+                    title=title,
+                    raw_text=text,
+                    meta=meta,
+                )
+                stats["documents_upserted"] += 1
+                if created:
+                    stats["docs_created"] += 1
+                else:
+                    stats["docs_updated"] += 1
+
+                stats["chunks_created"] += rebuild_chunks(db, document_id=doc.id, raw_text=doc.raw_text)
+
+                if payload.embed_after:
+                    stats["embedded_chunks"] += embed_document(db, document_id=doc.id)
+
+            if not page_token:
+                break
+
+        job.status = "success"
+        c.last_sync_at = datetime.now(timezone.utc)
+        c.last_error = None
+
+    except GoogleAPIError as e:
+        stats["errors"] += 1
+        stats["error_samples"].append({"status": e.status_code, "message": str(e), "details": e.details})
+        job.status = "failed"
+        c.last_error = f"GoogleAPIError {e.status_code}: {str(e)}"
     except Exception as e:
         stats["errors"] += 1
         stats["error_samples"].append(str(e))

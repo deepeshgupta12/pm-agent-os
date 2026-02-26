@@ -81,3 +81,23 @@ class GitHubIngestionJobCreateIn(BaseModel):
     include_releases: bool = True
     include_prs: bool = True
     include_issues: bool = True
+
+
+# -------------------------
+# V1 Ingestion Jobs (Google Docs via Drive folder)
+# -------------------------
+class GoogleDocsIngestionJobCreateIn(BaseModel):
+    """
+    Reads connector.config:
+      - folder_id (required)
+      - client_id/client_secret/refresh_token (optional if env vars exist)
+    Ingests all Google Docs in that folder.
+    """
+    timeframe: Dict[str, Any] = Field(default_factory=dict)
+    params: Dict[str, Any] = Field(default_factory=dict)
+    upsert: bool = True
+    embed_after: bool = False
+
+    # Safety controls
+    page_size: int = Field(default=100, ge=1, le=1000)
+    max_docs: int = Field(default=200, ge=1, le=2000)  # stop after N docs to avoid huge runs
