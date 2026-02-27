@@ -633,13 +633,13 @@ def create_google_docs_ingestion_job(
     db.commit()
     db.refresh(job)
 
-    # Use retrieval Source type=docs (same bucket)
+    # Use retrieval Source type=docs (same bucket). Multiple docs sources allowed by name now.
     src = get_or_create_source(
         db,
         workspace_id=ws.id,
         type="docs",
-        name=c.name or "Google Docs",
-        config={"provider": "google_docs", "connector_id": str(c.id), **cfg},
+        name=c.name or "Google Drive Docs",
+        config={"provider": "google_drive", "connector_id": str(c.id), **cfg},
     )
     job.source_id = src.id
     db.add(job)
@@ -656,6 +656,9 @@ def create_google_docs_ingestion_job(
         "chunks_created": 0,
         "embedded_chunks": 0,
         "folder_id": folder_id,
+        "google_docs_seen": 0,
+        "docx_seen": 0,
+        "docx_empty_text": 0,
     }
 
     try:
@@ -669,10 +672,11 @@ def create_google_docs_ingestion_job(
         page_token: Optional[str] = None
 
         while True:
-            files, dbg = client.list_google_docs_in_folder(
+            files, dbg = client.list_docs_in_folder(
                 folder_id=str(folder_id),
                 page_size=int(payload.page_size),
                 page_token=page_token,
+                include_docx=True,
             )
             page_token = dbg.get("nextPageToken")
 
@@ -686,20 +690,34 @@ def create_google_docs_ingestion_job(
 
                 file_id = f.get("id")
                 title = f.get("name") or "Untitled"
+                mime = f.get("mimeType") or ""
                 if not file_id:
                     continue
 
-                text, _dbg2 = client.export_doc_text(file_id=str(file_id))
-                # Upsert using stable external_id: gdoc:<file_id>
-                ext_id = f"gdoc:{file_id}" if payload.upsert else None
+                text = ""
+                if mime == GoogleClient.GOOGLE_DOC_MIME:
+                    stats["google_docs_seen"] += 1
+                    text, _dbg2 = client.export_google_doc_text(file_id=str(file_id))
+                    ext_id = f"gdoc:{file_id}" if payload.upsert else None
+                    kind = "google_doc"
+                elif mime == GoogleClient.DOCX_MIME:
+                    stats["docx_seen"] += 1
+                    blob, _dbg3 = client.download_file_bytes(file_id=str(file_id))
+                    text = client.extract_text_from_docx_bytes(blob)
+                    if not text.strip():
+                        stats["docx_empty_text"] += 1
+                    ext_id = f"docx:{file_id}" if payload.upsert else None
+                    kind = "docx"
+                else:
+                    # Shouldn't happen due to query filter, but keep safe.
+                    continue
 
                 meta = {
-                    "provider": "google_docs",
-                    "kind": "doc",
-                    "repo": None,
+                    "provider": "google_drive",
+                    "kind": kind,
                     "folder_id": folder_id,
-                    "gdoc_id": file_id,
                     "drive_file_id": file_id,
+                    "mimeType": mime,
                     "webViewLink": f.get("webViewLink"),
                     "modifiedTime": f.get("modifiedTime"),
                     "createdTime": f.get("createdTime"),
