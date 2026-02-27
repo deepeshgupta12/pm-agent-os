@@ -19,19 +19,26 @@ from app.core.citations import (
 )
 from app.core.retrieval_search import hybrid_retrieve
 from app.db.session import get_db
-from app.db.models import Workspace, Run, RunLog, AgentDefinition, Artifact, Evidence, User
+from app.db.models import (
+    Workspace,
+    Run,
+    RunLog,
+    AgentDefinition,
+    Artifact,
+    Evidence,
+    User,
+    RunStatusEvent,  # NEW
+)
 from app.db.retrieval_models import Source
 from app.schemas.core import RunCreateIn, RunOut, RunStatusUpdateIn
-
-from app.schemas.core import (
-    RunLogCreateIn,
-    RunLogOut,
-    RunTimelineEventOut,
-)
+from app.schemas.core import RunLogCreateIn, RunLogOut, RunTimelineEventOut
 
 router = APIRouter(tags=["runs"])
 
 
+# -------------------------
+# Helpers
+# -------------------------
 def _parse_uuid(id_str: str) -> uuid.UUID:
     try:
         return uuid.UUID(id_str)
@@ -42,6 +49,53 @@ def _parse_uuid(id_str: str) -> uuid.UUID:
 def _ensure_run_workspace_access(db: Session, run: Run, user: User) -> Workspace:
     ws, _role = require_workspace_access(str(run.workspace_id), db, user)
     return ws
+
+
+def _write_status_event(
+    db: Session,
+    *,
+    run: Run,
+    from_status: Optional[str],
+    to_status: str,
+    message: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> RunStatusEvent:
+    ev = RunStatusEvent(
+        run_id=run.id,
+        from_status=from_status,
+        to_status=to_status,
+        message=message,
+        meta=meta or {},
+    )
+    db.add(ev)
+    db.commit()
+    db.refresh(ev)
+    return ev
+
+
+def _set_run_status(
+    db: Session,
+    *,
+    run: Run,
+    to_status: str,
+    message: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    from_status = run.status
+    run.status = to_status
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    # write auditable status transition
+    _write_status_event(
+        db,
+        run=run,
+        from_status=from_status,
+        to_status=to_status,
+        message=message,
+        meta=meta or {},
+    )
 
 
 def _call_hybrid_retrieve(
@@ -57,7 +111,7 @@ def _call_hybrid_retrieve(
     """
     Compatibility shim:
     - If hybrid_retrieve supports source/timeframe args, pass them.
-    - Otherwise fall back and filter in Python (like retrieval.py did earlier).
+    - Otherwise fall back and filter in Python.
     """
     source_types = source_types or []
     timeframe = timeframe or {}
@@ -74,22 +128,83 @@ def _call_hybrid_retrieve(
             timeframe=timeframe,
         )
     except TypeError:
-        # Old signature, then filter manually
         items = hybrid_retrieve(db, workspace_id=workspace_id, q=q, k=k, alpha=alpha)
 
         if source_types:
-            # map type->source_ids
             src_ids = set(
                 str(x)
                 for x in db.execute(
-                    select(Source.id).where(Source.workspace_id == uuid.UUID(workspace_id), Source.type.in_(source_types))
-                ).scalars().all()
+                    select(Source.id).where(
+                        Source.workspace_id == uuid.UUID(workspace_id),
+                        Source.type.in_(source_types),
+                    )
+                )
+                .scalars()
+                .all()
             )
             items = [it for it in items if str(it.get("source_id", "")) in src_ids]
 
-        # timeframe filtering (best-effort) - only if chunk/doc meta includes a timestamp
-        # (Your retrieval core already supports timeframe, so for old core we keep it no-op.)
+        # timeframe filtering best-effort no-op in old core
         return items
+
+
+def _no_evidence_md(agent_id: str, input_payload: Dict[str, Any], retrieval_meta: Dict[str, Any]) -> Tuple[str, str, str]:
+    """
+    Evidence=0 mode:
+    - do NOT call LLM
+    - return a draft that is explicitly "no evidence found" + questions-only.
+    """
+    artifact_type = AGENT_TO_DEFAULT_ARTIFACT_TYPE.get(agent_id, "strategy_memo")
+    title = f"{artifact_type.replace('_', ' ').title()} — Draft"
+
+    goal = (input_payload.get("goal") or "").strip()
+    context = (input_payload.get("context") or "").strip()
+    constraints = (input_payload.get("constraints") or "").strip()
+
+    q = retrieval_meta.get("query") or retrieval_meta.get("q") or ""
+    k = retrieval_meta.get("k")
+    alpha = retrieval_meta.get("alpha")
+    source_types = retrieval_meta.get("source_types")
+    timeframe = retrieval_meta.get("timeframe")
+
+    md = f"""# {title}
+
+## Summary
+No evidence was found for the requested retrieval query, so this draft does **not** attempt to write a grounded PRD/spec. It instead captures what we need to proceed.
+
+## Goal
+{goal or "- (not provided)"}
+
+## Context
+{context or "- (not provided)"}
+
+## Constraints
+{constraints or "- (not provided)"}
+
+## Retrieval Attempt
+- Query: `{q}`
+- k: `{k}`
+- alpha: `{alpha}`
+- source_types: `{source_types}`
+- timeframe: `{timeframe}`
+- evidence_count: `0`
+
+## What this means
+- We cannot ground requirements/claims without evidence.
+- Next step is to ingest/sync the right documents OR change the query/source filters.
+
+## Open Questions (required to proceed)
+1. Which exact doc(s) should be considered the source of truth for this run (title or link)?
+2. Are those docs already ingested into this workspace? If yes, confirm the correct source_type (docs/github/manual).
+3. Should retrieval broaden (higher k, multiple source_types) or narrow (more precise query)?
+4. Do we need embeddings (embed_after=true) for these documents to improve recall?
+
+## Next Actions
+- Ingest/sync the missing documents into the workspace
+- Re-run retrieval with an updated query and confirm evidence_count > 0
+- Then regenerate the artifact grounded in evidence
+"""
+    return artifact_type, title, md
 
 
 def _generate_md_with_evidence(
@@ -106,7 +221,7 @@ def _generate_md_with_evidence(
 
     ev_text = format_evidence_for_prompt(evidence_items)
 
-    # If LLM on -> enforce citations using same rules as regenerate
+    # If LLM on -> enforce citations
     if settings.LLM_ENABLED and settings.OPENAI_API_KEY:
         from app.core.prompts import build_system_prompt, build_user_prompt
         from app.core.llm_client import llm_generate_markdown
@@ -120,7 +235,7 @@ def _generate_md_with_evidence(
         system_prompt = build_system_prompt()
         base_user_prompt = build_user_prompt(agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text)
 
-        citation_rules = f"""
+        citation_rules = """
 You MUST ground claims in the Evidence Pack below.
 
 Citation rules:
@@ -132,7 +247,7 @@ Output requirements (MANDATORY):
 1) Start with a clear H1 title.
 2) Include a section "## Unknowns / Assumptions".
 3) Include a section "## Sources" at the end with the exact [n] references.
-"""
+""".strip()
 
         evidence_pack = f"""
 Evidence Pack (cite as [n]):
@@ -140,7 +255,7 @@ Evidence Pack (cite as [n]):
 {citations_block}
 """.strip()
 
-        user_prompt = "\n\n".join([base_user_prompt.strip(), citation_rules.strip(), evidence_pack])
+        user_prompt = "\n\n".join([base_user_prompt.strip(), citation_rules, evidence_pack])
 
         md = llm_generate_markdown(system_prompt=system_prompt, user_prompt=user_prompt)
 
@@ -169,13 +284,16 @@ Evidence Pack (cite as [n]):
 
         return artifact_type, title, md
 
-    # LLM off -> deterministic scaffold, plus note
+    # LLM off -> deterministic scaffold + note
     artifact_type2, title2, md2 = build_initial_artifact(agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text)
     if len(evidence_items) > 0 and "## Unknowns / Assumptions" not in md2:
         md2 = md2.rstrip() + "\n\n## Unknowns / Assumptions\n- Evidence attached, but citation-grounded generation requires LLM mode.\n"
     return artifact_type2, title2, md2
 
 
+# -------------------------
+# APIs
+# -------------------------
 @router.post("/workspaces/{workspace_id}/runs", response_model=RunOut)
 def create_run(
     workspace_id: str,
@@ -200,10 +318,11 @@ def create_run(
     db.commit()
     db.refresh(r)
 
-    r.status = "running"
-    db.add(r)
-    db.commit()
-    db.refresh(r)
+    # status history
+    _write_status_event(db, run=r, from_status=None, to_status="created", message="Run created", meta={})
+
+    # Move to running
+    _set_run_status(db, run=r, to_status="running", message="Run started", meta={})
 
     # ----------------------------
     # True RAG: pre-retrieve & attach evidence
@@ -211,12 +330,23 @@ def create_run(
     ev_items: List[Evidence] = []
     rcfg = payload.retrieval
 
+    retrieval_meta: Optional[Dict[str, Any]] = None
+
     if rcfg and rcfg.enabled and (rcfg.query or "").strip():
         q = rcfg.query.strip()
         k = int(rcfg.k or 6)
         alpha = float(rcfg.alpha) if rcfg.alpha is not None else 0.65
         source_types = [s.strip() for s in (rcfg.source_types or []) if s.strip()]
         timeframe = rcfg.timeframe or {}
+
+        retrieval_meta = {
+            "enabled": True,
+            "query": q,
+            "k": k,
+            "alpha": alpha,
+            "source_types": source_types,
+            "timeframe": timeframe,
+        }
 
         items = _call_hybrid_retrieve(
             db,
@@ -262,7 +392,16 @@ def create_run(
         for e in ev_items:
             db.refresh(e)
 
-        # Also log retrieval action (auditable)
+        # Persist retrieval config on Run.input_payload (V1 hardening)
+        retrieval_meta["evidence_count"] = len(ev_items)
+        ip = dict(r.input_payload or {})
+        ip["_retrieval"] = retrieval_meta
+        r.input_payload = ip
+        db.add(r)
+        db.commit()
+        db.refresh(r)
+
+        # Log retrieval action (auditable)
         db.add(
             RunLog(
                 run_id=r.id,
@@ -283,11 +422,25 @@ def create_run(
     # ----------------------------
     # Generate artifact grounded in evidence
     # ----------------------------
-    artifact_type, title, md = _generate_md_with_evidence(
-        agent_id=r.agent_id,
-        input_payload=r.input_payload,
-        evidence_items=ev_items,
-    )
+    if retrieval_meta and retrieval_meta.get("enabled") and len(ev_items) == 0:
+        # Evidence=0 mode (do not call LLM)
+        artifact_type, title, md = _no_evidence_md(r.agent_id, r.input_payload, retrieval_meta)
+        # status note
+        db.add(
+            RunLog(
+                run_id=r.id,
+                level="warn",
+                message="No evidence found for retrieval query; returned questions-only draft.",
+                meta={"retrieval": retrieval_meta},
+            )
+        )
+        db.commit()
+    else:
+        artifact_type, title, md = _generate_md_with_evidence(
+            agent_id=r.agent_id,
+            input_payload=r.input_payload,
+            evidence_items=ev_items,
+        )
 
     art = Artifact(
         run_id=r.id,
@@ -301,13 +454,21 @@ def create_run(
     db.add(art)
     db.commit()
 
-    r.status = "completed"
+    # Complete run
     r.output_summary = build_run_summary(agent_id=r.agent_id, artifact_type=artifact_type)
     if ev_items:
         r.output_summary += f" Evidence attached: {len(ev_items)} snippet(s)."
     db.add(r)
     db.commit()
     db.refresh(r)
+
+    _set_run_status(
+        db,
+        run=r,
+        to_status="completed",
+        message="Run completed",
+        meta={"artifact_type": artifact_type, "evidence_count": len(ev_items)},
+    )
 
     return RunOut(
         id=str(r.id),
@@ -376,11 +537,21 @@ def update_run_status(
 
     require_workspace_role_min(str(r.workspace_id), "member", db, user)
 
+    from_status = r.status
     r.status = payload.status
     r.output_summary = payload.output_summary
     db.add(r)
     db.commit()
     db.refresh(r)
+
+    _write_status_event(
+        db,
+        run=r,
+        from_status=from_status,
+        to_status=r.status,
+        message="Status updated via API",
+        meta={"output_summary": r.output_summary or ""},
+    )
 
     return RunOut(
         id=str(r.id),
@@ -447,6 +618,15 @@ def create_run_log(run_id: str, payload: RunLogCreateIn, db: Session = Depends(g
 
 @router.get("/runs/{run_id}/timeline", response_model=list[RunTimelineEventOut])
 def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    """
+    Viewer+ read ok.
+    Timeline is a merged view:
+    - run created
+    - status transitions from run_status_events (authoritative)
+    - artifacts
+    - evidence
+    - logs
+    """
     r = db.get(Run, run_id)
     if not r:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -455,6 +635,7 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
 
     events: list[RunTimelineEventOut] = []
 
+    # Run created (always)
     events.append(
         RunTimelineEventOut(
             ts=r.created_at,
@@ -465,17 +646,29 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
         )
     )
 
-    if r.updated_at and r.updated_at != r.created_at:
+    # Status transitions (authoritative)
+    status_events = (
+        db.execute(select(RunStatusEvent).where(RunStatusEvent.run_id == r.id).order_by(RunStatusEvent.created_at.desc()))
+        .scalars()
+        .all()
+    )
+    for se in status_events:
+        from_s = se.from_status or ""
+        to_s = se.to_status or ""
+        label = f"Status: {from_s} -> {to_s}".strip()
+        if se.message:
+            label = f"{label} — {se.message}"
         events.append(
             RunTimelineEventOut(
-                ts=r.updated_at,
+                ts=se.created_at,
                 kind="status",
-                label=f"Run status now: {r.status}",
-                ref_id=str(r.id),
-                meta={"output_summary": r.output_summary or ""},
+                label=label,
+                ref_id=str(se.id),
+                meta=se.meta or {},
             )
         )
 
+    # Artifacts
     arts = (
         db.execute(select(Artifact).where(Artifact.run_id == r.id).order_by(Artifact.created_at.desc()))
         .scalars()
@@ -492,6 +685,7 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
             )
         )
 
+    # Evidence
     evs = (
         db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc()))
         .scalars()
@@ -508,6 +702,7 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
             )
         )
 
+    # Logs
     logs = (
         db.execute(select(RunLog).where(RunLog.run_id == r.id).order_by(RunLog.created_at.desc()))
         .scalars()
@@ -527,12 +722,14 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
     events.sort(key=lambda x: x.ts, reverse=True)
     return events
 
+
 @router.get("/runs/{run_id}/rag-debug")
 def rag_debug(run_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
     """
     Returns:
-    - latest pre-retrieval log meta (query, k, alpha, source_types, timeframe, evidence_count)
-    - all evidence items attached to this run (ordered newest first)
+    - retrieval_config from Run.input_payload["_retrieval"] if present
+    - latest pre-retrieval log meta (back-compat)
+    - all evidence items attached to this run (newest first)
     """
     r = db.get(Run, run_id)
     if not r:
@@ -540,14 +737,12 @@ def rag_debug(run_id: str, db: Session = Depends(get_db), user: User = Depends(r
 
     _ensure_run_workspace_access(db, r, user)
 
-    # newest evidence first
     evs = (
         db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc()))
         .scalars()
         .all()
     )
 
-    # latest "Pre-retrieval..." log
     log = (
         db.execute(
             select(RunLog)
@@ -560,9 +755,16 @@ def rag_debug(run_id: str, db: Session = Depends(get_db), user: User = Depends(r
         .first()
     )
 
+    retrieval_cfg = None
+    try:
+        retrieval_cfg = (r.input_payload or {}).get("_retrieval")
+    except Exception:
+        retrieval_cfg = None
+
     return {
         "ok": True,
         "run_id": str(r.id),
+        "retrieval_config": retrieval_cfg,
         "retrieval_log": (log.meta or {}) if log else None,
         "evidence": [
             {
