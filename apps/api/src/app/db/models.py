@@ -140,6 +140,9 @@ class Run(Base):
     artifacts: Mapped[List["Artifact"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     evidence_items: Mapped[List["Evidence"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     logs: Mapped[List["RunLog"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+    status_events: Mapped[List["RunStatusEvent"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
 
     pipeline_steps: Mapped[List["PipelineStep"]] = relationship(back_populates="run")
 
@@ -258,6 +261,29 @@ class RunLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     run: Mapped["Run"] = relationship(back_populates="logs")
+
+class RunStatusEvent(Base):
+    __tablename__ = "run_status_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    from_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    meta: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    run: Mapped["Run"] = relationship(back_populates="status_events")
 
 
 # ------------------------
