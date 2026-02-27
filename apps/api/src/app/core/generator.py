@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, Optional
 
 from app.core.config import settings
 
@@ -62,7 +62,12 @@ This is a deterministic draft scaffold.
     return artifact_type, title, md
 
 
-def build_initial_artifact(agent_id: str, input_payload: Dict[str, Any]) -> Tuple[str, str, str]:
+def build_initial_artifact(
+    agent_id: str,
+    input_payload: Dict[str, Any],
+    *,
+    evidence_text: str = "",
+) -> Tuple[str, str, str]:
     """
     Returns: (artifact_type, title, markdown_content)
 
@@ -79,16 +84,14 @@ def build_initial_artifact(agent_id: str, input_payload: Dict[str, Any]) -> Tupl
             from app.core.llm_client import llm_generate_markdown
 
             system_prompt = build_system_prompt()
-            user_prompt = build_user_prompt(agent_id=agent_id, input_payload=input_payload)
+            user_prompt = build_user_prompt(agent_id=agent_id, input_payload=input_payload, evidence_text=evidence_text or "")
             md = llm_generate_markdown(system_prompt=system_prompt, user_prompt=user_prompt)
 
-            # Ensure at least starts with a heading
             if not md.lstrip().startswith("#"):
                 md = f"# {title}\n\n" + md
 
             return artifact_type, title, md
         except Exception:
-            # Safety fallback: never fail run creation due to LLM issues
             return _deterministic_template(agent_id, input_payload)
 
     return _deterministic_template(agent_id, input_payload)

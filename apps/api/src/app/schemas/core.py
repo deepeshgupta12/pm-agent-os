@@ -27,10 +27,27 @@ class AgentOut(BaseModel):
     default_artifact_type: str
 
 
+# -------- Retrieval config (V1 True RAG) --------
+class RetrievalConfigIn(BaseModel):
+    enabled: bool = True
+    query: str = Field(default="", max_length=500)
+    k: int = Field(default=6, ge=1, le=50)
+    alpha: float = Field(default=0.65, ge=0.0, le=1.0)
+
+    # RunBuilder sends this as list[str]
+    source_types: List[str] = Field(default_factory=list)
+
+    # e.g. {"preset":"30d"} or {"preset":"custom","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}
+    timeframe: Dict[str, Any] = Field(default_factory=dict)
+
+
 # -------- Runs --------
 class RunCreateIn(BaseModel):
     agent_id: str
     input_payload: Dict[str, Any] = Field(default_factory=dict)
+
+    # ✅ NEW: make retrieval a first-class field so alpha isn’t ignored
+    retrieval: Optional[RetrievalConfigIn] = None
 
 
 class RunOut(BaseModel):
