@@ -157,3 +157,11 @@ export type RunTimelineEvent = {
   ref_id?: string | null;
   meta: Record<string, unknown>;
 };
+
+export type RagDebugResponse = {
+  ok: boolean;
+  run_id: string;
+  retrieval_config?: Record<string, unknown> | null;
+  retrieval_log?: Record<string, unknown> | null;
+  evidence: Evidence[];
+};
