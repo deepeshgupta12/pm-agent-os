@@ -42,6 +42,10 @@ def hybrid_retrieve(
       - source filtering happens IN SQL (FTS + vector)
       - timeframe filtering happens IN SQL (FTS + vector)
       - embeddings/vector part is optional; if embeddings unavailable, fall back to FTS only.
+
+    Timeframe semantics:
+      Use upstream timestamps first, then fallback to DB timestamps:
+        COALESCE(d.source_updated_at, d.source_created_at, d.updated_at, d.created_at)
     """
     q = (q or "").strip()
     if not q:
@@ -55,13 +59,10 @@ def hybrid_retrieve(
     if alpha > 1.0:
         alpha = 1.0
 
-    # Defensive sanitization of source_types
     stypes = [s.strip().lower() for s in (source_types or []) if s and s.strip()]
     if not stypes:
         stypes = []
 
-    # Timeframe filter uses documents.updated_at (fallback documents.created_at)
-    # If both start_ts/end_ts provided, apply both bounds.
     timeframe_sql = ""
     params: Dict[str, Any] = {"workspace_id": workspace_id, "q": q, "limit": k * 3}
 
@@ -69,16 +70,19 @@ def hybrid_retrieve(
         timeframe_sql += " AND s.type = ANY(:source_types) "
         params["source_types"] = stypes
 
+    # NEW: prefer source timestamps when filtering
+    ts_expr = "COALESCE(d.source_updated_at, d.source_created_at, d.updated_at, d.created_at)"
+
     if start_ts is not None:
-        timeframe_sql += " AND COALESCE(d.updated_at, d.created_at) >= :start_ts "
+        timeframe_sql += f" AND {ts_expr} >= :start_ts "
         params["start_ts"] = start_ts
 
     if end_ts is not None:
-        timeframe_sql += " AND COALESCE(d.updated_at, d.created_at) <= :end_ts "
+        timeframe_sql += f" AND {ts_expr} <= :end_ts "
         params["end_ts"] = end_ts
 
     # -----------------------------
-    # 1) FTS search (chunks.tsv_tsvector)
+    # 1) FTS search
     # -----------------------------
     fts_rows = db.execute(
         sql_text(
@@ -113,7 +117,6 @@ def hybrid_retrieve(
     vec_rows = []
     vec_scores: Dict[str, float] = {}
 
-    # Only attempt embeddings if we can (avoid crashing when key missing)
     can_embed = bool(settings.OPENAI_API_KEY) and bool(settings.EMBEDDINGS_MODEL)
 
     if can_embed:
@@ -162,7 +165,6 @@ def hybrid_retrieve(
             vec_scores = _normalize_scores([(r["chunk_id"], float(r["score_vec"])) for r in vec_rows])
 
         except Exception:
-            # Fail closed on vector part: return FTS-only hybrid (vec=0.0)
             vec_rows = []
             vec_scores = {}
 
