@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
@@ -16,8 +17,10 @@ from app.core.citations import (
     body_has_inline_citations,
     build_inline_citation_patch,
 )
+from app.core.retrieval_search import hybrid_retrieve
 from app.db.session import get_db
 from app.db.models import Workspace, Run, RunLog, AgentDefinition, Artifact, Evidence, User
+from app.db.retrieval_models import Source
 from app.schemas.core import RunCreateIn, RunOut, RunStatusUpdateIn
 
 from app.schemas.core import (
@@ -37,9 +40,140 @@ def _parse_uuid(id_str: str) -> uuid.UUID:
 
 
 def _ensure_run_workspace_access(db: Session, run: Run, user: User) -> Workspace:
-    # Viewer+ allowed for reads; existence is guarded by workspace access
     ws, _role = require_workspace_access(str(run.workspace_id), db, user)
     return ws
+
+
+def _call_hybrid_retrieve(
+    db: Session,
+    *,
+    workspace_id: str,
+    q: str,
+    k: int,
+    alpha: float,
+    source_types: Optional[List[str]] = None,
+    timeframe: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Compatibility shim:
+    - If hybrid_retrieve supports source/timeframe args, pass them.
+    - Otherwise fall back and filter in Python (like retrieval.py did earlier).
+    """
+    source_types = source_types or []
+    timeframe = timeframe or {}
+
+    try:
+        # Newer signature (if you already added it)
+        return hybrid_retrieve(
+            db,
+            workspace_id=workspace_id,
+            q=q,
+            k=k,
+            alpha=alpha,
+            source_types=source_types,
+            timeframe=timeframe,
+        )
+    except TypeError:
+        # Old signature, then filter manually
+        items = hybrid_retrieve(db, workspace_id=workspace_id, q=q, k=k, alpha=alpha)
+
+        if source_types:
+            # map type->source_ids
+            src_ids = set(
+                str(x)
+                for x in db.execute(
+                    select(Source.id).where(Source.workspace_id == uuid.UUID(workspace_id), Source.type.in_(source_types))
+                ).scalars().all()
+            )
+            items = [it for it in items if str(it.get("source_id", "")) in src_ids]
+
+        # timeframe filtering (best-effort) - only if chunk/doc meta includes a timestamp
+        # (Your retrieval core already supports timeframe, so for old core we keep it no-op.)
+        return items
+
+
+def _generate_md_with_evidence(
+    *,
+    agent_id: str,
+    input_payload: Dict[str, Any],
+    evidence_items: List[Evidence],
+) -> Tuple[str, str, str]:
+    """
+    Returns (artifact_type, title, md) for initial artifact, grounded in evidence if LLM is on.
+    """
+    artifact_type = AGENT_TO_DEFAULT_ARTIFACT_TYPE.get(agent_id, "strategy_memo")
+    title = f"{artifact_type.replace('_', ' ').title()} — Draft"
+
+    ev_text = format_evidence_for_prompt(evidence_items)
+
+    # If LLM on -> enforce citations using same rules as regenerate
+    if settings.LLM_ENABLED and settings.OPENAI_API_KEY:
+        from app.core.prompts import build_system_prompt, build_user_prompt
+        from app.core.llm_client import llm_generate_markdown
+
+        evidence_dicts = [
+            {"excerpt": e.excerpt, "source_ref": e.source_ref, "source_name": e.source_name, "meta": e.meta or {}}
+            for e in evidence_items
+        ]
+        citations_block, sources_section_md, normalized = build_citation_pack(evidence_dicts)
+
+        system_prompt = build_system_prompt()
+        base_user_prompt = build_user_prompt(agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text)
+
+        citation_rules = f"""
+You MUST ground claims in the Evidence Pack below.
+
+Citation rules:
+- Any factual claim, decision, requirement, or number MUST include at least one inline citation like [1] or [2].
+- Do NOT invent sources. Only cite from the Evidence Pack IDs.
+- If evidence is insufficient for a claim, write it under "## Unknowns / Assumptions" instead of guessing.
+
+Output requirements (MANDATORY):
+1) Start with a clear H1 title.
+2) Include a section "## Unknowns / Assumptions".
+3) Include a section "## Sources" at the end with the exact [n] references.
+"""
+
+        evidence_pack = f"""
+Evidence Pack (cite as [n]):
+
+{citations_block}
+""".strip()
+
+        user_prompt = "\n\n".join([base_user_prompt.strip(), citation_rules.strip(), evidence_pack])
+
+        md = llm_generate_markdown(system_prompt=system_prompt, user_prompt=user_prompt)
+
+        if not md.lstrip().startswith("#"):
+            md = f"# {title}\n\n" + md
+
+        if "## Unknowns / Assumptions" not in md:
+            md = md.rstrip() + "\n\n## Unknowns / Assumptions\n- None stated.\n"
+
+        if "## Sources" not in md:
+            md = md.rstrip() + "\n\n" + sources_section_md + "\n"
+
+        if len(evidence_items) > 0 and not output_has_any_citations(md):
+            md = (
+                md.rstrip()
+                + "\n\n"
+                + "### ⚠️ Citation check\n"
+                + "Evidence was available, but no citations like [1] were found. Please add inline citations.\n\n"
+                + sources_section_md
+                + "\n"
+            )
+
+        if len(evidence_items) > 0 and not body_has_inline_citations(md):
+            patch = build_inline_citation_patch(normalized)
+            md = md.rstrip() + "\n\n" + patch + "\n"
+
+        return artifact_type, title, md
+
+    # LLM off -> deterministic scaffold, plus note
+    artifact_type2, title2, md2 = build_initial_artifact(agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text)
+    if len(evidence_items) > 0 and "## Unknowns / Assumptions" not in md2:
+        md2 = md2.rstrip() + "\n\n## Unknowns / Assumptions\n- Evidence attached, but citation-grounded generation requires LLM mode.\n"
+    return artifact_type2, title2, md2
 
 
 @router.post("/workspaces/{workspace_id}/runs", response_model=RunOut)
@@ -49,7 +183,6 @@ def create_run(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    # member+ only
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
     agent = db.get(AgentDefinition, payload.agent_id)
@@ -72,7 +205,89 @@ def create_run(
     db.commit()
     db.refresh(r)
 
-    artifact_type, title, md = build_initial_artifact(agent_id=r.agent_id, input_payload=r.input_payload)
+    # ----------------------------
+    # True RAG: pre-retrieve & attach evidence
+    # ----------------------------
+    ev_items: List[Evidence] = []
+    rcfg = payload.retrieval
+
+    if rcfg and rcfg.enabled and (rcfg.query or "").strip():
+        q = rcfg.query.strip()
+        k = int(rcfg.k or 6)
+        alpha = float(rcfg.alpha or 0.65)
+        source_types = [s.strip() for s in (rcfg.source_types or []) if s.strip()]
+        timeframe = rcfg.timeframe or {}
+
+        items = _call_hybrid_retrieve(
+            db,
+            workspace_id=str(ws.id),
+            q=q,
+            k=k,
+            alpha=alpha,
+            source_types=source_types,
+            timeframe=timeframe,
+        )
+
+        for rank, it in enumerate(items, start=1):
+            source_ref = f"doc:{it.get('document_id')}#chunk:{it.get('chunk_id')}"
+            meta = {
+                "rank": rank,
+                "score_hybrid": float(it.get("score_hybrid") or 0.0),
+                "score_fts": float(it.get("score_fts") or 0.0),
+                "score_vec": float(it.get("score_vec") or 0.0),
+                "document_title": it.get("document_title", ""),
+                "source_id": it.get("source_id", ""),
+                "chunk_index": int(it.get("chunk_index") or 0),
+                "retrieval": {
+                    "q": q,
+                    "k": k,
+                    "alpha": alpha,
+                    "source_types": source_types,
+                    "timeframe": timeframe,
+                },
+            }
+
+            ev = Evidence(
+                run_id=r.id,
+                kind="snippet",
+                source_name="retrieval",
+                source_ref=source_ref,
+                excerpt=str(it.get("snippet") or ""),
+                meta=meta,
+            )
+            db.add(ev)
+            ev_items.append(ev)
+
+        db.commit()
+        for e in ev_items:
+            db.refresh(e)
+
+        # Also log retrieval action (auditable)
+        db.add(
+            RunLog(
+                run_id=r.id,
+                level="info",
+                message="Pre-retrieval completed; evidence attached.",
+                meta={
+                    "query": q,
+                    "k": k,
+                    "alpha": alpha,
+                    "source_types": source_types,
+                    "timeframe": timeframe,
+                    "evidence_count": len(ev_items),
+                },
+            )
+        )
+        db.commit()
+
+    # ----------------------------
+    # Generate artifact grounded in evidence
+    # ----------------------------
+    artifact_type, title, md = _generate_md_with_evidence(
+        agent_id=r.agent_id,
+        input_payload=r.input_payload,
+        evidence_items=ev_items,
+    )
 
     art = Artifact(
         run_id=r.id,
@@ -88,6 +303,8 @@ def create_run(
 
     r.status = "completed"
     r.output_summary = build_run_summary(agent_id=r.agent_id, artifact_type=artifact_type)
+    if ev_items:
+        r.output_summary += f" Evidence attached: {len(ev_items)} snippet(s)."
     db.add(r)
     db.commit()
     db.refresh(r)
@@ -105,7 +322,6 @@ def create_run(
 
 @router.get("/workspaces/{workspace_id}/runs", response_model=list[RunOut])
 def list_runs(workspace_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
-    # viewer+ read ok
     ws, _role = require_workspace_access(workspace_id, db, user)
 
     runs = (
@@ -153,7 +369,6 @@ def update_run_status(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    # member+ (write)
     run_uuid = _parse_uuid(run_id)
     r = db.get(Run, run_uuid)
     if not r:
@@ -177,131 +392,6 @@ def update_run_status(
         output_summary=r.output_summary,
     )
 
-
-@router.post("/runs/{run_id}/regenerate", response_model=RunOut)
-def regenerate_with_evidence(run_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
-    """
-    Regenerate draft for this run using attached evidence.
-
-    member+ only (it creates a new artifact version)
-    """
-    run_uuid = _parse_uuid(run_id)
-    r = db.get(Run, run_uuid)
-    if not r:
-        raise HTTPException(status_code=404, detail="Run not found")
-
-    require_workspace_role_min(str(r.workspace_id), "member", db, user)
-
-    # Collect evidence
-    ev_items = (
-        db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc()))
-        .scalars()
-        .all()
-    )
-    evidence_text = format_evidence_for_prompt(ev_items)
-
-    evidence_dicts = [
-        {"excerpt": e.excerpt, "source_ref": e.source_ref, "source_name": e.source_name, "meta": e.meta or {}}
-        for e in ev_items
-    ]
-    citations_block, sources_section_md, normalized = build_citation_pack(evidence_dicts)
-
-    artifact_type = AGENT_TO_DEFAULT_ARTIFACT_TYPE.get(r.agent_id, "strategy_memo")
-    title = f"{artifact_type.replace('_', ' ').title()} — Draft"
-
-    if settings.LLM_ENABLED and settings.OPENAI_API_KEY:
-        from app.core.prompts import build_system_prompt, build_user_prompt
-        from app.core.llm_client import llm_generate_markdown
-
-        system_prompt = build_system_prompt()
-        base_user_prompt = build_user_prompt(agent_id=r.agent_id, input_payload=r.input_payload, evidence_text=evidence_text)
-
-        citation_rules = f"""
-You MUST ground claims in the Evidence Pack below.
-
-Citation rules:
-- Any factual claim, decision, requirement, or number MUST include at least one inline citation like [1] or [2].
-- Do NOT invent sources. Only cite from the Evidence Pack IDs.
-- If evidence is insufficient for a claim, write it under "## Unknowns / Assumptions" instead of guessing.
-
-Output requirements (MANDATORY):
-1) Start with a clear H1 title.
-2) Include a section "## Unknowns / Assumptions".
-3) Include a section "## Sources" at the end with the exact [n] references.
-"""
-
-        evidence_pack = f"""
-Evidence Pack (cite as [n]):
-
-{citations_block}
-""".strip()
-
-        user_prompt = "\n\n".join([base_user_prompt.strip(), citation_rules.strip(), evidence_pack])
-
-        md = llm_generate_markdown(system_prompt=system_prompt, user_prompt=user_prompt)
-
-        if not md.lstrip().startswith("#"):
-            md = f"# {title}\n\n" + md
-
-        if "## Unknowns / Assumptions" not in md:
-            md = md.rstrip() + "\n\n## Unknowns / Assumptions\n- None stated.\n"
-
-        if "## Sources" not in md:
-            md = md.rstrip() + "\n\n" + sources_section_md + "\n"
-
-        if len(ev_items) > 0 and not output_has_any_citations(md):
-            md = (
-                md.rstrip()
-                + "\n\n"
-                + "### ⚠️ Citation check\n"
-                + "Evidence was available, but no citations like [1] were found. Please add inline citations.\n\n"
-                + sources_section_md
-                + "\n"
-            )
-
-        if len(ev_items) > 0 and not body_has_inline_citations(md):
-            patch = build_inline_citation_patch(normalized)
-            md = md.rstrip() + "\n\n" + patch + "\n"
-
-    else:
-        _, _, md = build_initial_artifact(agent_id=r.agent_id, input_payload=r.input_payload)
-        if "## Unknowns / Assumptions" not in md:
-            md = md.rstrip() + "\n\n## Unknowns / Assumptions\n- Evidence-based citations require LLM mode.\n"
-        if len(ev_items) > 0 and "## Sources" not in md:
-            md = md.rstrip() + "\n\n" + sources_section_md + "\n"
-        if len(ev_items) > 0 and not body_has_inline_citations(md):
-            md = md.rstrip() + "\n\n" + build_inline_citation_patch(normalized) + "\n"
-
-    max_ver = db.execute(
-        select(func.max(Artifact.version)).where(Artifact.run_id == r.id, Artifact.logical_key == artifact_type)
-    ).scalar_one_or_none()
-    next_ver = int(max_ver or 0) + 1
-
-    new_art = Artifact(
-        run_id=r.id,
-        type=artifact_type,
-        title=title,
-        content_md=md,
-        logical_key=artifact_type,
-        version=next_ver,
-        status="draft",
-    )
-    db.add(new_art)
-
-    r.output_summary = f"Regenerated draft with inline citations using {len(ev_items)} evidence item(s). Latest version: v{next_ver}."
-    db.add(r)
-    db.commit()
-    db.refresh(r)
-
-    return RunOut(
-        id=str(r.id),
-        workspace_id=str(r.workspace_id),
-        agent_id=r.agent_id,
-        created_by_user_id=str(r.created_by_user_id),
-        status=r.status,
-        input_payload=r.input_payload,
-        output_summary=r.output_summary,
-    )
 
 def _to_log_out(l: RunLog) -> RunLogOut:
     return RunLogOut(
@@ -337,7 +427,6 @@ def create_run_log(run_id: str, payload: RunLogCreateIn, db: Session = Depends(g
     if not r:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    # member+ only (write)
     require_workspace_role_min(str(r.workspace_id), "member", db, user)
 
     level = (payload.level or "info").strip().lower()
@@ -358,10 +447,6 @@ def create_run_log(run_id: str, payload: RunLogCreateIn, db: Session = Depends(g
 
 @router.get("/runs/{run_id}/timeline", response_model=list[RunTimelineEventOut])
 def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
-    """
-    Viewer+ read ok.
-    Timeline is a merged view: run lifecycle + artifacts + evidence + logs.
-    """
     r = db.get(Run, run_id)
     if not r:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -370,7 +455,6 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
 
     events: list[RunTimelineEventOut] = []
 
-    # Run created
     events.append(
         RunTimelineEventOut(
             ts=r.created_at,
@@ -381,7 +465,6 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
         )
     )
 
-    # Run updated/status snapshot (best-effort; we don't store transitions yet)
     if r.updated_at and r.updated_at != r.created_at:
         events.append(
             RunTimelineEventOut(
@@ -393,7 +476,6 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
             )
         )
 
-    # Artifacts
     arts = (
         db.execute(select(Artifact).where(Artifact.run_id == r.id).order_by(Artifact.created_at.desc()))
         .scalars()
@@ -410,7 +492,6 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
             )
         )
 
-    # Evidence
     evs = (
         db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc()))
         .scalars()
@@ -427,7 +508,6 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
             )
         )
 
-    # Logs
     logs = (
         db.execute(select(RunLog).where(RunLog.run_id == r.id).order_by(RunLog.created_at.desc()))
         .scalars()
@@ -444,6 +524,5 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
             )
         )
 
-    # Sort newest first
     events.sort(key=lambda x: x.ts, reverse=True)
     return events

@@ -27,10 +27,23 @@ class AgentOut(BaseModel):
     default_artifact_type: str
 
 
+# -------- Retrieval Config (V1 True RAG) --------
+class RetrievalConfigIn(BaseModel):
+    enabled: bool = False
+    query: str = Field(default="", max_length=500)
+    k: int = Field(default=6, ge=1, le=20)
+    alpha: float = Field(default=0.65, ge=0.0, le=1.0)
+    source_types: List[str] = Field(default_factory=list)  # ["docs","github",...]
+    timeframe: Dict[str, Any] = Field(default_factory=dict)  # {"preset":"30d"} or {"preset":"custom","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}
+
+
 # -------- Runs --------
 class RunCreateIn(BaseModel):
     agent_id: str
     input_payload: Dict[str, Any] = Field(default_factory=dict)
+
+    # Optional True-RAG pre-retrieval before generation
+    retrieval: Optional[RetrievalConfigIn] = None
 
 
 class RunOut(BaseModel):
