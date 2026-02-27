@@ -12,8 +12,26 @@ from app.core.embeddings import embed_texts
 from app.db.retrieval_models import Source, Document, Chunk, Embedding
 
 
-def get_or_create_source(db: Session, *, workspace_id: uuid.UUID, type: str, name: str, config: Dict[str, Any]) -> Source:
-    s = db.execute(select(Source).where(Source.workspace_id == workspace_id, Source.type == type)).scalar_one_or_none()
+def get_or_create_source(
+    db: Session,
+    *,
+    workspace_id: uuid.UUID,
+    type: str,
+    name: str,
+    config: Dict[str, Any],
+) -> Source:
+    """
+    Idempotent source by (workspace_id, type, name).
+    This is required because we can have multiple sources per type (e.g., multiple docs folders, multiple github repos).
+    """
+    s = db.execute(
+        select(Source).where(
+            Source.workspace_id == workspace_id,
+            Source.type == type,
+            Source.name == name,
+        )
+    ).scalar_one_or_none()
+
     if s:
         # Update config/name (V1 simple overwrite)
         s.name = name

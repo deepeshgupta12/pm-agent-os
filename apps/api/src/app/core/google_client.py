@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 import time
 import requests
+from io import BytesIO
+
+from docx import Document as DocxDocument  # python-docx
 
 from app.core.config import settings
 
@@ -16,13 +19,17 @@ class GoogleAPIError(RuntimeError):
 
 class GoogleClient:
     """
-    Minimal Google client for V1:
-      - list Google Docs in a Drive folder
-      - export a Google Doc to text/plain
+    V1 Google Drive ingestion:
+      - list Google Docs AND .docx in a Drive folder
+      - export Google Doc to text/plain
+      - download .docx bytes and extract text via python-docx
 
     Auth: OAuth refresh_token flow. Uses:
       - client_id, client_secret, refresh_token
     """
+
+    GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
+    DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
     def __init__(
         self,
@@ -81,17 +88,26 @@ class GoogleClient:
         tok = self._refresh_access_token()
         return {"Authorization": f"Bearer {tok}"}
 
-    def list_google_docs_in_folder(
+    def list_docs_in_folder(
         self,
         *,
         folder_id: str,
         page_size: int = 100,
         page_token: Optional[str] = None,
+        include_docx: bool = True,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
-        Returns Drive files that are Google Docs inside folder.
+        Returns Drive files in folder:
+          - Google Docs (native)
+          - optionally .docx
         """
-        q = f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.document' and trashed=false"
+        mime_q_parts = [f"mimeType='{self.GOOGLE_DOC_MIME}'"]
+        if include_docx:
+            mime_q_parts.append(f"mimeType='{self.DOCX_MIME}'")
+
+        mime_q = " or ".join(mime_q_parts)
+        q = f"'{folder_id}' in parents and ({mime_q}) and trashed=false"
+
         params: Dict[str, Any] = {
             "q": q,
             "pageSize": max(1, min(int(page_size), 1000)),
@@ -103,7 +119,7 @@ class GoogleClient:
         url = f"{self.drive_base}/files"
         r = requests.get(url, headers=self._headers(), params=params, timeout=45)
 
-        debug = {"status_code": r.status_code}
+        debug = {"status_code": r.status_code, "q": q}
         if r.status_code >= 400:
             try:
                 body = r.json()
@@ -114,12 +130,12 @@ class GoogleClient:
         js = r.json()
         files = js.get("files") or []
         next_token = js.get("nextPageToken")
-        return files, {"nextPageToken": next_token, "count": len(files)}
+        return files, {"nextPageToken": next_token, "count": len(files), "q": q}
 
-    def export_doc_text(self, *, file_id: str) -> Tuple[str, Dict[str, Any]]:
+    def export_google_doc_text(self, *, file_id: str) -> Tuple[str, Dict[str, Any]]:
         """
-        Drive export: GET /files/{fileId}/export?mimeType=text/plain
-        Works for Google Docs.
+        Google Docs export:
+          GET /files/{fileId}/export?mimeType=text/plain
         """
         url = f"{self.drive_base}/files/{file_id}/export"
         params = {"mimeType": "text/plain"}
@@ -127,12 +143,37 @@ class GoogleClient:
 
         debug = {"status_code": r.status_code}
         if r.status_code >= 400:
-            # export errors are sometimes plain text
             try:
                 body = r.json()
             except Exception:
                 body = {"message": r.text}
             raise GoogleAPIError(r.status_code, "Drive files.export failed", {"debug": debug, "body": body})
 
-        # text/plain
         return r.text or "", debug
+
+    def download_file_bytes(self, *, file_id: str) -> Tuple[bytes, Dict[str, Any]]:
+        """
+        Download binary content:
+          GET /files/{fileId}?alt=media
+        Works for .docx and other binaries.
+        """
+        url = f"{self.drive_base}/files/{file_id}"
+        params = {"alt": "media"}
+        r = requests.get(url, headers=self._headers(), params=params, timeout=60)
+
+        debug = {"status_code": r.status_code}
+        if r.status_code >= 400:
+            try:
+                body = r.json()
+            except Exception:
+                body = {"message": r.text}
+            raise GoogleAPIError(r.status_code, "Drive files.get(media) failed", {"debug": debug, "body": body})
+
+        return r.content or b"", debug
+
+    def extract_text_from_docx_bytes(self, data: bytes) -> str:
+        if not data:
+            return ""
+        doc = DocxDocument(BytesIO(data))
+        paras = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
+        return "\n".join(paras).strip()
