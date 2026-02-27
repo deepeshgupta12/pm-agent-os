@@ -169,6 +169,40 @@ def list_artifacts(run_id: str, db: Session = Depends(get_db), user: User = Depe
     )
     return [_to_out(a) for a in arts]
 
+@router.get("/runs/{run_id}/artifacts/latest", response_model=ArtifactOut)
+def get_latest_artifact_for_run(
+    run_id: str,
+    logical_key: str = Query(..., min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    run = db.get(Run, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    # viewer+ ok
+    _ensure_run_read_access(db, run, user)
+
+    max_ver = db.execute(
+        select(func.max(Artifact.version)).where(Artifact.run_id == run.id, Artifact.logical_key == logical_key)
+    ).scalar_one_or_none()
+
+    if not max_ver:
+        raise HTTPException(status_code=404, detail="No artifact found for that logical_key")
+
+    art = db.execute(
+        select(Artifact).where(
+            Artifact.run_id == run.id,
+            Artifact.logical_key == logical_key,
+            Artifact.version == int(max_ver),
+        )
+    ).scalar_one_or_none()
+
+    if not art:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    return _to_out(art)
+
 
 @router.get("/artifacts/{artifact_id}", response_model=ArtifactOut)
 def get_artifact(artifact_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):

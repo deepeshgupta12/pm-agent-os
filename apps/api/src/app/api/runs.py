@@ -214,7 +214,7 @@ def create_run(
     if rcfg and rcfg.enabled and (rcfg.query or "").strip():
         q = rcfg.query.strip()
         k = int(rcfg.k or 6)
-        alpha = float(rcfg.alpha or 0.65)
+        alpha = float(rcfg.alpha) if rcfg.alpha is not None else 0.65
         source_types = [s.strip() for s in (rcfg.source_types or []) if s.strip()]
         timeframe = rcfg.timeframe or {}
 
@@ -526,3 +526,54 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
 
     events.sort(key=lambda x: x.ts, reverse=True)
     return events
+
+@router.get("/runs/{run_id}/rag-debug")
+def rag_debug(run_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    """
+    Returns:
+    - latest pre-retrieval log meta (query, k, alpha, source_types, timeframe, evidence_count)
+    - all evidence items attached to this run (ordered newest first)
+    """
+    r = db.get(Run, run_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    _ensure_run_workspace_access(db, r, user)
+
+    # newest evidence first
+    evs = (
+        db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc()))
+        .scalars()
+        .all()
+    )
+
+    # latest "Pre-retrieval..." log
+    log = (
+        db.execute(
+            select(RunLog)
+            .where(RunLog.run_id == r.id)
+            .where(RunLog.message == "Pre-retrieval completed; evidence attached.")
+            .order_by(RunLog.created_at.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+
+    return {
+        "ok": True,
+        "run_id": str(r.id),
+        "retrieval_log": (log.meta or {}) if log else None,
+        "evidence": [
+            {
+                "id": str(e.id),
+                "kind": e.kind,
+                "source_name": e.source_name,
+                "source_ref": e.source_ref,
+                "excerpt": e.excerpt,
+                "meta": e.meta or {},
+                "created_at": e.created_at,
+            }
+            for e in evs
+        ],
+    }
