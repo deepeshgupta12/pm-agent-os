@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class SourceOut(BaseModel):
@@ -12,25 +12,12 @@ class SourceOut(BaseModel):
     config: Dict[str, Any]
 
 
-class DocumentIn(BaseModel):
-    title: str = Field(min_length=1, max_length=300)
-    markdown: str = Field(min_length=1)
-
-
 class DocumentOut(BaseModel):
     id: str
     workspace_id: str
     source_id: str
     title: str
     external_id: Optional[str]
-    meta: Dict[str, Any]
-
-
-class ChunkOut(BaseModel):
-    id: str
-    document_id: str
-    chunk_index: int
-    text: str
     meta: Dict[str, Any]
 
 
@@ -58,12 +45,23 @@ class RetrieveItem(BaseModel):
     score_vec: float
     score_hybrid: float
 
+    # V2.1 optional fields (safe if absent)
+    score_rerank_bonus: Optional[float] = None
+    score_final: Optional[float] = None
+    knobs: Optional[Dict[str, Any]] = None
+
 
 class RetrieveResponse(BaseModel):
     ok: bool = True
     q: str
     k: int
     alpha: float
+
+    # V2.1 knobs (echo back)
+    min_score: float
+    overfetch_k: int
+    rerank: bool
+
     items: List[RetrieveItem]
 
 

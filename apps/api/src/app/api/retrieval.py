@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -314,7 +314,6 @@ def embed_document_chunks(
     if not todo:
         return EmbedResult(document_id=str(doc.id), model=settings.EMBEDDINGS_MODEL, chunks_embedded=0)
 
-    # If embeddings are not configured, fail clearly
     if not settings.OPENAI_API_KEY:
         raise HTTPException(status_code=400, detail="OPENAI_API_KEY is missing for embeddings")
 
@@ -351,6 +350,10 @@ def retrieve(
     timeframe_preset: Optional[str] = Query(default=None, description="7d|30d|90d"),
     start_date: Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     end_date: Optional[str] = Query(default=None, description="YYYY-MM-DD"),
+    # V2.1 knobs
+    min_score: float = Query(default=0.15, ge=0.0, le=1.0),
+    overfetch_k: int = Query(default=3, ge=1, le=10),
+    rerank: bool = Query(default=False),
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
@@ -363,7 +366,6 @@ def retrieve(
         end_date=end_date,
     )
 
-    # Run retrieval with filters inside core
     items = hybrid_retrieve(
         db,
         workspace_id=workspace_id,
@@ -373,9 +375,15 @@ def retrieve(
         source_types=stypes or None,
         start_ts=start_ts,
         end_ts=end_ts,
+        min_score=min_score,
+        overfetch_k=overfetch_k,
+        rerank=rerank,
     )
 
-    # ---- V1 traceability: store retrieval request + items
+    # ---- traceability: store retrieval request + items
+    tf = timeframe_json or {}
+    tf["knobs"] = {"min_score": float(min_score), "overfetch_k": int(overfetch_k), "rerank": bool(rerank)}
+
     rr = RetrievalRequest(
         workspace_id=ws.id,
         created_by_user_id=user.id,
@@ -383,14 +391,13 @@ def retrieve(
         k=int(k),
         alpha=float(alpha),
         source_types=source_types,
-        timeframe=timeframe_json or {},
+        timeframe=tf,
     )
     db.add(rr)
     db.commit()
     db.refresh(rr)
 
     for idx, it in enumerate(items, start=1):
-        # These are string UUIDs already (from SQL), but handle safely
         def _u(v: Any) -> Optional[uuid.UUID]:
             try:
                 return uuid.UUID(str(v)) if v else None
@@ -412,7 +419,16 @@ def retrieve(
         db.add(ri)
 
     db.commit()
-    return RetrieveResponse(ok=True, q=q, k=k, alpha=alpha, items=items)
+    return RetrieveResponse(
+        ok=True,
+        q=q,
+        k=k,
+        alpha=alpha,
+        min_score=float(min_score),
+        overfetch_k=int(overfetch_k),
+        rerank=bool(rerank),
+        items=items,
+    )
 
 
 # -------------------------

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,6 +25,28 @@ def _normalize_scores(pairs: List[Tuple[str, float]]) -> Dict[str, float]:
     return {k: (s - lo) / (hi - lo) for k, s in pairs}
 
 
+_word_re = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _tokenize(s: str) -> List[str]:
+    return [m.group(0).lower() for m in _word_re.finditer(s or "")]
+
+
+def _overlap_bonus(q: str, title: str, snippet: str) -> float:
+    """
+    Lightweight rerank signal (non-LLM):
+    Adds a small bonus based on token overlap between query and (title+snippet).
+    """
+    qt = set(_tokenize(q))
+    if not qt:
+        return 0.0
+    tt = set(_tokenize(title))
+    st = set(_tokenize(snippet))
+    inter = qt.intersection(tt.union(st))
+    # scaled 0..1
+    return min(1.0, len(inter) / max(1.0, len(qt)))
+
+
 def hybrid_retrieve(
     db: Session,
     *,
@@ -34,14 +57,18 @@ def hybrid_retrieve(
     source_types: Optional[List[str]] = None,
     start_ts: Optional[datetime] = None,
     end_ts: Optional[datetime] = None,
+    # V2.1 knobs:
+    min_score: Optional[float] = None,
+    overfetch_k: Optional[int] = None,
+    rerank: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Returns list of items with chunk/document metadata and score breakdown.
 
-    V1 improvements:
-      - source filtering happens IN SQL (FTS + vector)
-      - timeframe filtering happens IN SQL (FTS + vector)
-      - embeddings/vector part is optional; if embeddings unavailable, fall back to FTS only.
+    V2.1 improvements:
+      - overfetch candidates (k * overfetch_k), then filter by min_score, then take top k
+      - optional lightweight rerank (token overlap bonus) AFTER hybrid scoring
+      - embeddings/vector part remains optional; if embeddings unavailable, vec=0
 
     Timeframe semantics:
       Use upstream timestamps first, then fallback to DB timestamps:
@@ -63,14 +90,40 @@ def hybrid_retrieve(
     if not stypes:
         stypes = []
 
+    # knobs defaults
+    if min_score is None:
+        min_score = 0.15
+    try:
+        min_score = float(min_score)
+    except Exception:
+        min_score = 0.15
+    if min_score < 0.0:
+        min_score = 0.0
+    if min_score > 1.0:
+        min_score = 1.0
+
+    if overfetch_k is None:
+        overfetch_k = 3
+    try:
+        overfetch_k = int(overfetch_k)
+    except Exception:
+        overfetch_k = 3
+    if overfetch_k < 1:
+        overfetch_k = 1
+    if overfetch_k > 10:
+        overfetch_k = 10
+
+    # candidate limit (cap hard to protect DB)
+    candidate_k = min(200, k * overfetch_k)
+    sql_limit = candidate_k * 3
+
     timeframe_sql = ""
-    params: Dict[str, Any] = {"workspace_id": workspace_id, "q": q, "limit": k * 3}
+    params: Dict[str, Any] = {"workspace_id": workspace_id, "q": q, "limit": sql_limit}
 
     if stypes:
         timeframe_sql += " AND s.type = ANY(:source_types) "
         params["source_types"] = stypes
 
-    # NEW: prefer source timestamps when filtering
     ts_expr = "COALESCE(d.source_updated_at, d.source_created_at, d.updated_at, d.created_at)"
 
     if start_ts is not None:
@@ -126,8 +179,10 @@ def hybrid_retrieve(
                 "workspace_id": workspace_id,
                 "qvec": q_vec,
                 "model": settings.EMBEDDINGS_MODEL,
-                "limit": k * 3,
+                "limit": sql_limit,
             }
+
+            # include only relevant optional params
             if stypes:
                 vec_params["source_types"] = stypes
             if start_ts is not None:
@@ -159,11 +214,10 @@ def hybrid_retrieve(
                     LIMIT :limit
                     """
                 ),
-                {**vec_params, **{k: v for k, v in params.items() if k in ("source_types", "start_ts", "end_ts")}},
+                vec_params,
             ).mappings().all()
 
             vec_scores = _normalize_scores([(r["chunk_id"], float(r["score_vec"])) for r in vec_rows])
-
         except Exception:
             vec_rows = []
             vec_scores = {}
@@ -197,14 +251,34 @@ def hybrid_retrieve(
         upsert(r, 0.0, vec_scores.get(r["chunk_id"], 0.0))
 
     # -----------------------------
-    # 4) Hybrid score
+    # 4) Hybrid score + filter + rerank
     # -----------------------------
     items: List[Dict[str, Any]] = []
     for _, item in by_id.items():
         s_fts = float(item["score_fts"])
         s_vec = float(item["score_vec"])
         item["score_hybrid"] = alpha * s_vec + (1.0 - alpha) * s_fts
+
+        # helpful for debugging downstream
+        item["knobs"] = {
+            "min_score": float(min_score),
+            "overfetch_k": int(overfetch_k),
+            "rerank": bool(rerank),
+        }
         items.append(item)
 
-    items.sort(key=lambda x: float(x["score_hybrid"]), reverse=True)
+    # filter on min_score
+    items = [it for it in items if float(it.get("score_hybrid") or 0.0) >= float(min_score)]
+
+    # optional lightweight rerank
+    if rerank and items:
+        for it in items:
+            bonus = _overlap_bonus(q, str(it.get("document_title") or ""), str(it.get("snippet") or ""))
+            it["score_rerank_bonus"] = float(bonus)
+            it["score_final"] = float(it["score_hybrid"]) + 0.10 * float(bonus)
+        items.sort(key=lambda x: float(x.get("score_final") or 0.0), reverse=True)
+    else:
+        items.sort(key=lambda x: float(x.get("score_hybrid") or 0.0), reverse=True)
+
+    # cap and return
     return items[:k]

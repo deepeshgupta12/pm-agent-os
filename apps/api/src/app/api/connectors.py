@@ -396,6 +396,9 @@ def create_github_ingestion_job(
 
     prs_state = cfg.get("prs_state", "all")
     prs_per_page = int(cfg.get("prs_per_page", 30))
+    max_pages = int(cfg.get("max_pages", 5))
+    max_items = cfg.get("max_items")
+    max_items = int(max_items) if max_items is not None else None
     releases_per_page = int(cfg.get("releases_per_page", 20))
     issues_state = cfg.get("issues_state", "all")
     issues_per_page = int(cfg.get("issues_per_page", 50))
@@ -451,7 +454,7 @@ def create_github_ingestion_job(
     try:
         # Releases
         if payload.include_releases:
-            releases, _dbg_rel = client.list_releases(owner, repo, per_page=releases_per_page)
+            releases, _dbg_rel = client.list_releases(owner, repo, per_page=releases_per_page, max_pages=max_pages, max_items=max_items)
             for rel in releases:
                 stats["releases_seen"] += 1
 
@@ -505,7 +508,7 @@ def create_github_ingestion_job(
 
         # PRs
         if payload.include_prs:
-            prs, _dbg_prs = client.list_pull_requests(owner, repo, state=prs_state, per_page=prs_per_page)
+            prs, _dbg_prs = client.list_pull_requests(owner, repo, state=prs_state, per_page=prs_per_page, max_pages=max_pages, max_items=max_items)
             for pr in prs:
                 stats["prs_seen"] += 1
 
@@ -563,7 +566,7 @@ def create_github_ingestion_job(
 
         # Issues (filter PRs out)
         if payload.include_issues:
-            items, _dbg_issues = client.list_issues(owner, repo, state=issues_state, per_page=issues_per_page)
+            items, _dbg_issues = client.list_issues(owner, repo, state=issues_state, per_page=issues_per_page, max_pages=max_pages, max_items=max_items)
             issues = [it for it in items if it.get("pull_request") is None]
 
             for issue in issues:
