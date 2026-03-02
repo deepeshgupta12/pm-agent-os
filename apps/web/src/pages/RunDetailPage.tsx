@@ -30,6 +30,7 @@ import type {
   RetrieveResponse,
   RetrieveItem,
   RagBatch,
+  AttachPreviewEvidenceIn,
 } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL as string;
@@ -105,7 +106,7 @@ export default function RunDetailPage() {
   const [ragLoading, setRagLoading] = useState(false);
   const [ragDebug, setRagDebug] = useState<RagDebugResponse | null>(null);
 
-  // NEW (V2.3): batch selector state
+  // V2.3: batch selector state
   const [ragBatchId, setRagBatchId] = useState<string | null>(null);
 
   // Create artifact form
@@ -161,6 +162,12 @@ export default function RunDetailPage() {
   const [preview, setPreview] = useState<RetrieveResponse | null>(null);
 
   const [regenWithRetrievalLoading, setRegenWithRetrievalLoading] = useState(false);
+
+  // -------------------------
+  // V2.4: Attach preview as Evidence
+  // -------------------------
+  const [previewSelected, setPreviewSelected] = useState<Record<string, boolean>>({});
+  const [attachLoading, setAttachLoading] = useState(false);
 
   const artifactTypeOptions = useMemo(
     () => ARTIFACT_TYPES.map((t) => ({ value: t, label: t })),
@@ -225,6 +232,18 @@ export default function RunDetailPage() {
     params.set("rerank", String(rpRerank));
 
     return `/workspaces/${workspaceId}/retrieve?${params.toString()}`;
+  }
+
+  function selectedPreviewItems(): RetrieveItem[] {
+    if (!preview?.items?.length) return [];
+    return preview.items.filter((it) => !!previewSelected[it.chunk_id]);
+  }
+
+  function toggleAllPreview(on: boolean) {
+    if (!preview?.items?.length) return;
+    const next: Record<string, boolean> = {};
+    for (const it of preview.items) next[it.chunk_id] = on;
+    setPreviewSelected(next);
   }
 
   async function loadAll() {
@@ -294,7 +313,6 @@ export default function RunDetailPage() {
       const hasPreferred = preferred && batches.some((b) => String(b.batch_id) === preferred);
       if (hasPreferred) {
         setRagBatchId(preferred);
-        // Also immediately scope-fetch to match selection
         if (String(batchId || "") !== preferred) {
           void loadRagDebug(preferred);
           return;
@@ -307,6 +325,150 @@ export default function RunDetailPage() {
           return;
         }
       }
+    }
+  }
+
+  async function previewRetrieve() {
+    if (!run) {
+      setErr("Run not loaded yet.");
+      return;
+    }
+    if (!rpQuery.trim()) {
+      setErr("Enter a query for retrieval preview.");
+      return;
+    }
+
+    setPreviewLoading(true);
+    setErr(null);
+    setPreview(null);
+
+    const path = buildRetrieveQueryParams(run.workspace_id);
+    const res = await apiFetch<RetrieveResponse>(path, { method: "GET" });
+    setPreviewLoading(false);
+
+    if (!res.ok) {
+      setErr(`Retrieve preview failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setPreview(res.data);
+
+    // Reset selections for new preview
+    const nextSel: Record<string, boolean> = {};
+    for (const it of res.data.items || []) nextSel[it.chunk_id] = false;
+    setPreviewSelected(nextSel);
+  }
+
+  async function regenerateWithRetrieval() {
+    if (!run) {
+      setErr("Run not loaded yet.");
+      return;
+    }
+    if (!rpQuery.trim()) {
+      setErr("Enter a query for regenerate-with-retrieval.");
+      return;
+    }
+
+    setRegenWithRetrievalLoading(true);
+    setErr(null);
+
+    const body = {
+      retrieval: {
+        enabled: true,
+        query: rpQuery.trim(),
+        k: Number(rpK) || 5,
+        alpha: Number(rpAlpha) || 0.0,
+        source_types: normalizeSourceTypes(rpSourceTypes),
+        timeframe: buildTimeframeForRunsPayload(),
+        min_score: Number(rpMinScore) || 0.15,
+        overfetch_k: Number(rpOverfetchK) || 3,
+        rerank: Boolean(rpRerank),
+      },
+    };
+
+    const res = await apiFetch<Run>(`/runs/${rid}/regenerate-with-retrieval`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+
+    setRegenWithRetrievalLoading(false);
+
+    if (!res.ok) {
+      setErr(`Regenerate-with-retrieval failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    await loadAll();
+
+    // After regen, refresh rag batches (unscoped), then auto-select latest
+    if (ragOpen) {
+      setRagBatchId(null);
+      await loadRagDebug(null);
+    }
+  }
+
+  async function attachSelectedPreviewAsEvidence() {
+    if (!run) {
+      setErr("Run not loaded yet.");
+      return;
+    }
+    if (!preview || !preview.items || preview.items.length === 0) {
+      setErr("No preview results to attach.");
+      return;
+    }
+
+    const picked = selectedPreviewItems();
+    if (picked.length === 0) {
+      setErr("Select at least one preview result to attach.");
+      return;
+    }
+
+    setAttachLoading(true);
+    setErr(null);
+
+    const body: AttachPreviewEvidenceIn = {
+      retrieval: {
+        query: rpQuery.trim(),
+        k: Number(rpK) || 5,
+        alpha: Number(rpAlpha) || 0.0,
+        source_types: normalizeSourceTypes(rpSourceTypes),
+        timeframe: buildTimeframeForRunsPayload(),
+        min_score: Number(rpMinScore) || 0.15,
+        overfetch_k: Number(rpOverfetchK) || 3,
+        rerank: Boolean(rpRerank),
+      },
+      items: picked.map((it) => ({
+        chunk_id: it.chunk_id,
+        document_id: it.document_id,
+        source_id: it.source_id,
+        document_title: it.document_title,
+        chunk_index: it.chunk_index,
+        snippet: it.snippet,
+        score_fts: it.score_fts,
+        score_vec: it.score_vec,
+        score_hybrid: it.score_hybrid,
+        score_rerank_bonus: it.score_rerank_bonus ?? null,
+        score_final: it.score_final ?? null,
+      })),
+    };
+
+    const res = await apiFetch<Evidence[]>(`/runs/${rid}/evidence/attach-preview`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+
+    setAttachLoading(false);
+
+    if (!res.ok) {
+      setErr(`Attach preview evidence failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    await loadAll();
+
+    if (ragOpen) {
+      setRagBatchId(null);
+      await loadRagDebug(null);
     }
   }
 
@@ -406,79 +568,6 @@ export default function RunDetailPage() {
     if (ragOpen) await loadRagDebug(ragBatchId);
   }
 
-  async function previewRetrieve() {
-    if (!run) {
-      setErr("Run not loaded yet.");
-      return;
-    }
-    if (!rpQuery.trim()) {
-      setErr("Enter a query for retrieval preview.");
-      return;
-    }
-
-    setPreviewLoading(true);
-    setErr(null);
-    setPreview(null);
-
-    const path = buildRetrieveQueryParams(run.workspace_id);
-    const res = await apiFetch<RetrieveResponse>(path, { method: "GET" });
-    setPreviewLoading(false);
-
-    if (!res.ok) {
-      setErr(`Retrieve preview failed: ${res.status} ${res.error}`);
-      return;
-    }
-    setPreview(res.data);
-  }
-
-  async function regenerateWithRetrieval() {
-    if (!run) {
-      setErr("Run not loaded yet.");
-      return;
-    }
-    if (!rpQuery.trim()) {
-      setErr("Enter a query for regenerate-with-retrieval.");
-      return;
-    }
-
-    setRegenWithRetrievalLoading(true);
-    setErr(null);
-
-    const body = {
-      retrieval: {
-        enabled: true,
-        query: rpQuery.trim(),
-        k: Number(rpK) || 5,
-        alpha: Number(rpAlpha) || 0.0,
-        source_types: normalizeSourceTypes(rpSourceTypes),
-        timeframe: buildTimeframeForRunsPayload(),
-        min_score: Number(rpMinScore) || 0.15,
-        overfetch_k: Number(rpOverfetchK) || 3,
-        rerank: Boolean(rpRerank),
-      },
-    };
-
-    const res = await apiFetch<Run>(`/runs/${rid}/regenerate-with-retrieval`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-
-    setRegenWithRetrievalLoading(false);
-
-    if (!res.ok) {
-      setErr(`Regenerate-with-retrieval failed: ${res.status} ${res.error}`);
-      return;
-    }
-
-    await loadAll();
-
-    // After regen, refresh rag batches (unscoped), then auto-select latest
-    if (ragOpen) {
-      setRagBatchId(null);
-      await loadRagDebug(null);
-    }
-  }
-
   async function regenerate() {
     setRegenLoading(true);
     setErr(null);
@@ -550,7 +639,7 @@ export default function RunDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ragOpen, rid]);
 
-  // helpful: prefill panel from run._retrieval once run loads
+  // helpful: prefill retrieval panel from run._retrieval once run loads
   useEffect(() => {
     const cfg: any = retrievalCfg;
     if (!cfg) return;
@@ -682,7 +771,7 @@ export default function RunDetailPage() {
         <Text c="dimmed">Loading run…</Text>
       )}
 
-      {/* V2.2 Retrieval panel */}
+      {/* Retrieval panel */}
       <Card withBorder>
         <Stack gap="sm">
           <Group justify="space-between">
@@ -695,7 +784,8 @@ export default function RunDetailPage() {
           <Collapse in={rpOpen}>
             <Stack gap="sm">
               <Text size="sm" c="dimmed">
-                Use this to preview retrieval results, then regenerate a new artifact version using fresh retrieval evidence.
+                Use this to preview retrieval results, attach selected preview items as evidence,
+                then regenerate a new artifact version using fresh retrieval evidence.
               </Text>
 
               <TextInput
@@ -786,11 +876,7 @@ export default function RunDetailPage() {
                 <Button onClick={previewRetrieve} loading={previewLoading} variant="default" disabled={!run}>
                   Retrieve Preview
                 </Button>
-                <Button
-                  onClick={regenerateWithRetrieval}
-                  loading={regenWithRetrievalLoading}
-                  disabled={!run}
-                >
+                <Button onClick={regenerateWithRetrieval} loading={regenWithRetrievalLoading} disabled={!run}>
                   Regenerate with Retrieval
                 </Button>
               </Group>
@@ -801,9 +887,48 @@ export default function RunDetailPage() {
                     <Text fw={600}>Preview results</Text>
                     <Badge variant="light">{preview.items?.length ?? 0}</Badge>
                   </Group>
+
                   <Text size="sm" c="dimmed">
-                    q=<Code>{preview.q}</Code> · k=<Code>{String(preview.k)}</Code> · alpha=<Code>{String(preview.alpha)}</Code> · min_score=<Code>{String(preview.min_score)}</Code> · overfetch_k=<Code>{String(preview.overfetch_k)}</Code> · rerank=<Code>{String(preview.rerank)}</Code>
+                    q=<Code>{preview.q}</Code> · k=<Code>{String(preview.k)}</Code> · alpha=
+                    <Code>{String(preview.alpha)}</Code> · min_score=<Code>{String(preview.min_score)}</Code> ·
+                    overfetch_k=<Code>{String(preview.overfetch_k)}</Code> · rerank=<Code>{String(preview.rerank)}</Code>
                   </Text>
+
+                  <Group justify="space-between" mt="sm">
+                    <Group gap="xs">
+                      <Button
+                        size="xs"
+                        variant="light"
+                        onClick={() => toggleAllPreview(true)}
+                        disabled={!preview.items?.length}
+                      >
+                        Select all
+                      </Button>
+                      <Button
+                        size="xs"
+                        variant="light"
+                        onClick={() => toggleAllPreview(false)}
+                        disabled={!preview.items?.length}
+                      >
+                        Clear
+                      </Button>
+                    </Group>
+
+                    <Group gap="xs">
+                      <Badge variant="light">
+                        selected {selectedPreviewItems().length}/{preview.items.length}
+                      </Badge>
+                      <Button
+                        size="xs"
+                        onClick={attachSelectedPreviewAsEvidence}
+                        loading={attachLoading}
+                        disabled={selectedPreviewItems().length === 0}
+                      >
+                        Attach selected as Evidence
+                      </Button>
+                    </Group>
+                  </Group>
+
                   <Divider my="sm" />
 
                   {preview.items.length === 0 ? (
@@ -820,7 +945,17 @@ export default function RunDetailPage() {
                                   doc={it.document_id} · chunk={it.chunk_id} · idx={it.chunk_index}
                                 </Text>
                               </Stack>
+
                               <Group gap="xs">
+                                <Checkbox
+                                  checked={!!previewSelected[it.chunk_id]}
+                                  onChange={(e) =>
+                                    setPreviewSelected((prev) => ({
+                                      ...prev,
+                                      [it.chunk_id]: e.currentTarget.checked,
+                                    }))
+                                  }
+                                />
                                 <Badge variant="light">hyb {fmtScore(it.score_hybrid)}</Badge>
                                 {it.score_final != null ? (
                                   <Badge color="grape" variant="light">
@@ -878,7 +1013,8 @@ export default function RunDetailPage() {
             <Card withBorder style={{ maxHeight: 420, overflow: "auto" }}>
               <Stack gap={6}>
                 <Text size="sm" c="dimmed">
-                  {latestArtifact.type} · v{latestArtifact.version} · {latestArtifact.status} · key={latestArtifact.logical_key}
+                  {latestArtifact.type} · v{latestArtifact.version} · {latestArtifact.status} · key=
+                  {latestArtifact.logical_key}
                 </Text>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{latestArtifact.content_md || ""}</ReactMarkdown>
               </Stack>
@@ -909,7 +1045,7 @@ export default function RunDetailPage() {
 
           <Collapse in={ragOpen}>
             <Stack gap="sm">
-              {/* NEW: Batch selector */}
+              {/* Batch selector */}
               <Card withBorder>
                 <Stack gap="xs">
                   <Text fw={600}>Batch scope</Text>
@@ -963,7 +1099,9 @@ export default function RunDetailPage() {
                 <Text fw={600} mb={6}>
                   retrieval_config (best available for current scope)
                 </Text>
-                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(ragDebug?.retrieval_config ?? retrievalCfg)}</pre>
+                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+                  {safeJson(ragDebug?.retrieval_config ?? retrievalCfg)}
+                </pre>
               </Card>
 
               <Card withBorder>
@@ -1095,11 +1233,7 @@ export default function RunDetailPage() {
               value={logLevel}
               onChange={setLogLevel}
             />
-            <TextInput
-              label="Message"
-              value={logMessage}
-              onChange={(e) => setLogMessage(e.currentTarget.value)}
-            />
+            <TextInput label="Message" value={logMessage} onChange={(e) => setLogMessage(e.currentTarget.value)} />
           </Group>
 
           <Textarea
@@ -1133,9 +1267,7 @@ export default function RunDetailPage() {
                       {new Date(l.created_at).toLocaleString()} · {l.id}
                     </Text>
                     {l.meta && Object.keys(l.meta).length > 0 ? (
-                      <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                        {JSON.stringify(l.meta, null, 2)}
-                      </pre>
+                      <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(l.meta, null, 2)}</pre>
                     ) : null}
                   </Stack>
                 </Card>
@@ -1163,13 +1295,7 @@ export default function RunDetailPage() {
           />
 
           <Group grow>
-            <NumberInput
-              label="Top K"
-              value={autoK}
-              min={1}
-              max={20}
-              onChange={(v) => setAutoK(Number(v) || 6)}
-            />
+            <NumberInput label="Top K" value={autoK} min={1} max={20} onChange={(v) => setAutoK(Number(v) || 6)} />
             <NumberInput
               label="Alpha (vector weight)"
               value={autoAlpha}
@@ -1227,11 +1353,7 @@ export default function RunDetailPage() {
               value={ekind}
               onChange={setEkind}
             />
-            <TextInput
-              label="Source name"
-              value={sourceName}
-              onChange={(e) => setSourceName(e.currentTarget.value)}
-            />
+            <TextInput label="Source name" value={sourceName} onChange={(e) => setSourceName(e.currentTarget.value)} />
           </Group>
 
           <TextInput
@@ -1240,20 +1362,8 @@ export default function RunDetailPage() {
             onChange={(e) => setSourceRef(e.currentTarget.value)}
             placeholder="optional"
           />
-          <Textarea
-            label="Excerpt"
-            autosize
-            minRows={3}
-            value={excerpt}
-            onChange={(e) => setExcerpt(e.currentTarget.value)}
-          />
-          <Textarea
-            label="Meta (JSON)"
-            autosize
-            minRows={3}
-            value={metaJson}
-            onChange={(e) => setMetaJson(e.currentTarget.value)}
-          />
+          <Textarea label="Excerpt" autosize minRows={3} value={excerpt} onChange={(e) => setExcerpt(e.currentTarget.value)} />
+          <Textarea label="Meta (JSON)" autosize minRows={3} value={metaJson} onChange={(e) => setMetaJson(e.currentTarget.value)} />
           <Button onClick={addEvidence} loading={creatingEvidence}>
             Add Evidence
           </Button>

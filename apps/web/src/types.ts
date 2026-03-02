@@ -214,3 +214,30 @@ export type RunRegenerateWithRetrievalIn = {
     rerank: boolean;
   };
 };
+
+/** V2.4 attach preview evidence payload */
+export type AttachPreviewEvidenceIn = {
+  retrieval: {
+    query: string;
+    k: number;
+    alpha: number;
+    source_types: string[];
+    timeframe: Record<string, unknown>;
+    min_score: number;
+    overfetch_k: number;
+    rerank: boolean;
+  };
+  items: Array<{
+    chunk_id: string;
+    document_id: string;
+    source_id: string;
+    document_title: string;
+    chunk_index: number;
+    snippet: string;
+    score_fts: number;
+    score_vec: number;
+    score_hybrid: number;
+    score_rerank_bonus?: number | null;
+    score_final?: number | null;
+  }>;
+};
