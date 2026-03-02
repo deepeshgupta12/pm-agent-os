@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Badge, Button, Card, Group, Stack, Text, Title } from "@mantine/core";
+import { Badge, Button, Card, Group, Stack, Text, Title, Divider, Code } from "@mantine/core";
 import { apiFetch } from "../apiClient";
-import type { PipelineRun, PipelineStep } from "../types";
+import type { PipelineRun, PipelineStep, Run } from "../types";
 
 type NextResponse = {
   ok: boolean;
@@ -16,12 +16,34 @@ type ExecuteAllResponse = {
   pipeline_run: PipelineRun;
 };
 
+type RetrievalMeta = {
+  enabled?: boolean;
+  query?: string;
+  evidence_count?: number;
+  batch_id?: string;
+  batch_kind?: string;
+};
+
 function stepColor(status: string): string {
   const s = (status || "").toLowerCase();
   if (s === "completed") return "green";
   if (s === "running") return "blue";
   if (s === "failed") return "red";
   return "gray";
+}
+
+function extractRetrievalMeta(run: Run | null): RetrievalMeta | null {
+  if (!run) return null;
+  const ip: any = run.input_payload ?? {};
+  const r = ip?._retrieval;
+  if (!r || typeof r !== "object") return null;
+  return {
+    enabled: Boolean(r.enabled),
+    query: typeof r.query === "string" ? r.query : undefined,
+    evidence_count: typeof r.evidence_count === "number" ? r.evidence_count : undefined,
+    batch_id: typeof r.batch_id === "string" ? r.batch_id : undefined,
+    batch_kind: typeof r.batch_kind === "string" ? r.batch_kind : undefined,
+  };
 }
 
 export default function PipelineRunDetailPage() {
@@ -37,9 +59,13 @@ export default function PipelineRunDetailPage() {
   const [lastCreatedRunId, setLastCreatedRunId] = useState<string | null>(null);
   const [createdRunIds, setCreatedRunIds] = useState<string[]>([]);
 
+  // NEW: per-step run retrieval metadata (fetched from /runs/{run_id})
+  const [runMetaById, setRunMetaById] = useState<Record<string, { retrieval: RetrievalMeta | null }>>({});
+
   const canExecute = useMemo(() => {
     if (!pr) return false;
-    return (pr.status || "").toLowerCase() !== "completed";
+    const s = (pr.status || "").toLowerCase();
+    return s !== "completed" && s !== "failed";
   }, [pr]);
 
   async function load() {
@@ -47,7 +73,8 @@ export default function PipelineRunDetailPage() {
     setErr(null);
     setLoading(true);
 
-    const res = await apiFetch<PipelineRun>(`/pipelines/runs/${prid}`, { method: "GET" });
+    // V3.1 alias endpoint
+    const res = await apiFetch<PipelineRun>(`/pipeline-runs/${prid}`, { method: "GET" });
 
     setLoading(false);
 
@@ -59,12 +86,42 @@ export default function PipelineRunDetailPage() {
     setPr(res.data);
   }
 
+  async function loadRunMetasForSteps(p: PipelineRun) {
+    const runIds = (p.steps || [])
+      .map((s) => s.run_id)
+      .filter((x): x is string => Boolean(x));
+
+    if (runIds.length === 0) return;
+
+    // Fetch only missing run_ids
+    const missing = runIds.filter((rid) => !runMetaById[rid]);
+    if (missing.length === 0) return;
+
+    // Basic fan-out (safe: small N)
+    const results = await Promise.all(
+      missing.map(async (rid) => {
+        const r = await apiFetch<Run>(`/runs/${rid}`, { method: "GET" });
+        if (!r.ok) return { rid, run: null as Run | null };
+        return { rid, run: r.data };
+      })
+    );
+
+    setRunMetaById((prev) => {
+      const next = { ...prev };
+      for (const it of results) {
+        next[it.rid] = { retrieval: extractRetrievalMeta(it.run) };
+      }
+      return next;
+    });
+  }
+
   async function executeNext() {
     if (!prid) return;
     setErr(null);
     setExecLoading(true);
 
-    const res = await apiFetch<NextResponse>(`/pipelines/runs/${prid}/next`, {
+    // V3.1 alias endpoint
+    const res = await apiFetch<NextResponse>(`/pipeline-runs/${prid}/execute-next`, {
       method: "POST",
       body: JSON.stringify({}),
     });
@@ -82,6 +139,8 @@ export default function PipelineRunDetailPage() {
 
     if (rid) {
       setCreatedRunIds((prev) => [rid, ...prev.filter((x) => x !== rid)]);
+      // fetch retrieval meta for the newly created run
+      await loadRunMetasForSteps(res.data.pipeline_run);
     }
   }
 
@@ -90,7 +149,8 @@ export default function PipelineRunDetailPage() {
     setErr(null);
     setExecAllLoading(true);
 
-    const res = await apiFetch<ExecuteAllResponse>(`/pipelines/runs/${prid}/execute-all`, {
+    // V3.1 alias endpoint
+    const res = await apiFetch<ExecuteAllResponse>(`/pipeline-runs/${prid}/execute-all`, {
       method: "POST",
       body: JSON.stringify({}),
     });
@@ -117,12 +177,21 @@ export default function PipelineRunDetailPage() {
         });
       });
     }
+
+    await loadRunMetasForSteps(res.data.pipeline_run);
   }
 
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prid]);
+
+  // whenever pipeline run updates, fetch per-step run retrieval meta
+  useEffect(() => {
+    if (!pr) return;
+    void loadRunMetasForSteps(pr);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pr?.id, pr?.steps?.map((s) => s.run_id).join("|")]);
 
   const workspaceId = pr?.workspace_id ?? "";
 
@@ -154,7 +223,7 @@ export default function PipelineRunDetailPage() {
           <Stack gap="sm">
             <Group justify="space-between">
               <Group gap="sm">
-                <Badge>{pr.status}</Badge>
+                <Badge color={stepColor(pr.status)}>{pr.status}</Badge>
                 <Text fw={700}>template</Text>
                 <Text c="dimmed" size="sm">
                   {pr.template_id}
@@ -169,9 +238,7 @@ export default function PipelineRunDetailPage() {
               <Text fw={600} mb={6}>
                 Pipeline input payload
               </Text>
-              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                {JSON.stringify(pr.input_payload, null, 2)}
-              </pre>
+              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(pr.input_payload, null, 2)}</pre>
             </Card>
 
             <Group gap="sm">
@@ -196,7 +263,7 @@ export default function PipelineRunDetailPage() {
                     </Text>
                   </Stack>
                   <Button component={Link} to={`/runs/${lastCreatedRunId}`}>
-                    Open Run
+                    Open Run Console
                   </Button>
                 </Group>
               </Card>
@@ -212,7 +279,7 @@ export default function PipelineRunDetailPage() {
                         {id}
                       </Text>
                       <Button component={Link} to={`/runs/${id}`} size="xs" variant="light">
-                        Open
+                        Open Console
                       </Button>
                     </Group>
                   ))}
@@ -238,7 +305,6 @@ export default function PipelineRunDetailPage() {
             ) : (
               <Stack gap="xs">
                 {pr.steps.map((s: PipelineStep) => {
-                  // Prev context label (existing)
                   let ctxLabel = "Prev artifact context: N/A";
                   if (s.step_index === 0) {
                     ctxLabel = "Prev artifact context: N/A (step 0)";
@@ -252,7 +318,6 @@ export default function PipelineRunDetailPage() {
                     ctxLabel = "Prev artifact context: unknown";
                   }
 
-                  // Regeneration label (new)
                   let regenLabel = "Regeneration: —";
                   if (s.step_index === 0) {
                     regenLabel = "Regeneration: N/A (step 0)";
@@ -268,11 +333,13 @@ export default function PipelineRunDetailPage() {
                   }
 
                   const hasLatestArtifact = !!s.latest_artifact_id;
+                  const runId = s.run_id || null;
+                  const retrieval = runId ? runMetaById[runId]?.retrieval ?? null : null;
 
                   return (
                     <Card key={s.id} withBorder>
                       <Group justify="space-between" align="flex-start">
-                        <Stack gap={6}>
+                        <Stack gap={6} style={{ flex: 1 }}>
                           <Group gap="sm">
                             <Badge variant="light">#{s.step_index}</Badge>
                             <Badge color={stepColor(s.status)}>{s.status}</Badge>
@@ -280,10 +347,9 @@ export default function PipelineRunDetailPage() {
                             <Text size="sm" c="dimmed">
                               agent: {s.agent_id}
                             </Text>
-
-                            {s.auto_regenerated === true ? (
-                              <Badge color="green" variant="light">
-                                Regenerated ✅
+                            {s.status?.toLowerCase() === "failed" ? (
+                              <Badge color="red" variant="light">
+                                Failed
                               </Badge>
                             ) : null}
                           </Group>
@@ -292,6 +358,16 @@ export default function PipelineRunDetailPage() {
                             step_id={s.id}
                           </Text>
 
+                          {runId ? (
+                            <Text size="xs" c="dimmed">
+                              run_id=<Code>{runId}</Code>
+                            </Text>
+                          ) : (
+                            <Text size="xs" c="dimmed">
+                              run_id=<Code>null</Code>
+                            </Text>
+                          )}
+
                           <Text size="sm" c="dimmed">
                             {ctxLabel}
                           </Text>
@@ -299,6 +375,27 @@ export default function PipelineRunDetailPage() {
                           <Text size="sm" c="dimmed">
                             {regenLabel}
                           </Text>
+
+                          <Divider />
+
+                          <Group justify="space-between">
+                            <Text fw={600}>Step Retrieval</Text>
+                            {retrieval?.enabled ? (
+                              <Badge variant="light">evidence: {retrieval.evidence_count ?? 0}</Badge>
+                            ) : (
+                              <Badge variant="outline">disabled</Badge>
+                            )}
+                          </Group>
+
+                          {retrieval?.enabled ? (
+                            <Text size="sm" c="dimmed">
+                              query: <Code>{retrieval.query ?? "(missing)"}</Code>
+                            </Text>
+                          ) : (
+                            <Text size="sm" c="dimmed">
+                              No retrieval metadata yet (run not created OR retrieval disabled).
+                            </Text>
+                          )}
 
                           {hasLatestArtifact ? (
                             <Text size="xs" c="dimmed">
@@ -309,20 +406,16 @@ export default function PipelineRunDetailPage() {
                         </Stack>
 
                         <Stack gap="xs" align="flex-end">
-                          {s.run_id ? (
-                            <Button component={Link} to={`/runs/${s.run_id}`}>
-                              Open Run
+                          {runId ? (
+                            <Button component={Link} to={`/runs/${runId}`}>
+                              Open Run Console
                             </Button>
                           ) : (
                             <Badge variant="outline">run_id: null</Badge>
                           )}
 
                           {hasLatestArtifact ? (
-                            <Button
-                              component={Link}
-                              to={`/artifacts/${s.latest_artifact_id}`}
-                              variant="light"
-                            >
+                            <Button component={Link} to={`/artifacts/${s.latest_artifact_id}`} variant="light">
                               Open Latest Artifact
                             </Button>
                           ) : null}

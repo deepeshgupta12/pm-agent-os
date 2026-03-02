@@ -42,7 +42,9 @@ class DocsIngestionJobCreateIn(BaseModel):
     timeframe: Dict[str, Any] = Field(default_factory=dict)  # stored into ingestion_jobs.timeframe
     params: Dict[str, Any] = Field(default_factory=dict)  # stored into ingestion_jobs.params
     upsert: bool = True
-    embed_after: bool = False
+
+    # V2.5: if omitted => default to True (automation). If explicitly false => respect.
+    embed_after: Optional[bool] = None
 
 
 class IngestionJobOut(BaseModel):
@@ -75,7 +77,9 @@ class GitHubIngestionJobCreateIn(BaseModel):
     timeframe: Dict[str, Any] = Field(default_factory=dict)  # stored into ingestion_jobs.timeframe
     params: Dict[str, Any] = Field(default_factory=dict)  # stored into ingestion_jobs.params
     upsert: bool = True
-    embed_after: bool = False
+
+    # V2.5 automation: if omitted => default True; if explicitly false => respect.
+    embed_after: Optional[bool] = None
 
     # Allow selective ingestion if you want to reduce load
     include_releases: bool = True
@@ -96,7 +100,9 @@ class GoogleDocsIngestionJobCreateIn(BaseModel):
     timeframe: Dict[str, Any] = Field(default_factory=dict)
     params: Dict[str, Any] = Field(default_factory=dict)
     upsert: bool = True
-    embed_after: bool = False
+
+    # V2.5 automation: if omitted => default True; if explicitly false => respect.
+    embed_after: Optional[bool] = None
 
     # Safety controls
     page_size: int = Field(default=100, ge=1, le=1000)

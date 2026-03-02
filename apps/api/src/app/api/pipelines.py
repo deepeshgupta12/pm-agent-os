@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -18,6 +18,7 @@ from app.core.citations import (
     body_has_inline_citations,
     build_inline_citation_patch,
 )
+from app.core.retrieval_search import hybrid_retrieve
 from app.db.session import get_db
 from app.db.models import (
     Workspace,
@@ -29,6 +30,7 @@ from app.db.models import (
     Run,
     Artifact,
     Evidence,
+    RunLog,
 )
 from app.schemas.pipelines import (
     PipelineTemplateIn,
@@ -43,6 +45,8 @@ from app.schemas.pipelines import (
 
 router = APIRouter(tags=["pipelines"])
 
+VALID_STEP_STATUS = {"created", "running", "completed", "failed"}
+VALID_PIPELINE_STATUS = {"created", "running", "completed", "failed"}
 
 # -------------------------
 # Canonical templates (V1)
@@ -148,13 +152,12 @@ def _prev_context_attached_map(db: Session, steps: List[PipelineStep]) -> Dict[s
 def _latest_artifact_map(db: Session, steps: List[PipelineStep]) -> Dict[str, Dict[str, Any]]:
     """
     One query to get latest artifact metadata for each run_id (if exists).
-    Uses DISTINCT ON which is Postgres-specific (you’re on Postgres already).
+    Uses DISTINCT ON which is Postgres-specific.
     """
     run_ids = [s.run_id for s in steps if s.run_id is not None]
     if not run_ids:
         return {}
 
-    # DISTINCT ON requires order by run_id, created_at desc to pick latest per run
     q = (
         select(Artifact)
         .where(Artifact.run_id.in_(run_ids))
@@ -188,7 +191,6 @@ def _step_to_out(
     if run_id_str:
         prev_ctx = bool(prev_attached_map.get(run_id_str, False))
         latest = latest_art_map.get(run_id_str, {}) or {}
-        # Step 18: consider auto-regenerated if artifact version >=2
         v = latest.get("latest_artifact_version")
         if isinstance(v, int):
             auto_regenerated = v >= 2
@@ -277,12 +279,7 @@ def _seed_canonical_templates_for_workspace(
 
 def _latest_artifact_snapshot(db: Session, run_id: uuid.UUID) -> Optional[Dict[str, Any]]:
     a = (
-        db.execute(
-            select(Artifact)
-            .where(Artifact.run_id == run_id)
-            .order_by(Artifact.created_at.desc())
-            .limit(1)
-        )
+        db.execute(select(Artifact).where(Artifact.run_id == run_id).order_by(Artifact.created_at.desc()).limit(1))
         .scalars()
         .first()
     )
@@ -302,54 +299,160 @@ def _latest_artifact_snapshot(db: Session, run_id: uuid.UUID) -> Optional[Dict[s
     }
 
 
-def _create_completed_run_with_artifact(
-    db: Session,
-    ws: Workspace,
-    user: User,
+def _timeframe_to_bounds(timeframe: Optional[Dict[str, Any]]) -> tuple[Optional[datetime], Optional[datetime]]:
+    tf = timeframe or {}
+    preset = (tf.get("preset") or "").strip().lower()
+    now = datetime.now(timezone.utc)
+
+    if preset in {"7d", "30d", "90d"}:
+        days = int(preset.replace("d", ""))
+        return now - timedelta(days=days), now
+
+    if preset == "custom":
+        start_date = tf.get("start_date")
+        end_date = tf.get("end_date")
+
+        def parse_ymd(s: str) -> datetime:
+            dt = datetime.strptime(s, "%Y-%m-%d")
+            return dt.replace(tzinfo=timezone.utc)
+
+        start_ts = parse_ymd(start_date) if start_date else None
+        end_ts = parse_ymd(end_date) if end_date else None
+        if end_ts is not None:
+            end_ts = end_ts + timedelta(days=1) - timedelta(seconds=1)
+        return start_ts, end_ts
+
+    return None, None
+
+
+def _no_evidence_md(agent_id: str, input_payload: Dict[str, Any], retrieval_meta: Dict[str, Any]) -> Tuple[str, str, str]:
+    artifact_type = AGENT_TO_DEFAULT_ARTIFACT_TYPE.get(agent_id, "strategy_memo")
+    title = f"{artifact_type.replace('_', ' ').title()} — Draft"
+
+    goal = (input_payload.get("goal") or "").strip()
+    context = (input_payload.get("context") or "").strip()
+    constraints = (input_payload.get("constraints") or "").strip()
+
+    md = f"""# {title}
+
+## Summary
+No evidence was found for the requested retrieval query, so this draft does **not** attempt to write a grounded artifact. It instead captures what we need to proceed.
+
+## Goal
+{goal or "- (not provided)"}
+
+## Context
+{context or "- (not provided)"}
+
+## Constraints
+{constraints or "- (not provided)"}
+
+## Retrieval Attempt
+- Query: `{retrieval_meta.get("query")}`
+- k: `{retrieval_meta.get("k")}`
+- alpha: `{retrieval_meta.get("alpha")}`
+- source_types: `{retrieval_meta.get("source_types")}`
+- timeframe: `{retrieval_meta.get("timeframe")}`
+- min_score: `{retrieval_meta.get("min_score")}`
+- overfetch_k: `{retrieval_meta.get("overfetch_k")}`
+- rerank: `{retrieval_meta.get("rerank")}`
+- evidence_count: `0`
+
+## What this means
+- We cannot ground requirements/claims without evidence.
+- Next step is to ingest/sync the right documents OR change the query/source filters.
+
+## Open Questions (required to proceed)
+1. Which exact doc(s) should be considered the source of truth for this step (title or link)?
+2. Are those docs already ingested into this workspace? If yes, confirm the correct source_type.
+3. Should retrieval broaden (higher k / overfetch / multiple source_types) or narrow (more precise query)?
+4. Should rerank be enabled and do we need embeddings for recall?
+
+## Next Actions
+- Ingest/sync the missing documents into the workspace
+- Re-run retrieval with an updated query and confirm evidence_count > 0
+- Then regenerate the artifact grounded in evidence
+"""
+    return artifact_type, title, md
+
+
+def _generate_md_with_evidence(
+    *,
     agent_id: str,
     input_payload: Dict[str, Any],
-) -> Run:
-    agent = db.get(AgentDefinition, agent_id)
-    if not agent:
-        raise HTTPException(status_code=400, detail=f"Invalid agent_id: {agent_id}")
+    evidence_items: List[Evidence],
+) -> Tuple[str, str, str]:
+    artifact_type = AGENT_TO_DEFAULT_ARTIFACT_TYPE.get(agent_id, "strategy_memo")
+    title = f"{artifact_type.replace('_', ' ').title()} — Draft"
 
-    r = Run(
-        workspace_id=ws.id,
-        agent_id=agent.id,
-        created_by_user_id=user.id,
-        status="created",
-        input_payload=input_payload or {},
-    )
-    db.add(r)
-    db.commit()
-    db.refresh(r)
+    ev_text = format_evidence_for_prompt(evidence_items)
 
-    r.status = "running"
-    db.add(r)
-    db.commit()
-    db.refresh(r)
+    if settings.LLM_ENABLED and settings.OPENAI_API_KEY:
+        from app.core.prompts import build_system_prompt, build_user_prompt
+        from app.core.llm_client import llm_generate_markdown
 
-    artifact_type, title, md = build_initial_artifact(agent_id=r.agent_id, input_payload=r.input_payload)
+        evidence_dicts = [
+            {"excerpt": e.excerpt, "source_ref": e.source_ref, "source_name": e.source_name, "meta": e.meta or {}}
+            for e in evidence_items
+        ]
+        citations_block, sources_section_md, normalized = build_citation_pack(evidence_dicts)
 
-    art = Artifact(
-        run_id=r.id,
-        type=artifact_type,
-        title=title,
-        content_md=md,
-        logical_key=artifact_type,
-        version=1,
-        status="draft",
-    )
-    db.add(art)
-    db.commit()
+        system_prompt = build_system_prompt()
+        base_user_prompt = build_user_prompt(agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text)
 
-    r.status = "completed"
-    r.output_summary = build_run_summary(agent_id=r.agent_id, artifact_type=artifact_type)
-    db.add(r)
-    db.commit()
-    db.refresh(r)
+        citation_rules = """
+You MUST ground claims in the Evidence Pack below.
 
-    return r
+Citation rules:
+- Any factual claim, decision, requirement, or number MUST include at least one inline citation like [1] or [2].
+- Do NOT invent sources. Only cite from the Evidence Pack IDs.
+- If evidence is insufficient for a claim, write it under "## Unknowns / Assumptions" instead of guessing.
+
+Output requirements (MANDATORY):
+1) Start with a clear H1 title.
+2) Include a section "## Unknowns / Assumptions".
+3) Include a section "## Sources" at the end with the exact [n] references.
+""".strip()
+
+        evidence_pack = f"""
+Evidence Pack (cite as [n]):
+
+{citations_block}
+""".strip()
+
+        user_prompt = "\n\n".join([base_user_prompt.strip(), citation_rules, evidence_pack])
+
+        md = llm_generate_markdown(system_prompt=system_prompt, user_prompt=user_prompt)
+
+        if not md.lstrip().startswith("#"):
+            md = f"# {title}\n\n" + md
+
+        if "## Unknowns / Assumptions" not in md:
+            md = md.rstrip() + "\n\n## Unknowns / Assumptions\n- None stated.\n"
+
+        if "## Sources" not in md:
+            md = md.rstrip() + "\n\n" + sources_section_md + "\n"
+
+        if len(evidence_items) > 0 and not output_has_any_citations(md):
+            md = (
+                md.rstrip()
+                + "\n\n"
+                + "### ⚠️ Citation check\n"
+                + "Evidence was available, but no citations like [1] were found. Please add inline citations.\n\n"
+                + sources_section_md
+                + "\n"
+            )
+
+        if len(evidence_items) > 0 and not body_has_inline_citations(md):
+            patch = build_inline_citation_patch(normalized)
+            md = md.rstrip() + "\n\n" + patch + "\n"
+
+        return artifact_type, title, md
+
+    artifact_type2, title2, md2 = build_initial_artifact(agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text)
+    if len(evidence_items) > 0 and "## Unknowns / Assumptions" not in md2:
+        md2 = md2.rstrip() + "\n\n## Unknowns / Assumptions\n- Evidence attached, but citation-grounded generation requires LLM mode.\n"
+    return artifact_type2, title2, md2
 
 
 def _auto_attach_prev_artifact_as_evidence(
@@ -392,14 +495,253 @@ def _auto_attach_prev_artifact_as_evidence(
     db.commit()
 
 
-def _regenerate_run_with_evidence_internal(db: Session, run_uuid: uuid.UUID) -> None:
-    """
-    Step 18: Internal regenerate that mirrors runs.py:/runs/{id}/regenerate behavior,
-    but without auth wrappers (pipelines already validates workspace ownership).
-    Creates a new artifact version row.
+def _default_step_retrieval_query(step_name: str, agent_id: str, input_payload: Dict[str, Any]) -> str:
+    goal = str(input_payload.get("goal") or "").strip()
+    context = str(input_payload.get("context") or "").strip()
 
-    NOTE: This assumes evidence already attached to the run.
-    """
+    bits: List[str] = []
+    if step_name:
+        bits.append(step_name)
+    if agent_id:
+        bits.append(agent_id)
+    if goal:
+        bits.append(goal)
+    if context:
+        bits.append(context)
+
+    q = " ".join([b for b in bits if b]).strip()
+    if len(q) < 2:
+        q = agent_id or step_name or "product requirements"
+    return q[:500]
+
+
+def _attach_retrieval_evidence_for_run(
+    db: Session,
+    *,
+    run: Run,
+    workspace_id: str,
+    retrieval_cfg: Dict[str, Any],
+) -> Tuple[List[Evidence], Dict[str, Any]]:
+    q = str(retrieval_cfg.get("query") or "").strip()
+    if not q:
+        return [], {"enabled": False}
+
+    k = int(retrieval_cfg.get("k") or 6)
+    alpha = float(retrieval_cfg.get("alpha") if retrieval_cfg.get("alpha") is not None else 0.65)
+    source_types = [s.strip() for s in (retrieval_cfg.get("source_types") or []) if s and str(s).strip()]
+    timeframe = retrieval_cfg.get("timeframe") or {}
+
+    min_score = float(retrieval_cfg.get("min_score", 0.15))
+    overfetch_k = int(retrieval_cfg.get("overfetch_k", 3))
+    rerank = bool(retrieval_cfg.get("rerank", False))
+
+    start_ts, end_ts = _timeframe_to_bounds(timeframe)
+
+    items = hybrid_retrieve(
+        db,
+        workspace_id=str(workspace_id),
+        q=q,
+        k=k,
+        alpha=alpha,
+        source_types=source_types or None,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        min_score=min_score,
+        overfetch_k=overfetch_k,
+        rerank=rerank,
+    )
+
+    batch_id = str(uuid.uuid4())
+    ev_items: List[Evidence] = []
+
+    for rank, it in enumerate(items, start=1):
+        source_ref = f"doc:{it.get('document_id')}#chunk:{it.get('chunk_id')}"
+        meta = {
+            "batch_id": batch_id,
+            "batch_kind": "pipeline_step_retrieval",
+            "rank": rank,
+            "score_hybrid": float(it.get("score_hybrid") or 0.0),
+            "score_fts": float(it.get("score_fts") or 0.0),
+            "score_vec": float(it.get("score_vec") or 0.0),
+            "score_rerank_bonus": it.get("score_rerank_bonus"),
+            "score_final": it.get("score_final"),
+            "document_title": it.get("document_title", ""),
+            "source_id": it.get("source_id", ""),
+            "chunk_index": int(it.get("chunk_index") or 0),
+            "retrieval": {
+                "enabled": True,
+                "query": q,
+                "k": k,
+                "alpha": alpha,
+                "source_types": source_types,
+                "timeframe": timeframe,
+                "min_score": min_score,
+                "overfetch_k": overfetch_k,
+                "rerank": rerank,
+            },
+        }
+
+        ev = Evidence(
+            run_id=run.id,
+            kind="snippet",
+            source_name="retrieval",
+            source_ref=source_ref,
+            excerpt=str(it.get("snippet") or ""),
+            meta=meta,
+        )
+        db.add(ev)
+        ev_items.append(ev)
+
+    db.commit()
+    for e in ev_items:
+        db.refresh(e)
+
+    retrieval_meta: Dict[str, Any] = {
+        "enabled": True,
+        "query": q,
+        "k": k,
+        "alpha": alpha,
+        "source_types": source_types,
+        "timeframe": timeframe,
+        "min_score": min_score,
+        "overfetch_k": overfetch_k,
+        "rerank": rerank,
+        "evidence_count": len(ev_items),
+        "batch_id": batch_id,
+        "batch_kind": "pipeline_step_retrieval",
+    }
+    return ev_items, retrieval_meta
+
+
+def _create_completed_run_with_artifact_and_step_retrieval(
+    db: Session,
+    ws: Workspace,
+    user: User,
+    *,
+    agent_id: str,
+    step_name: str,
+    base_input_payload: Dict[str, Any],
+    template_definition: Dict[str, Any],
+    step_definition: Dict[str, Any],
+) -> Run:
+    agent = db.get(AgentDefinition, agent_id)
+    if not agent:
+        raise HTTPException(status_code=400, detail=f"Invalid agent_id: {agent_id}")
+
+    r = Run(
+        workspace_id=ws.id,
+        agent_id=agent.id,
+        created_by_user_id=user.id,
+        status="created",
+        input_payload=base_input_payload or {},
+    )
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+
+    r.status = "running"
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+
+    tpl_retrieval = template_definition.get("retrieval") if isinstance(template_definition, dict) else None
+    tpl_retrieval = tpl_retrieval if isinstance(tpl_retrieval, dict) else {}
+
+    step_retrieval = (step_definition or {}).get("retrieval")
+    step_retrieval = step_retrieval if isinstance(step_retrieval, dict) else {}
+
+    sources_selected = base_input_payload.get("sources_selected") or []
+    if not isinstance(sources_selected, list):
+        sources_selected = []
+    source_types = [str(s).strip() for s in sources_selected if str(s).strip()]
+    if not source_types:
+        source_types = ["docs"]
+
+    timeframe = base_input_payload.get("timeframe") or {}
+    if not isinstance(timeframe, dict):
+        timeframe = {}
+
+    enabled = bool(step_retrieval.get("enabled", tpl_retrieval.get("enabled", True)))
+
+    q = str(step_retrieval.get("query") or "").strip()
+    if not q:
+        q = _default_step_retrieval_query(step_name=step_name, agent_id=agent_id, input_payload=base_input_payload)
+
+    retrieval_cfg = {
+        "enabled": enabled,
+        "query": q,
+        "k": int(step_retrieval.get("k", tpl_retrieval.get("k", 6))),
+        "alpha": float(step_retrieval.get("alpha", tpl_retrieval.get("alpha", 0.0))),
+        "source_types": step_retrieval.get("source_types", tpl_retrieval.get("source_types", source_types)),
+        "timeframe": step_retrieval.get("timeframe", tpl_retrieval.get("timeframe", timeframe)),
+        "min_score": float(step_retrieval.get("min_score", tpl_retrieval.get("min_score", 0.15))),
+        "overfetch_k": int(step_retrieval.get("overfetch_k", tpl_retrieval.get("overfetch_k", 3))),
+        "rerank": bool(step_retrieval.get("rerank", tpl_retrieval.get("rerank", True))),
+    }
+
+    ev_items: List[Evidence] = []
+    retrieval_meta: Dict[str, Any] = {"enabled": False}
+
+    if enabled and str(retrieval_cfg.get("query") or "").strip():
+        ev_items, retrieval_meta = _attach_retrieval_evidence_for_run(
+            db,
+            run=r,
+            workspace_id=str(ws.id),
+            retrieval_cfg=retrieval_cfg,
+        )
+
+    ip = dict(r.input_payload or {})
+    ip["_retrieval"] = retrieval_meta
+    r.input_payload = ip
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+
+    db.add(
+        RunLog(
+            run_id=r.id,
+            level="info" if ev_items else "warn",
+            message="Pipeline step pre-retrieval completed; evidence attached."
+            if ev_items
+            else "Pipeline step pre-retrieval executed; no evidence found.",
+            meta=retrieval_meta,
+        )
+    )
+    db.commit()
+
+    if retrieval_meta.get("enabled") and len(ev_items) == 0:
+        artifact_type, title, md = _no_evidence_md(r.agent_id, r.input_payload, retrieval_meta)
+    else:
+        artifact_type, title, md = _generate_md_with_evidence(
+            agent_id=r.agent_id,
+            input_payload=r.input_payload,
+            evidence_items=ev_items,
+        )
+
+    art = Artifact(
+        run_id=r.id,
+        type=artifact_type,
+        title=title,
+        content_md=md,
+        logical_key=artifact_type,
+        version=1,
+        status="draft",
+    )
+    db.add(art)
+    db.commit()
+
+    r.status = "completed"
+    r.output_summary = build_run_summary(agent_id=r.agent_id, artifact_type=artifact_type)
+    if ev_items:
+        r.output_summary += f" Evidence attached: {len(ev_items)} snippet(s)."
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+
+    return r
+
+
+def _regenerate_run_with_evidence_internal(db: Session, run_uuid: uuid.UUID) -> None:
     r = db.get(Run, run_uuid)
     if not r:
         return
@@ -476,7 +818,6 @@ Evidence Pack (cite as [n]):
             md = md.rstrip() + "\n\n" + patch + "\n"
 
     else:
-        # fallback
         _, _, md = build_initial_artifact(agent_id=r.agent_id, input_payload=r.input_payload)
         if "## Unknowns / Assumptions" not in md:
             md = md.rstrip() + "\n\n## Unknowns / Assumptions\n- Evidence-based citations require LLM mode.\n"
@@ -485,7 +826,6 @@ Evidence Pack (cite as [n]):
         if not body_has_inline_citations(md):
             md = md.rstrip() + "\n\n" + build_inline_citation_patch(normalized) + "\n"
 
-    # Next version for this logical_key
     max_ver = db.execute(
         select(Artifact.version)
         .where(Artifact.run_id == r.id, Artifact.logical_key == artifact_type)
@@ -507,6 +847,31 @@ Evidence Pack (cite as [n]):
 
     r.output_summary = f"Auto-regenerated via pipeline using {len(ev_items)} evidence item(s). Latest version: v{next_ver}."
     db.add(r)
+    db.commit()
+
+
+def _mark_step_failed(db: Session, pr: PipelineRun, step: PipelineStep, *, error: str) -> None:
+    step.status = "failed"
+    step.completed_at = datetime.now(timezone.utc)
+    db.add(step)
+
+    pr.status = "failed"
+    db.add(pr)
+
+    # optional: also record a run log if run_id exists (best-effort)
+    try:
+        if step.run_id:
+            db.add(
+                RunLog(
+                    run_id=step.run_id,
+                    level="error",
+                    message="Pipeline step failed",
+                    meta={"pipeline_run_id": str(pr.id), "step_index": step.step_index, "step_name": step.step_name, "error": error},
+                )
+            )
+    except Exception:
+        pass
+
     db.commit()
 
 
@@ -547,15 +912,27 @@ def _execute_one_step(
                 prev_artifact = snap
                 run_input["_pipeline"]["prev_artifact"] = snap
 
-    new_run = _create_completed_run_with_artifact(
+    tpl = db.get(PipelineTemplate, pr.template_id)
+    definition = (tpl.definition_json or {}) if tpl else {}
+    steps_def = definition.get("steps") or []
+
+    step_def: Dict[str, Any] = {}
+    if isinstance(steps_def, list) and 0 <= step.step_index < len(steps_def):
+        sd = steps_def[step.step_index]
+        if isinstance(sd, dict):
+            step_def = sd
+
+    new_run = _create_completed_run_with_artifact_and_step_retrieval(
         db=db,
         ws=ws,
         user=user,
         agent_id=step.agent_id,
-        input_payload=run_input,
+        step_name=step.step_name,
+        base_input_payload=run_input,
+        template_definition=definition if isinstance(definition, dict) else {},
+        step_definition=step_def,
     )
 
-    # Step 17A: auto-evidence
     if prev_artifact is not None:
         _auto_attach_prev_artifact_as_evidence(
             db=db,
@@ -568,7 +945,6 @@ def _execute_one_step(
             prev_artifact=prev_artifact,
         )
 
-    # Step 18: auto-regenerate with evidence (only for step 1+)
     if auto_regen and step.step_index > 0:
         _regenerate_run_with_evidence_internal(db=db, run_uuid=new_run.id)
 
@@ -635,11 +1011,15 @@ def list_pipeline_templates(
     user: User = Depends(require_user),
 ):
     ws = _ensure_workspace_access(db, workspace_id, user)
-    items = db.execute(
-        select(PipelineTemplate)
-        .where(PipelineTemplate.workspace_id == ws.id)
-        .order_by(PipelineTemplate.created_at.desc())
-    ).scalars().all()
+    items = (
+        db.execute(
+            select(PipelineTemplate)
+            .where(PipelineTemplate.workspace_id == ws.id)
+            .order_by(PipelineTemplate.created_at.desc())
+        )
+        .scalars()
+        .all()
+    )
     return [_template_to_out(t) for t in items]
 
 
@@ -684,11 +1064,7 @@ def start_pipeline_run(
         if not agent:
             raise HTTPException(status_code=400, detail=f"Invalid agent_id in pipeline step: {agent_id}")
 
-        step_payload = {
-            "agent_step": idx,
-            "agent_id": agent_id,
-            "pipeline_step_name": name,
-        }
+        step_payload = {"agent_step": idx, "agent_id": agent_id, "pipeline_step_name": name}
 
         steps_rows.append(
             PipelineStep(
@@ -744,15 +1120,23 @@ def run_next_step(
 
     ws, _role = require_workspace_role_min(str(pr.workspace_id), "member", db, user)
 
+    if (pr.status or "").lower() == "failed":
+        steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
+        return PipelineNextOut(ok=False, pipeline_run=_run_to_out(db, pr, steps), created_run_id=None)
+
     tpl = db.get(PipelineTemplate, pr.template_id)
     definition = (tpl.definition_json or {}) if tpl else {}
     auto_regen = bool(definition.get("auto_regenerate_with_evidence", True))
 
-    steps = db.execute(
-        select(PipelineStep)
-        .where(PipelineStep.pipeline_run_id == pr.id)
-        .order_by(PipelineStep.step_index.asc())
-    ).scalars().all()
+    steps = (
+        db.execute(
+            select(PipelineStep)
+            .where(PipelineStep.pipeline_run_id == pr.id)
+            .order_by(PipelineStep.step_index.asc())
+        )
+        .scalars()
+        .all()
+    )
     if not steps:
         raise HTTPException(status_code=400, detail="Pipeline has no steps")
 
@@ -771,7 +1155,18 @@ def run_next_step(
         steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
         return PipelineNextOut(ok=True, pipeline_run=_run_to_out(db, pr, steps), created_run_id=None)
 
-    created_run_id = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step, auto_regen=auto_regen)
+    # ensure pipeline status is running when executing
+    if (pr.status or "").lower() == "created":
+        pr.status = "running"
+        db.add(pr)
+        db.commit()
+
+    try:
+        created_run_id = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step, auto_regen=auto_regen)
+    except Exception as e:
+        _mark_step_failed(db, pr, step, error=str(e))
+        steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
+        return PipelineNextOut(ok=False, pipeline_run=_run_to_out(db, pr, steps), created_run_id=None)
 
     pr.current_step_index += 1
     if pr.current_step_index >= len(steps):
@@ -797,46 +1192,107 @@ def execute_all_steps(
 
     ws, _role = require_workspace_role_min(str(pr.workspace_id), "member", db, user)
 
+    if (pr.status or "").lower() == "failed":
+        steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
+        return PipelineExecuteAllOut(ok=False, pipeline_run=_run_to_out(db, pr, steps), created_run_ids=[])
+
     tpl = db.get(PipelineTemplate, pr.template_id)
     definition = (tpl.definition_json or {}) if tpl else {}
     auto_regen = bool(definition.get("auto_regenerate_with_evidence", True))
 
-    steps = db.execute(
-        select(PipelineStep)
-        .where(PipelineStep.pipeline_run_id == pr.id)
-        .order_by(PipelineStep.step_index.asc())
-    ).scalars().all()
+    steps = (
+        db.execute(
+            select(PipelineStep)
+            .where(PipelineStep.pipeline_run_id == pr.id)
+            .order_by(PipelineStep.step_index.asc())
+        )
+        .scalars()
+        .all()
+    )
     if not steps:
         raise HTTPException(status_code=400, detail="Pipeline has no steps")
 
     created_run_ids: List[str] = []
+
+    if (pr.status or "").lower() == "created":
+        pr.status = "running"
+        db.add(pr)
+        db.commit()
+        db.refresh(pr)
+
+    ok = True
 
     while pr.current_step_index < len(steps):
         step = steps[pr.current_step_index]
 
         if step.status == "completed":
             pr.current_step_index += 1
+            db.add(pr)
+            db.commit()
             continue
 
-        rid = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step, auto_regen=auto_regen)
-        created_run_ids.append(rid)
+        try:
+            rid = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step, auto_regen=auto_regen)
+            created_run_ids.append(rid)
+        except Exception as e:
+            ok = False
+            _mark_step_failed(db, pr, step, error=str(e))
+            break
 
-        steps = db.execute(
-            select(PipelineStep)
-            .where(PipelineStep.pipeline_run_id == pr.id)
-            .order_by(PipelineStep.step_index.asc())
-        ).scalars().all()
+        steps = (
+            db.execute(
+                select(PipelineStep)
+                .where(PipelineStep.pipeline_run_id == pr.id)
+                .order_by(PipelineStep.step_index.asc())
+            )
+            .scalars()
+            .all()
+        )
 
         pr.current_step_index += 1
+        db.add(pr)
+        db.commit()
+        db.refresh(pr)
 
-    pr.status = "completed"
-    db.add(pr)
-    db.commit()
-    db.refresh(pr)
+    if ok and pr.current_step_index >= len(steps):
+        pr.status = "completed"
+        db.add(pr)
+        db.commit()
+        db.refresh(pr)
 
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
     return PipelineExecuteAllOut(
-        ok=True,
+        ok=ok,
         pipeline_run=_run_to_out(db, pr, steps),
         created_run_ids=created_run_ids,
     )
+
+
+# -------------------------
+# V3.1 OPTION A: Alias routes
+# -------------------------
+@router.get("/pipeline-runs/{pipeline_run_id}", response_model=PipelineRunOut)
+def get_pipeline_run_alias(
+    pipeline_run_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    return get_pipeline_run(pipeline_run_id=pipeline_run_id, db=db, user=user)
+
+
+@router.post("/pipeline-runs/{pipeline_run_id}/execute-next", response_model=PipelineNextOut)
+def execute_next_alias(
+    pipeline_run_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    return run_next_step(pipeline_run_id=pipeline_run_id, db=db, user=user)
+
+
+@router.post("/pipeline-runs/{pipeline_run_id}/execute-all", response_model=PipelineExecuteAllOut)
+def execute_all_alias(
+    pipeline_run_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    return execute_all_steps(pipeline_run_id=pipeline_run_id, db=db, user=user)

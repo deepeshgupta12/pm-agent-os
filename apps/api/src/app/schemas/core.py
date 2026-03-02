@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
 from datetime import datetime
+
+from pydantic import BaseModel, Field
 
 
 # -------- Workspaces --------
@@ -27,7 +28,7 @@ class AgentOut(BaseModel):
     default_artifact_type: str
 
 
-# -------- Retrieval config (V1 True RAG) --------
+# -------- Retrieval config (V2) --------
 class RetrievalConfigIn(BaseModel):
     enabled: bool = True
     query: str = Field(default="", max_length=500)
@@ -40,13 +41,16 @@ class RetrievalConfigIn(BaseModel):
     # e.g. {"preset":"30d"} or {"preset":"custom","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}
     timeframe: Dict[str, Any] = Field(default_factory=dict)
 
+    # ---- V2 knobs (explicit; otherwise Pydantic drops them) ----
+    min_score: float = Field(default=0.15, ge=0.0, le=1.0)
+    overfetch_k: int = Field(default=3, ge=1, le=10)
+    rerank: bool = Field(default=False)
+
 
 # -------- Runs --------
 class RunCreateIn(BaseModel):
     agent_id: str
     input_payload: Dict[str, Any] = Field(default_factory=dict)
-
-    # ✅ NEW: make retrieval a first-class field so alpha isn’t ignored
     retrieval: Optional[RetrievalConfigIn] = None
 
 
@@ -63,6 +67,11 @@ class RunOut(BaseModel):
 class RunStatusUpdateIn(BaseModel):
     status: str = Field(min_length=2, max_length=32)
     output_summary: Optional[str] = None
+
+
+# -------- V2.2: regenerate with retrieval --------
+class RunRegenerateWithRetrievalIn(BaseModel):
+    retrieval: RetrievalConfigIn
 
 
 # -------- Artifacts --------

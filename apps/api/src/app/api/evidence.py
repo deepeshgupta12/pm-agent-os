@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
 from app.core.retrieval_search import hybrid_retrieve
 from app.db.session import get_db
-from app.db.models import Run, Evidence, User
+from app.db.models import Run, Evidence, User, RunLog
 from app.schemas.core import EvidenceCreateIn, EvidenceOut
 
 router = APIRouter(tags=["evidence"])
@@ -20,6 +21,46 @@ class AutoEvidenceIn(BaseModel):
     query: str = Field(min_length=2, max_length=500)
     k: int = Field(default=6, ge=1, le=20)
     alpha: float = Field(default=0.65, ge=0.0, le=1.0)
+
+
+# -------------------------
+# V2.4: Attach preview as evidence
+# -------------------------
+class RetrievalPreviewCfgIn(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    k: int = Field(default=5, ge=1, le=50)
+    alpha: float = Field(default=0.65, ge=0.0, le=1.0)
+
+    # keep shape aligned with RunCreateIn retrieval
+    source_types: List[str] = Field(default_factory=list)
+    timeframe: Dict[str, Any] = Field(default_factory=dict)
+
+    min_score: float = Field(default=0.15, ge=0.0, le=1.0)
+    overfetch_k: int = Field(default=3, ge=1, le=10)
+    rerank: bool = Field(default=False)
+
+
+class PreviewItemIn(BaseModel):
+    chunk_id: str = Field(min_length=1, max_length=64)
+    document_id: str = Field(min_length=1, max_length=64)
+    source_id: str = Field(min_length=1, max_length=64)
+
+    document_title: str = Field(default="", max_length=300)
+    chunk_index: int = Field(default=0, ge=0)
+
+    snippet: str = Field(default="")
+
+    score_fts: float = Field(default=0.0)
+    score_vec: float = Field(default=0.0)
+    score_hybrid: float = Field(default=0.0)
+
+    score_rerank_bonus: Optional[float] = None
+    score_final: Optional[float] = None
+
+
+class AttachPreviewEvidenceIn(BaseModel):
+    retrieval: RetrievalPreviewCfgIn
+    items: List[PreviewItemIn] = Field(default_factory=list, min_length=1, max_length=50)
 
 
 def _parse_uuid(id_str: str) -> uuid.UUID:
@@ -146,6 +187,105 @@ def auto_add_evidence(
     db.commit()
     for e in created:
         db.refresh(e)
+
+    return [
+        EvidenceOut(
+            id=str(e.id),
+            run_id=str(e.run_id),
+            kind=e.kind,
+            source_name=e.source_name,
+            source_ref=e.source_ref,
+            excerpt=e.excerpt,
+            meta=e.meta,
+        )
+        for e in created
+    ]
+
+
+# -------------------------
+# V2.4: Attach preview results as evidence (member+)
+# -------------------------
+@router.post("/runs/{run_id}/evidence/attach-preview", response_model=list[EvidenceOut])
+def attach_preview_as_evidence(
+    run_id: str,
+    payload: AttachPreviewEvidenceIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    run = _get_run_or_404(db, run_id)
+
+    # member+ only
+    require_workspace_role_min(str(run.workspace_id), "member", db, user)
+
+    if not payload.items:
+        return []
+
+    batch_id = str(uuid.uuid4())
+
+    # Normalize retrieval payload for storage
+    r = payload.retrieval
+    retrieval_meta: Dict[str, Any] = {
+        "enabled": True,
+        "query": (r.query or "").strip(),
+        "k": int(r.k),
+        "alpha": float(r.alpha),
+        "source_types": [s.strip() for s in (r.source_types or []) if s and s.strip()],
+        "timeframe": r.timeframe or {},
+        "min_score": float(r.min_score),
+        "overfetch_k": int(r.overfetch_k),
+        "rerank": bool(r.rerank),
+    }
+
+    created: List[Evidence] = []
+    for rank, it in enumerate(payload.items, start=1):
+        # We store source_ref consistent with other retrieval evidence
+        source_ref = f"doc:{it.document_id}#chunk:{it.chunk_id}"
+
+        meta = {
+            "batch_id": batch_id,
+            "batch_kind": "preview_attach",
+            "rank": int(rank),
+            "document_title": it.document_title or "",
+            "source_id": it.source_id or "",
+            "chunk_index": int(it.chunk_index or 0),
+            "score_fts": float(it.score_fts or 0.0),
+            "score_vec": float(it.score_vec or 0.0),
+            "score_hybrid": float(it.score_hybrid or 0.0),
+            "score_rerank_bonus": it.score_rerank_bonus,
+            "score_final": it.score_final,
+            "retrieval": retrieval_meta,
+        }
+
+        ev = Evidence(
+            run_id=run.id,
+            kind="snippet",
+            source_name="retrieval",
+            source_ref=source_ref,
+            excerpt=it.snippet or "",
+            meta=meta,
+        )
+        db.add(ev)
+        created.append(ev)
+
+    db.commit()
+    for e in created:
+        db.refresh(e)
+
+    # Audit log so it shows up in timeline/logs + batch index is discoverable
+    db.add(
+        RunLog(
+            run_id=run.id,
+            level="info",
+            message="Preview evidence attached.",
+            meta={
+                "batch_id": batch_id,
+                "batch_kind": "preview_attach",
+                "evidence_count": len(created),
+                "retrieval": retrieval_meta,
+            },
+        )
+    )
+    db.commit()
 
     return [
         EvidenceOut(

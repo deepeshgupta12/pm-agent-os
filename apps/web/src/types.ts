@@ -85,6 +85,7 @@ export type Evidence = {
   source_ref?: string | null;
   excerpt: string;
   meta: Record<string, unknown>;
+  created_at?: string; // ISO (optional; rag-debug includes it)
 };
 
 /** Pipelines */
@@ -93,7 +94,6 @@ export type PipelineTemplate = {
   workspace_id: string;
   name: string;
   description: string;
-  // backend stores full json definition; keep loose for now
   definition_json: Record<string, unknown>;
 };
 
@@ -107,10 +107,7 @@ export type PipelineStep = {
   input_payload: Record<string, unknown>;
   run_id?: string | null;
 
-  // Step 16B (server-side)
   prev_context_attached?: boolean | null;
-
-  // Step 19 (server-side, optional fields)
   auto_regenerated?: boolean | null;
 
   latest_artifact_id?: string | null;
@@ -158,10 +155,89 @@ export type RunTimelineEvent = {
   meta: Record<string, unknown>;
 };
 
+export type RagBatch = {
+  batch_id: string; // uuid or "legacy"
+  batch_kind: string; // create_run | regenerate_with_retrieval | legacy | unknown
+  created_at?: string | null; // ISO
+  evidence_count: number;
+  retrieval?: Record<string, unknown>;
+};
+
 export type RagDebugResponse = {
   ok: boolean;
   run_id: string;
+  batch_id?: string | null;
+  batches?: RagBatch[];
   retrieval_config?: Record<string, unknown> | null;
   retrieval_log?: Record<string, unknown> | null;
   evidence: Evidence[];
+};
+
+/** V2.2 retrieval preview types */
+export type RetrieveItem = {
+  chunk_id: string;
+  document_id: string;
+  source_id: string;
+  document_title: string;
+  chunk_index: number;
+  snippet: string;
+  meta: Record<string, unknown>;
+  score_fts: number;
+  score_vec: number;
+  score_hybrid: number;
+  score_rerank_bonus?: number | null;
+  score_final?: number | null;
+  knobs?: Record<string, unknown> | null;
+};
+
+export type RetrieveResponse = {
+  ok: boolean;
+  q: string;
+  k: number;
+  alpha: number;
+  min_score: number;
+  overfetch_k: number;
+  rerank: boolean;
+  items: RetrieveItem[];
+};
+
+export type RunRegenerateWithRetrievalIn = {
+  retrieval: {
+    enabled: boolean;
+    query: string;
+    k: number;
+    alpha: number;
+    source_types: string[];
+    timeframe: Record<string, unknown>;
+    min_score: number;
+    overfetch_k: number;
+    rerank: boolean;
+  };
+};
+
+/** V2.4 attach preview evidence payload */
+export type AttachPreviewEvidenceIn = {
+  retrieval: {
+    query: string;
+    k: number;
+    alpha: number;
+    source_types: string[];
+    timeframe: Record<string, unknown>;
+    min_score: number;
+    overfetch_k: number;
+    rerank: boolean;
+  };
+  items: Array<{
+    chunk_id: string;
+    document_id: string;
+    source_id: string;
+    document_title: string;
+    chunk_index: number;
+    snippet: string;
+    score_fts: number;
+    score_vec: number;
+    score_hybrid: number;
+    score_rerank_bonus?: number | null;
+    score_final?: number | null;
+  }>;
 };

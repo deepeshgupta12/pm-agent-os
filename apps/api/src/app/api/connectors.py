@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select, text as sql_text
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
 from app.core.github_client import GitHubClient, GitHubAPIError
 from app.core.ingest_common import get_or_create_source, upsert_document, rebuild_chunks, embed_document
 from app.core.google_client import GoogleClient, GoogleAPIError
+from app.core.config import settings
 from app.db.session import get_db
 from app.db.models import Connector, IngestionJob, User
+from app.db.retrieval_models import Document, Source, Chunk, Embedding
 from app.schemas.connectors import (
     ConnectorCreateIn,
     ConnectorUpdateIn,
@@ -95,6 +97,14 @@ def _job_out(j: IngestionJob) -> IngestionJobOut:
         created_by_user_id=str(j.created_by_user_id),
         created_at=_iso(j.created_at),
     )
+
+
+def _embed_after_effective(v: Optional[bool]) -> bool:
+    """
+    V2.5: If embed_after is omitted (None) => default True.
+    If explicitly false => respect.
+    """
+    return True if v is None else bool(v)
 
 
 # -------------------------
@@ -248,7 +258,7 @@ def list_ingestion_jobs(
 
 
 # -------------------------
-# V1 Docs ingestion job (already working)
+# V1 Docs ingestion job (already working) + V2.5 embed_after default
 # -------------------------
 @router.post(
     "/workspaces/{workspace_id}/connectors/{connector_id}/ingestion-jobs/docs",
@@ -307,9 +317,12 @@ def create_docs_ingestion_job(
         "docs_updated": 0,
         "chunks_created": 0,
         "embedded_chunks": 0,
+        "embed_after_effective": _embed_after_effective(payload.embed_after),
         "errors": 0,
         "error_samples": [],
     }
+
+    embed_after = _embed_after_effective(payload.embed_after)
 
     try:
         for d in payload.docs or []:
@@ -344,7 +357,7 @@ def create_docs_ingestion_job(
 
             stats["chunks_created"] += rebuild_chunks(db, document_id=doc.id, raw_text=doc.raw_text)
 
-            if payload.embed_after:
+            if embed_after:
                 stats["embedded_chunks"] += embed_document(db, document_id=doc.id)
 
         job.status = "success"
@@ -364,7 +377,7 @@ def create_docs_ingestion_job(
 
 
 # -------------------------
-# V1 GitHub real ingestion job
+# V1 GitHub real ingestion job + V2.5 embed_after default
 # -------------------------
 @router.post(
     "/workspaces/{workspace_id}/connectors/{connector_id}/ingestion-jobs/github",
@@ -432,12 +445,15 @@ def create_github_ingestion_job(
     db.commit()
     db.refresh(job)
 
+    embed_after = _embed_after_effective(payload.embed_after)
+
     stats: Dict[str, Any] = {
         "errors": 0,
         "error_samples": [],
         "documents_upserted": 0,
         "chunks_created": 0,
         "embedded_chunks": 0,
+        "embed_after_effective": embed_after,
         "releases_seen": 0,
         "releases_created": 0,
         "releases_updated": 0,
@@ -503,7 +519,7 @@ def create_github_ingestion_job(
                     stats["releases_updated"] += 1
 
                 stats["chunks_created"] += rebuild_chunks(db, document_id=doc.id, raw_text=doc.raw_text)
-                if payload.embed_after:
+                if embed_after:
                     stats["embedded_chunks"] += embed_document(db, document_id=doc.id)
 
         # PRs
@@ -561,7 +577,7 @@ def create_github_ingestion_job(
                     stats["prs_updated"] += 1
 
                 stats["chunks_created"] += rebuild_chunks(db, document_id=doc.id, raw_text=doc.raw_text)
-                if payload.embed_after:
+                if embed_after:
                     stats["embedded_chunks"] += embed_document(db, document_id=doc.id)
 
         # Issues (filter PRs out)
@@ -621,7 +637,7 @@ def create_github_ingestion_job(
                     stats["issues_updated"] += 1
 
                 stats["chunks_created"] += rebuild_chunks(db, document_id=doc.id, raw_text=doc.raw_text)
-                if payload.embed_after:
+                if embed_after:
                     stats["embedded_chunks"] += embed_document(db, document_id=doc.id)
 
         job.status = "success"
@@ -649,6 +665,9 @@ def create_github_ingestion_job(
     return _job_out(job)
 
 
+# -------------------------
+# V1 Google Docs ingestion job + V2.5 embed_after default
+# -------------------------
 @router.post(
     "/workspaces/{workspace_id}/connectors/{connector_id}/ingestion-jobs/gdocs",
     response_model=IngestionJobOut,
@@ -709,6 +728,8 @@ def create_google_docs_ingestion_job(
     db.commit()
     db.refresh(job)
 
+    embed_after = _embed_after_effective(payload.embed_after)
+
     stats: Dict[str, Any] = {
         "errors": 0,
         "error_samples": [],
@@ -718,6 +739,7 @@ def create_google_docs_ingestion_job(
         "documents_upserted": 0,
         "chunks_created": 0,
         "embedded_chunks": 0,
+        "embed_after_effective": embed_after,
         "folder_id": folder_id,
         "google_docs_seen": 0,
         "docx_seen": 0,
@@ -812,7 +834,7 @@ def create_google_docs_ingestion_job(
 
                 stats["chunks_created"] += rebuild_chunks(db, document_id=doc.id, raw_text=doc.raw_text)
 
-                if payload.embed_after:
+                if embed_after:
                     stats["embedded_chunks"] += embed_document(db, document_id=doc.id)
 
             if not page_token:
@@ -841,3 +863,148 @@ def create_google_docs_ingestion_job(
         db.refresh(job)
 
     return _job_out(job)
+
+
+# -------------------------
+# V2.5: On-demand embeddings runner (no cron)
+# -------------------------
+@router.post("/workspaces/{workspace_id}/embeddings/run-once")
+def embeddings_run_once(
+    workspace_id: str,
+    limit_docs: int = Query(default=25, ge=1, le=200, description="Max documents to embed in this run"),
+    max_total_chunks: int = Query(default=2000, ge=1, le=20000, description="Hard cap on chunks embedded in this run"),
+    source_type: Optional[str] = Query(default=None, description="Optional filter by source type (docs/github/manual/...)"),
+    dry_run: bool = Query(default=False, description="If true, only report what would be embedded"),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    """
+    Finds documents in the workspace whose chunks are missing embeddings for the current model and embeds them.
+    No background system required; call manually after ingestion or on demand.
+
+    Notes:
+    - Requires OPENAI_API_KEY to actually embed (unless dry_run=true).
+    - Uses ingest_common.embed_document for idempotent per-doc embedding.
+    """
+    ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
+
+    lim = int(limit_docs)
+    max_chunks = int(max_total_chunks)
+
+    # Identify candidate docs with at least 1 chunk lacking an embedding for current model.
+    # We keep it simple and safe: scan docs by recency and test existence of missing embeddings.
+    #
+    # Missing condition: there exists a chunk for doc where no embedding row exists for that chunk+model.
+    base_q = (
+        select(Document)
+        .where(Document.workspace_id == ws.id)
+        .order_by(Document.updated_at.desc())
+    )
+
+    if source_type:
+        st = source_type.strip().lower()
+        base_q = base_q.join(Source, Source.id == Document.source_id).where(Source.type == st)
+
+    docs = db.execute(base_q.limit(lim)).scalars().all()
+
+    model = settings.EMBEDDINGS_MODEL
+
+    considered = 0
+    candidate_docs: list[dict] = []
+    embedded_docs = 0
+    embedded_chunks_total = 0
+    skipped_no_missing = 0
+
+    for d in docs:
+        considered += 1
+
+        # Count missing chunks for this doc in a single query:
+        # chunks where NOT EXISTS embeddings(model, chunk_id)
+        missing_count = db.execute(
+            sql_text(
+                """
+                SELECT count(*)
+                FROM chunks c
+                WHERE c.document_id = :doc_id
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM embeddings e
+                    WHERE e.chunk_id = c.id
+                      AND e.model = :model
+                  )
+                """
+            ),
+            {"doc_id": str(d.id), "model": model},
+        ).scalar_one()
+
+        missing_count = int(missing_count or 0)
+
+        if missing_count <= 0:
+            skipped_no_missing += 1
+            continue
+
+        candidate_docs.append(
+            {
+                "document_id": str(d.id),
+                "title": d.title,
+                "source_id": str(d.source_id),
+                "missing_chunks": missing_count,
+                "updated_at": d.updated_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+        )
+
+    # Dry-run only reports
+    if dry_run:
+        return {
+            "ok": True,
+            "workspace_id": str(ws.id),
+            "model": model,
+            "dry_run": True,
+            "limit_docs": lim,
+            "max_total_chunks": max_chunks,
+            "considered_docs": considered,
+            "candidate_docs": candidate_docs,
+            "skipped_no_missing": skipped_no_missing,
+            "note": "No embeddings were created because dry_run=true.",
+        }
+
+    # Actually embed, respecting max_total_chunks
+    if not settings.OPENAI_API_KEY:
+        raise HTTPException(status_code=400, detail="OPENAI_API_KEY missing; cannot embed (or use dry_run=true).")
+
+    for cd in candidate_docs:
+        if embedded_chunks_total >= max_chunks:
+            break
+
+        doc_id = uuid.UUID(cd["document_id"])
+
+        # embed_document only embeds missing chunks, returns embedded count
+        before = embedded_chunks_total
+        newly = embed_document(db, document_id=doc_id)
+        embedded_chunks_total += int(newly or 0)
+
+        if newly > 0:
+            embedded_docs += 1
+
+        # Stop if cap reached
+        if embedded_chunks_total >= max_chunks:
+            break
+
+        # Safety: if doc embeds an absurd amount, still obey cap
+        if embedded_chunks_total - before > max_chunks:
+            embedded_chunks_total = max_chunks
+            break
+
+    return {
+        "ok": True,
+        "workspace_id": str(ws.id),
+        "model": model,
+        "dry_run": False,
+        "limit_docs": lim,
+        "max_total_chunks": max_chunks,
+        "considered_docs": considered,
+        "candidate_docs": candidate_docs,
+        "skipped_no_missing": skipped_no_missing,
+        "embedded_docs": embedded_docs,
+        "embedded_chunks": embedded_chunks_total,
+    }

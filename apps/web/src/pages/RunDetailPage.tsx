@@ -15,6 +15,7 @@ import {
   Divider,
   Collapse,
   Code,
+  Checkbox,
 } from "@mantine/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -26,6 +27,10 @@ import type {
   RunLog,
   RunTimelineEvent,
   RagDebugResponse,
+  RetrieveResponse,
+  RetrieveItem,
+  RagBatch,
+  AttachPreviewEvidenceIn,
 } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL as string;
@@ -72,6 +77,19 @@ function safeJson(v: any): string {
   }
 }
 
+function fmtScore(v: any): string {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "-";
+  return n.toFixed(3);
+}
+
+function fmtBatchLabel(b: RagBatch): string {
+  const kind = b.batch_kind || "unknown";
+  const q = (b.retrieval as any)?.query ? ` · q=${String((b.retrieval as any).query)}` : "";
+  const ts = b.created_at ? ` · ${new Date(b.created_at).toLocaleString()}` : "";
+  return `${kind}${q} · ${b.evidence_count} ev${ts}`;
+}
+
 export default function RunDetailPage() {
   const { runId } = useParams();
   const rid = runId || "";
@@ -88,6 +106,9 @@ export default function RunDetailPage() {
   const [ragLoading, setRagLoading] = useState(false);
   const [ragDebug, setRagDebug] = useState<RagDebugResponse | null>(null);
 
+  // V2.3: batch selector state
+  const [ragBatchId, setRagBatchId] = useState<string | null>(null);
+
   // Create artifact form
   const [atype, setAtype] = useState<string | null>("prd");
   const [title, setTitle] = useState("Untitled");
@@ -103,13 +124,13 @@ export default function RunDetailPage() {
   const [metaJson, setMetaJson] = useState("{}");
   const [creatingEvidence, setCreatingEvidence] = useState(false);
 
-  // Auto evidence
+  // Auto evidence (existing endpoint)
   const [autoQuery, setAutoQuery] = useState("");
   const [autoK, setAutoK] = useState<number>(6);
   const [autoAlpha, setAutoAlpha] = useState<number>(0.65);
   const [autoLoading, setAutoLoading] = useState(false);
 
-  // Regenerate
+  // Existing regenerate (uses evidence)
   const [regenLoading, setRegenLoading] = useState(false);
 
   // Logs (create)
@@ -120,6 +141,33 @@ export default function RunDetailPage() {
 
   // Logs filter
   const [logFilter, setLogFilter] = useState<string | null>("all");
+
+  // -------------------------
+  // V2.2 Retrieval Panel state
+  // -------------------------
+  const [rpOpen, setRpOpen] = useState(true);
+  const [rpQuery, setRpQuery] = useState("");
+  const [rpK, setRpK] = useState<number>(5);
+  const [rpAlpha, setRpAlpha] = useState<number>(0.0);
+  const [rpSourceTypes, setRpSourceTypes] = useState<string>("docs");
+  const [rpPreset, setRpPreset] = useState<string | null>("30d");
+  const [rpStartDate, setRpStartDate] = useState<string>("");
+  const [rpEndDate, setRpEndDate] = useState<string>("");
+
+  const [rpMinScore, setRpMinScore] = useState<number>(0.15);
+  const [rpOverfetchK, setRpOverfetchK] = useState<number>(3);
+  const [rpRerank, setRpRerank] = useState<boolean>(false);
+
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [preview, setPreview] = useState<RetrieveResponse | null>(null);
+
+  const [regenWithRetrievalLoading, setRegenWithRetrievalLoading] = useState(false);
+
+  // -------------------------
+  // V2.4: Attach preview as Evidence
+  // -------------------------
+  const [previewSelected, setPreviewSelected] = useState<Record<string, boolean>>({});
+  const [attachLoading, setAttachLoading] = useState(false);
 
   const artifactTypeOptions = useMemo(
     () => ARTIFACT_TYPES.map((t) => ({ value: t, label: t })),
@@ -140,6 +188,63 @@ export default function RunDetailPage() {
     if (logFilter === "all") return logs;
     return logs.filter((l) => l.level === logFilter);
   }, [logs, logFilter]);
+
+  function normalizeSourceTypes(s: string): string[] {
+    return (s || "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter((x) => !!x);
+  }
+
+  function buildTimeframeForRunsPayload(): any {
+    if (rpPreset === "custom") {
+      return {
+        preset: "custom",
+        ...(rpStartDate ? { start_date: rpStartDate } : {}),
+        ...(rpEndDate ? { end_date: rpEndDate } : {}),
+      };
+    }
+    if (rpPreset && ["7d", "30d", "90d"].includes(rpPreset)) {
+      return { preset: rpPreset };
+    }
+    return {};
+  }
+
+  function buildRetrieveQueryParams(workspaceId: string): string {
+    const q = (rpQuery || "").trim();
+    const params = new URLSearchParams();
+    params.set("q", q);
+    params.set("k", String(rpK));
+    params.set("alpha", String(rpAlpha));
+
+    const st = normalizeSourceTypes(rpSourceTypes);
+    if (st.length > 0) params.set("source_types", st.join(","));
+
+    if (rpPreset && rpPreset !== "custom" && rpPreset !== "none") {
+      params.set("timeframe_preset", rpPreset);
+    } else if (rpPreset === "custom") {
+      if (rpStartDate) params.set("start_date", rpStartDate);
+      if (rpEndDate) params.set("end_date", rpEndDate);
+    }
+
+    params.set("min_score", String(rpMinScore));
+    params.set("overfetch_k", String(rpOverfetchK));
+    params.set("rerank", String(rpRerank));
+
+    return `/workspaces/${workspaceId}/retrieve?${params.toString()}`;
+  }
+
+  function selectedPreviewItems(): RetrieveItem[] {
+    if (!preview?.items?.length) return [];
+    return preview.items.filter((it) => !!previewSelected[it.chunk_id]);
+  }
+
+  function toggleAllPreview(on: boolean) {
+    if (!preview?.items?.length) return;
+    const next: Record<string, boolean> = {};
+    for (const it of preview.items) next[it.chunk_id] = on;
+    setPreviewSelected(next);
+  }
 
   async function loadAll() {
     setErr(null);
@@ -180,11 +285,12 @@ export default function RunDetailPage() {
     setLogs(logsRes.data);
   }
 
-  async function loadRagDebug() {
+  async function loadRagDebug(batchId?: string | null) {
     setRagLoading(true);
     setErr(null);
 
-    const res = await apiFetch<RagDebugResponse>(`/runs/${rid}/rag-debug`, { method: "GET" });
+    const qs = batchId ? `?batch_id=${encodeURIComponent(batchId)}` : "";
+    const res = await apiFetch<RagDebugResponse>(`/runs/${rid}/rag-debug${qs}`, { method: "GET" });
     setRagLoading(false);
 
     if (!res.ok) {
@@ -192,7 +298,178 @@ export default function RunDetailPage() {
       setRagDebug(null);
       return;
     }
-    setRagDebug(res.data);
+
+    const data = res.data;
+    setRagDebug(data);
+
+    // If batch not selected yet, pick:
+    // 1) run._retrieval.batch_id if present AND exists in batches
+    // 2) newest batch in batches
+    // 3) null (shows unscoped)
+    if (!ragBatchId) {
+      const batches = data.batches || [];
+      const preferred = (retrievalCfg as any)?.batch_id ? String((retrievalCfg as any).batch_id) : null;
+
+      const hasPreferred = preferred && batches.some((b) => String(b.batch_id) === preferred);
+      if (hasPreferred) {
+        setRagBatchId(preferred);
+        if (String(batchId || "") !== preferred) {
+          void loadRagDebug(preferred);
+          return;
+        }
+      } else if (batches.length > 0) {
+        const first = String(batches[0].batch_id);
+        setRagBatchId(first);
+        if (String(batchId || "") !== first) {
+          void loadRagDebug(first);
+          return;
+        }
+      }
+    }
+  }
+
+  async function previewRetrieve() {
+    if (!run) {
+      setErr("Run not loaded yet.");
+      return;
+    }
+    if (!rpQuery.trim()) {
+      setErr("Enter a query for retrieval preview.");
+      return;
+    }
+
+    setPreviewLoading(true);
+    setErr(null);
+    setPreview(null);
+
+    const path = buildRetrieveQueryParams(run.workspace_id);
+    const res = await apiFetch<RetrieveResponse>(path, { method: "GET" });
+    setPreviewLoading(false);
+
+    if (!res.ok) {
+      setErr(`Retrieve preview failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setPreview(res.data);
+
+    // Reset selections for new preview
+    const nextSel: Record<string, boolean> = {};
+    for (const it of res.data.items || []) nextSel[it.chunk_id] = false;
+    setPreviewSelected(nextSel);
+  }
+
+  async function regenerateWithRetrieval() {
+    if (!run) {
+      setErr("Run not loaded yet.");
+      return;
+    }
+    if (!rpQuery.trim()) {
+      setErr("Enter a query for regenerate-with-retrieval.");
+      return;
+    }
+
+    setRegenWithRetrievalLoading(true);
+    setErr(null);
+
+    const body = {
+      retrieval: {
+        enabled: true,
+        query: rpQuery.trim(),
+        k: Number(rpK) || 5,
+        alpha: Number(rpAlpha) || 0.0,
+        source_types: normalizeSourceTypes(rpSourceTypes),
+        timeframe: buildTimeframeForRunsPayload(),
+        min_score: Number(rpMinScore) || 0.15,
+        overfetch_k: Number(rpOverfetchK) || 3,
+        rerank: Boolean(rpRerank),
+      },
+    };
+
+    const res = await apiFetch<Run>(`/runs/${rid}/regenerate-with-retrieval`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+
+    setRegenWithRetrievalLoading(false);
+
+    if (!res.ok) {
+      setErr(`Regenerate-with-retrieval failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    await loadAll();
+
+    // After regen, refresh rag batches (unscoped), then auto-select latest
+    if (ragOpen) {
+      setRagBatchId(null);
+      await loadRagDebug(null);
+    }
+  }
+
+  async function attachSelectedPreviewAsEvidence() {
+    if (!run) {
+      setErr("Run not loaded yet.");
+      return;
+    }
+    if (!preview || !preview.items || preview.items.length === 0) {
+      setErr("No preview results to attach.");
+      return;
+    }
+
+    const picked = selectedPreviewItems();
+    if (picked.length === 0) {
+      setErr("Select at least one preview result to attach.");
+      return;
+    }
+
+    setAttachLoading(true);
+    setErr(null);
+
+    const body: AttachPreviewEvidenceIn = {
+      retrieval: {
+        query: rpQuery.trim(),
+        k: Number(rpK) || 5,
+        alpha: Number(rpAlpha) || 0.0,
+        source_types: normalizeSourceTypes(rpSourceTypes),
+        timeframe: buildTimeframeForRunsPayload(),
+        min_score: Number(rpMinScore) || 0.15,
+        overfetch_k: Number(rpOverfetchK) || 3,
+        rerank: Boolean(rpRerank),
+      },
+      items: picked.map((it) => ({
+        chunk_id: it.chunk_id,
+        document_id: it.document_id,
+        source_id: it.source_id,
+        document_title: it.document_title,
+        chunk_index: it.chunk_index,
+        snippet: it.snippet,
+        score_fts: it.score_fts,
+        score_vec: it.score_vec,
+        score_hybrid: it.score_hybrid,
+        score_rerank_bonus: it.score_rerank_bonus ?? null,
+        score_final: it.score_final ?? null,
+      })),
+    };
+
+    const res = await apiFetch<Evidence[]>(`/runs/${rid}/evidence/attach-preview`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+
+    setAttachLoading(false);
+
+    if (!res.ok) {
+      setErr(`Attach preview evidence failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    await loadAll();
+
+    if (ragOpen) {
+      setRagBatchId(null);
+      await loadRagDebug(null);
+    }
   }
 
   function exportPdf(artifactId: string) {
@@ -288,7 +565,7 @@ export default function RunDetailPage() {
     }
 
     await loadAll();
-    if (ragOpen) await loadRagDebug();
+    if (ragOpen) await loadRagDebug(ragBatchId);
   }
 
   async function regenerate() {
@@ -346,7 +623,7 @@ export default function RunDetailPage() {
     }
 
     await loadAll();
-    if (ragOpen) await loadRagDebug();
+    if (ragOpen) await loadRagDebug(ragBatchId);
   }
 
   useEffect(() => {
@@ -358,9 +635,39 @@ export default function RunDetailPage() {
   useEffect(() => {
     if (!rid) return;
     if (!ragOpen) return;
-    void loadRagDebug();
+    void loadRagDebug(ragBatchId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ragOpen, rid]);
+
+  // helpful: prefill retrieval panel from run._retrieval once run loads
+  useEffect(() => {
+    const cfg: any = retrievalCfg;
+    if (!cfg) return;
+
+    if (typeof cfg.query === "string" && cfg.query.trim() && !rpQuery.trim()) setRpQuery(cfg.query);
+    if (typeof cfg.k === "number") setRpK(cfg.k);
+    if (typeof cfg.alpha === "number") setRpAlpha(cfg.alpha);
+
+    if (Array.isArray(cfg.source_types) && cfg.source_types.length > 0) {
+      setRpSourceTypes(cfg.source_types.join(", "));
+    }
+
+    const tf = cfg.timeframe;
+    if (tf && typeof tf === "object") {
+      if (tf.preset === "custom") {
+        setRpPreset("custom");
+        if (tf.start_date) setRpStartDate(String(tf.start_date));
+        if (tf.end_date) setRpEndDate(String(tf.end_date));
+      } else if (tf.preset && ["7d", "30d", "90d"].includes(String(tf.preset))) {
+        setRpPreset(String(tf.preset));
+      }
+    }
+
+    if (typeof cfg.min_score === "number") setRpMinScore(cfg.min_score);
+    if (typeof cfg.overfetch_k === "number") setRpOverfetchK(cfg.overfetch_k);
+    if (typeof cfg.rerank === "boolean") setRpRerank(cfg.rerank);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run?.id]);
 
   return (
     <Stack gap="md">
@@ -385,7 +692,11 @@ export default function RunDetailPage() {
               <Group gap="sm">
                 <Badge>{run.status}</Badge>
                 <Text fw={700}>{run.agent_id}</Text>
-                {retrievalCfg ? <Badge variant="light">retrieval enabled</Badge> : <Badge variant="light">no retrieval</Badge>}
+                {retrievalCfg ? (
+                  <Badge variant="light">retrieval enabled</Badge>
+                ) : (
+                  <Badge variant="light">no retrieval</Badge>
+                )}
               </Group>
               <Text size="xs" c="dimmed">
                 {run.id}
@@ -398,7 +709,7 @@ export default function RunDetailPage() {
             {retrievalCfg ? (
               <Card withBorder>
                 <Stack gap={6}>
-                  <Text fw={600}>Retrieval config</Text>
+                  <Text fw={600}>Last retrieval config (run._retrieval)</Text>
                   <Group gap="sm">
                     <Text size="sm">
                       query: <Code>{String(retrievalCfg.query ?? "")}</Code>
@@ -414,14 +725,26 @@ export default function RunDetailPage() {
                     </Text>
                   </Group>
                   <Text size="sm" c="dimmed">
-                    source_types: {Array.isArray(retrievalCfg.source_types) ? retrievalCfg.source_types.join(", ") : "(none)"} · timeframe:{" "}
-                    {retrievalCfg.timeframe ? JSON.stringify(retrievalCfg.timeframe) : "(none)"}
+                    source_types:{" "}
+                    {Array.isArray(retrievalCfg.source_types)
+                      ? retrievalCfg.source_types.join(", ")
+                      : "(none)"}{" "}
+                    · timeframe: {retrievalCfg.timeframe ? JSON.stringify(retrievalCfg.timeframe) : "(none)"}
                   </Text>
+                  <Text size="sm" c="dimmed">
+                    knobs: min_score={String(retrievalCfg.min_score ?? "")}, overfetch_k=
+                    {String(retrievalCfg.overfetch_k ?? "")}, rerank={String(retrievalCfg.rerank ?? "")}
+                  </Text>
+                  {retrievalCfg.batch_id ? (
+                    <Text size="sm" c="dimmed">
+                      batch_id: <Code>{String(retrievalCfg.batch_id)}</Code>
+                    </Text>
+                  ) : null}
                 </Stack>
               </Card>
             ) : null}
 
-            {/* Regenerate */}
+            {/* Existing regenerate */}
             <Group gap="sm">
               <Button onClick={regenerate} loading={regenLoading} disabled={evidence.length === 0}>
                 Regenerate using evidence
@@ -447,6 +770,220 @@ export default function RunDetailPage() {
       ) : (
         <Text c="dimmed">Loading run…</Text>
       )}
+
+      {/* Retrieval panel */}
+      <Card withBorder>
+        <Stack gap="sm">
+          <Group justify="space-between">
+            <Text fw={700}>Retrieval Panel</Text>
+            <Button variant="light" onClick={() => setRpOpen((x) => !x)}>
+              {rpOpen ? "Hide" : "Show"}
+            </Button>
+          </Group>
+
+          <Collapse in={rpOpen}>
+            <Stack gap="sm">
+              <Text size="sm" c="dimmed">
+                Use this to preview retrieval results, attach selected preview items as evidence,
+                then regenerate a new artifact version using fresh retrieval evidence.
+              </Text>
+
+              <TextInput
+                label="Query"
+                value={rpQuery}
+                onChange={(e) => setRpQuery(e.currentTarget.value)}
+                placeholder='e.g., "save preferences"'
+              />
+
+              <Group grow>
+                <NumberInput
+                  label="k"
+                  value={rpK}
+                  min={1}
+                  max={50}
+                  onChange={(v) => setRpK(Number(v) || 5)}
+                />
+                <NumberInput
+                  label="alpha"
+                  value={rpAlpha}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  onChange={(v) => setRpAlpha(Number(v) || 0)}
+                />
+                <TextInput
+                  label="source_types (comma-separated)"
+                  value={rpSourceTypes}
+                  onChange={(e) => setRpSourceTypes(e.currentTarget.value)}
+                  placeholder="docs, github"
+                />
+              </Group>
+
+              <Group grow>
+                <Select
+                  label="timeframe preset"
+                  data={[
+                    { value: "7d", label: "7d" },
+                    { value: "30d", label: "30d" },
+                    { value: "90d", label: "90d" },
+                    { value: "custom", label: "custom" },
+                    { value: "none", label: "none" },
+                  ]}
+                  value={rpPreset}
+                  onChange={(v) => setRpPreset(v)}
+                />
+                <TextInput
+                  label="start_date (YYYY-MM-DD)"
+                  value={rpStartDate}
+                  onChange={(e) => setRpStartDate(e.currentTarget.value)}
+                  disabled={rpPreset !== "custom"}
+                />
+                <TextInput
+                  label="end_date (YYYY-MM-DD)"
+                  value={rpEndDate}
+                  onChange={(e) => setRpEndDate(e.currentTarget.value)}
+                  disabled={rpPreset !== "custom"}
+                />
+              </Group>
+
+              <Group grow>
+                <NumberInput
+                  label="min_score"
+                  value={rpMinScore}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  onChange={(v) => setRpMinScore(Number(v) || 0.15)}
+                />
+                <NumberInput
+                  label="overfetch_k"
+                  value={rpOverfetchK}
+                  min={1}
+                  max={10}
+                  step={1}
+                  onChange={(v) => setRpOverfetchK(Number(v) || 3)}
+                />
+                <div style={{ paddingTop: 26 }}>
+                  <Checkbox
+                    label="rerank"
+                    checked={rpRerank}
+                    onChange={(e) => setRpRerank(e.currentTarget.checked)}
+                  />
+                </div>
+              </Group>
+
+              <Group>
+                <Button onClick={previewRetrieve} loading={previewLoading} variant="default" disabled={!run}>
+                  Retrieve Preview
+                </Button>
+                <Button onClick={regenerateWithRetrieval} loading={regenWithRetrievalLoading} disabled={!run}>
+                  Regenerate with Retrieval
+                </Button>
+              </Group>
+
+              {preview ? (
+                <Card withBorder>
+                  <Group justify="space-between">
+                    <Text fw={600}>Preview results</Text>
+                    <Badge variant="light">{preview.items?.length ?? 0}</Badge>
+                  </Group>
+
+                  <Text size="sm" c="dimmed">
+                    q=<Code>{preview.q}</Code> · k=<Code>{String(preview.k)}</Code> · alpha=
+                    <Code>{String(preview.alpha)}</Code> · min_score=<Code>{String(preview.min_score)}</Code> ·
+                    overfetch_k=<Code>{String(preview.overfetch_k)}</Code> · rerank=<Code>{String(preview.rerank)}</Code>
+                  </Text>
+
+                  <Group justify="space-between" mt="sm">
+                    <Group gap="xs">
+                      <Button
+                        size="xs"
+                        variant="light"
+                        onClick={() => toggleAllPreview(true)}
+                        disabled={!preview.items?.length}
+                      >
+                        Select all
+                      </Button>
+                      <Button
+                        size="xs"
+                        variant="light"
+                        onClick={() => toggleAllPreview(false)}
+                        disabled={!preview.items?.length}
+                      >
+                        Clear
+                      </Button>
+                    </Group>
+
+                    <Group gap="xs">
+                      <Badge variant="light">
+                        selected {selectedPreviewItems().length}/{preview.items.length}
+                      </Badge>
+                      <Button
+                        size="xs"
+                        onClick={attachSelectedPreviewAsEvidence}
+                        loading={attachLoading}
+                        disabled={selectedPreviewItems().length === 0}
+                      >
+                        Attach selected as Evidence
+                      </Button>
+                    </Group>
+                  </Group>
+
+                  <Divider my="sm" />
+
+                  {preview.items.length === 0 ? (
+                    <Text c="dimmed">No results (after min_score filter).</Text>
+                  ) : (
+                    <Stack gap="xs">
+                      {preview.items.map((it: RetrieveItem) => (
+                        <Card key={it.chunk_id} withBorder>
+                          <Stack gap={6}>
+                            <Group justify="space-between" align="flex-start">
+                              <Stack gap={2}>
+                                <Text fw={700}>{it.document_title}</Text>
+                                <Text size="xs" c="dimmed">
+                                  doc={it.document_id} · chunk={it.chunk_id} · idx={it.chunk_index}
+                                </Text>
+                              </Stack>
+
+                              <Group gap="xs">
+                                <Checkbox
+                                  checked={!!previewSelected[it.chunk_id]}
+                                  onChange={(e) =>
+                                    setPreviewSelected((prev) => ({
+                                      ...prev,
+                                      [it.chunk_id]: e.currentTarget.checked,
+                                    }))
+                                  }
+                                />
+                                <Badge variant="light">hyb {fmtScore(it.score_hybrid)}</Badge>
+                                {it.score_final != null ? (
+                                  <Badge color="grape" variant="light">
+                                    final {fmtScore(it.score_final)}
+                                  </Badge>
+                                ) : null}
+                              </Group>
+                            </Group>
+
+                            <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
+                              {it.snippet}
+                            </Text>
+
+                            <Text size="xs" c="dimmed">
+                              fts={fmtScore(it.score_fts)} · vec={fmtScore(it.score_vec)}
+                              {it.score_rerank_bonus != null ? ` · bonus=${fmtScore(it.score_rerank_bonus)}` : ""}
+                            </Text>
+                          </Stack>
+                        </Card>
+                      ))}
+                    </Stack>
+                  )}
+                </Card>
+              ) : null}
+            </Stack>
+          </Collapse>
+        </Stack>
+      </Card>
 
       {/* Latest artifact console */}
       <Card withBorder>
@@ -476,7 +1013,8 @@ export default function RunDetailPage() {
             <Card withBorder style={{ maxHeight: 420, overflow: "auto" }}>
               <Stack gap={6}>
                 <Text size="sm" c="dimmed">
-                  {latestArtifact.type} · v{latestArtifact.version} · {latestArtifact.status} · key={latestArtifact.logical_key}
+                  {latestArtifact.type} · v{latestArtifact.version} · {latestArtifact.status} · key=
+                  {latestArtifact.logical_key}
                 </Text>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{latestArtifact.content_md || ""}</ReactMarkdown>
               </Stack>
@@ -494,7 +1032,12 @@ export default function RunDetailPage() {
               <Button variant="light" onClick={() => setRagOpen((x) => !x)}>
                 {ragOpen ? "Hide" : "Show"}
               </Button>
-              <Button variant="default" onClick={loadRagDebug} loading={ragLoading} disabled={!ragOpen}>
+              <Button
+                variant="default"
+                onClick={() => loadRagDebug(ragBatchId)}
+                loading={ragLoading}
+                disabled={!ragOpen}
+              >
                 Refresh
               </Button>
             </Group>
@@ -502,18 +1045,68 @@ export default function RunDetailPage() {
 
           <Collapse in={ragOpen}>
             <Stack gap="sm">
+              {/* Batch selector */}
+              <Card withBorder>
+                <Stack gap="xs">
+                  <Text fw={600}>Batch scope</Text>
+                  <Text size="sm" c="dimmed">
+                    Select a batch to view only the evidence/logs created in that retrieval execution.
+                  </Text>
+
+                  <Group grow>
+                    <Select
+                      label="Batch"
+                      data={(ragDebug?.batches || []).map((b) => ({
+                        value: String(b.batch_id),
+                        label: fmtBatchLabel(b),
+                      }))}
+                      value={ragBatchId}
+                      onChange={(v) => {
+                        const next = v || null;
+                        setRagBatchId(next);
+                        if (next) void loadRagDebug(next);
+                      }}
+                      placeholder={(ragDebug?.batches || []).length === 0 ? "No batches yet" : "Select batch"}
+                      searchable
+                      nothingFoundMessage="No batches"
+                      disabled={(ragDebug?.batches || []).length === 0}
+                    />
+                    <Button
+                      mt={22}
+                      variant="default"
+                      onClick={() => {
+                        setRagBatchId(null);
+                        void loadRagDebug(null);
+                      }}
+                    >
+                      Show all
+                    </Button>
+                  </Group>
+
+                  {ragBatchId ? (
+                    <Text size="sm" c="dimmed">
+                      scoped batch_id: <Code>{ragBatchId}</Code>
+                    </Text>
+                  ) : (
+                    <Text size="sm" c="dimmed">
+                      showing all evidence (unscoped)
+                    </Text>
+                  )}
+                </Stack>
+              </Card>
+
               <Card withBorder>
                 <Text fw={600} mb={6}>
-                  retrieval_config (from run.input_payload._retrieval)
+                  retrieval_config (best available for current scope)
                 </Text>
                 <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                  {safeJson(retrievalCfg)}
+                  {safeJson(ragDebug?.retrieval_config ?? retrievalCfg)}
                 </pre>
               </Card>
 
               <Card withBorder>
                 <Text fw={600} mb={6}>
-                  retrieval_log (latest “Pre-retrieval…” RunLog meta)
+                  retrieval_log (scoped latest retrieval RunLog meta)
                 </Text>
                 <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
                   {safeJson(ragDebug?.retrieval_log ?? null)}
@@ -522,11 +1115,11 @@ export default function RunDetailPage() {
 
               <Card withBorder>
                 <Group justify="space-between">
-                  <Text fw={600}>Evidence (from rag-debug)</Text>
+                  <Text fw={600}>Evidence (scoped)</Text>
                   <Badge variant="light">{ragDebug?.evidence?.length ?? 0}</Badge>
                 </Group>
                 <Divider my="sm" />
-                {(!ragDebug || !ragDebug.evidence || ragDebug.evidence.length === 0) ? (
+                {!ragDebug || !ragDebug.evidence || ragDebug.evidence.length === 0 ? (
                   <Text c="dimmed">No evidence attached.</Text>
                 ) : (
                   <Stack gap="xs">
@@ -545,6 +1138,7 @@ export default function RunDetailPage() {
                           <Text size="sm">{e.excerpt}</Text>
                           <Text size="xs" c="dimmed">
                             {e.id}
+                            {e.created_at ? ` · ${new Date(e.created_at).toLocaleString()}` : ""}
                           </Text>
                         </Stack>
                       </Card>
@@ -639,11 +1233,7 @@ export default function RunDetailPage() {
               value={logLevel}
               onChange={setLogLevel}
             />
-            <TextInput
-              label="Message"
-              value={logMessage}
-              onChange={(e) => setLogMessage(e.currentTarget.value)}
-            />
+            <TextInput label="Message" value={logMessage} onChange={(e) => setLogMessage(e.currentTarget.value)} />
           </Group>
 
           <Textarea
@@ -677,9 +1267,7 @@ export default function RunDetailPage() {
                       {new Date(l.created_at).toLocaleString()} · {l.id}
                     </Text>
                     {l.meta && Object.keys(l.meta).length > 0 ? (
-                      <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                        {JSON.stringify(l.meta, null, 2)}
-                      </pre>
+                      <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(l.meta, null, 2)}</pre>
                     ) : null}
                   </Stack>
                 </Card>
@@ -707,13 +1295,7 @@ export default function RunDetailPage() {
           />
 
           <Group grow>
-            <NumberInput
-              label="Top K"
-              value={autoK}
-              min={1}
-              max={20}
-              onChange={(v) => setAutoK(Number(v) || 6)}
-            />
+            <NumberInput label="Top K" value={autoK} min={1} max={20} onChange={(v) => setAutoK(Number(v) || 6)} />
             <NumberInput
               label="Alpha (vector weight)"
               value={autoAlpha}
@@ -771,11 +1353,7 @@ export default function RunDetailPage() {
               value={ekind}
               onChange={setEkind}
             />
-            <TextInput
-              label="Source name"
-              value={sourceName}
-              onChange={(e) => setSourceName(e.currentTarget.value)}
-            />
+            <TextInput label="Source name" value={sourceName} onChange={(e) => setSourceName(e.currentTarget.value)} />
           </Group>
 
           <TextInput
@@ -784,20 +1362,8 @@ export default function RunDetailPage() {
             onChange={(e) => setSourceRef(e.currentTarget.value)}
             placeholder="optional"
           />
-          <Textarea
-            label="Excerpt"
-            autosize
-            minRows={3}
-            value={excerpt}
-            onChange={(e) => setExcerpt(e.currentTarget.value)}
-          />
-          <Textarea
-            label="Meta (JSON)"
-            autosize
-            minRows={3}
-            value={metaJson}
-            onChange={(e) => setMetaJson(e.currentTarget.value)}
-          />
+          <Textarea label="Excerpt" autosize minRows={3} value={excerpt} onChange={(e) => setExcerpt(e.currentTarget.value)} />
+          <Textarea label="Meta (JSON)" autosize minRows={3} value={metaJson} onChange={(e) => setMetaJson(e.currentTarget.value)} />
           <Button onClick={addEvidence} loading={creatingEvidence}>
             Add Evidence
           </Button>
