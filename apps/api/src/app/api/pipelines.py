@@ -110,7 +110,6 @@ CANONICAL_PIPELINES: List[Dict[str, Any]] = [
     },
 ]
 
-
 # -------------------------
 # Helpers
 # -------------------------
@@ -177,16 +176,39 @@ def _latest_artifact_map(db: Session, steps: List[PipelineStep]) -> Dict[str, Di
     return out
 
 
+def _run_retrieval_meta_map(db: Session, steps: List[PipelineStep]) -> Dict[str, Dict[str, Any]]:
+    """
+    V3.2: Fetch run.input_payload["_retrieval"] for each step.run_id in ONE query.
+    Returns: { run_id_str: retrieval_dict_or_empty }
+    """
+    run_ids = [s.run_id for s in steps if s.run_id is not None]
+    if not run_ids:
+        return {}
+
+    rows = db.execute(select(Run).where(Run.id.in_(run_ids))).scalars().all()
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        ip = r.input_payload or {}
+        meta = ip.get("_retrieval")
+        if isinstance(meta, dict):
+            out[str(r.id)] = meta
+        else:
+            out[str(r.id)] = {}
+    return out
+
+
 def _step_to_out(
     s: PipelineStep,
     prev_attached_map: Dict[str, bool],
     latest_art_map: Dict[str, Dict[str, Any]],
+    run_retrieval_map: Dict[str, Dict[str, Any]],
 ) -> PipelineStepOut:
     run_id_str = str(s.run_id) if s.run_id else None
 
     prev_ctx = None
     auto_regenerated = None
-    latest = {}
+    latest: Dict[str, Any] = {}
 
     if run_id_str:
         prev_ctx = bool(prev_attached_map.get(run_id_str, False))
@@ -194,6 +216,30 @@ def _step_to_out(
         v = latest.get("latest_artifact_version")
         if isinstance(v, int):
             auto_regenerated = v >= 2
+
+    # V3.2 retrieval fields
+    retrieval_enabled = None
+    retrieval_query = None
+    retrieval_evidence_count = None
+    retrieval_batch_id = None
+    retrieval_batch_kind = None
+
+    if run_id_str:
+        rmeta = run_retrieval_map.get(run_id_str, {}) or {}
+        if isinstance(rmeta, dict) and rmeta:
+            retrieval_enabled = bool(rmeta.get("enabled"))
+            q = rmeta.get("query")
+            if isinstance(q, str):
+                retrieval_query = q
+            ec = rmeta.get("evidence_count")
+            if isinstance(ec, int):
+                retrieval_evidence_count = ec
+            bid = rmeta.get("batch_id")
+            if isinstance(bid, str):
+                retrieval_batch_id = bid
+            bk = rmeta.get("batch_kind")
+            if isinstance(bk, str):
+                retrieval_batch_kind = bk
 
     return PipelineStepOut(
         id=str(s.id),
@@ -210,12 +256,19 @@ def _step_to_out(
         latest_artifact_version=latest.get("latest_artifact_version"),
         latest_artifact_type=latest.get("latest_artifact_type"),
         latest_artifact_title=latest.get("latest_artifact_title"),
+        # V3.2
+        retrieval_enabled=retrieval_enabled,
+        retrieval_query=retrieval_query,
+        retrieval_evidence_count=retrieval_evidence_count,
+        retrieval_batch_id=retrieval_batch_id,
+        retrieval_batch_kind=retrieval_batch_kind,
     )
 
 
 def _run_to_out(db: Session, pr: PipelineRun, steps: List[PipelineStep]) -> PipelineRunOut:
     prev_map = _prev_context_attached_map(db, steps)
     latest_map = _latest_artifact_map(db, steps)
+    retrieval_map = _run_retrieval_meta_map(db, steps)
 
     return PipelineRunOut(
         id=str(pr.id),
@@ -225,7 +278,10 @@ def _run_to_out(db: Session, pr: PipelineRun, steps: List[PipelineStep]) -> Pipe
         status=pr.status,
         current_step_index=pr.current_step_index,
         input_payload=pr.input_payload or {},
-        steps=[_step_to_out(s, prev_map, latest_map) for s in sorted(steps, key=lambda x: x.step_index)],
+        steps=[
+            _step_to_out(s, prev_map, latest_map, retrieval_map)
+            for s in sorted(steps, key=lambda x: x.step_index)
+        ],
     )
 
 
@@ -858,7 +914,7 @@ def _mark_step_failed(db: Session, pr: PipelineRun, step: PipelineStep, *, error
     pr.status = "failed"
     db.add(pr)
 
-    # optional: also record a run log if run_id exists (best-effort)
+    # best-effort log
     try:
         if step.run_id:
             db.add(
@@ -866,7 +922,12 @@ def _mark_step_failed(db: Session, pr: PipelineRun, step: PipelineStep, *, error
                     run_id=step.run_id,
                     level="error",
                     message="Pipeline step failed",
-                    meta={"pipeline_run_id": str(pr.id), "step_index": step.step_index, "step_name": step.step_name, "error": error},
+                    meta={
+                        "pipeline_run_id": str(pr.id),
+                        "step_index": step.step_index,
+                        "step_name": step.step_name,
+                        "error": error,
+                    },
                 )
             )
     except Exception:
@@ -1155,7 +1216,6 @@ def run_next_step(
         steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
         return PipelineNextOut(ok=True, pipeline_run=_run_to_out(db, pr, steps), created_run_id=None)
 
-    # ensure pipeline status is running when executing
     if (pr.status or "").lower() == "created":
         pr.status = "running"
         db.add(pr)
@@ -1171,9 +1231,9 @@ def run_next_step(
     pr.current_step_index += 1
     if pr.current_step_index >= len(steps):
         pr.status = "completed"
-    db.add(pr)
-    db.commit()
-    db.refresh(pr)
+        db.add(pr)
+        db.commit()
+        db.refresh(pr)
 
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
     return PipelineNextOut(ok=True, pipeline_run=_run_to_out(db, pr, steps), created_run_id=created_run_id)
