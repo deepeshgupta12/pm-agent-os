@@ -29,6 +29,7 @@ import type {
   RagDebugResponse,
   RetrieveResponse,
   RetrieveItem,
+  RagBatch,
 } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL as string;
@@ -81,6 +82,13 @@ function fmtScore(v: any): string {
   return n.toFixed(3);
 }
 
+function fmtBatchLabel(b: RagBatch): string {
+  const kind = b.batch_kind || "unknown";
+  const q = (b.retrieval as any)?.query ? ` · q=${String((b.retrieval as any).query)}` : "";
+  const ts = b.created_at ? ` · ${new Date(b.created_at).toLocaleString()}` : "";
+  return `${kind}${q} · ${b.evidence_count} ev${ts}`;
+}
+
 export default function RunDetailPage() {
   const { runId } = useParams();
   const rid = runId || "";
@@ -96,6 +104,9 @@ export default function RunDetailPage() {
   const [ragOpen, setRagOpen] = useState(false);
   const [ragLoading, setRagLoading] = useState(false);
   const [ragDebug, setRagDebug] = useState<RagDebugResponse | null>(null);
+
+  // NEW (V2.3): batch selector state
+  const [ragBatchId, setRagBatchId] = useState<string | null>(null);
 
   // Create artifact form
   const [atype, setAtype] = useState<string | null>("prd");
@@ -202,7 +213,7 @@ export default function RunDetailPage() {
     const st = normalizeSourceTypes(rpSourceTypes);
     if (st.length > 0) params.set("source_types", st.join(","));
 
-    if (rpPreset && rpPreset !== "custom") {
+    if (rpPreset && rpPreset !== "custom" && rpPreset !== "none") {
       params.set("timeframe_preset", rpPreset);
     } else if (rpPreset === "custom") {
       if (rpStartDate) params.set("start_date", rpStartDate);
@@ -255,11 +266,12 @@ export default function RunDetailPage() {
     setLogs(logsRes.data);
   }
 
-  async function loadRagDebug() {
+  async function loadRagDebug(batchId?: string | null) {
     setRagLoading(true);
     setErr(null);
 
-    const res = await apiFetch<RagDebugResponse>(`/runs/${rid}/rag-debug`, { method: "GET" });
+    const qs = batchId ? `?batch_id=${encodeURIComponent(batchId)}` : "";
+    const res = await apiFetch<RagDebugResponse>(`/runs/${rid}/rag-debug${qs}`, { method: "GET" });
     setRagLoading(false);
 
     if (!res.ok) {
@@ -267,75 +279,35 @@ export default function RunDetailPage() {
       setRagDebug(null);
       return;
     }
-    setRagDebug(res.data);
-  }
 
-  async function previewRetrieve() {
-    if (!run) {
-      setErr("Run not loaded yet.");
-      return;
+    const data = res.data;
+    setRagDebug(data);
+
+    // If batch not selected yet, pick:
+    // 1) run._retrieval.batch_id if present AND exists in batches
+    // 2) newest batch in batches
+    // 3) null (shows unscoped)
+    if (!ragBatchId) {
+      const batches = data.batches || [];
+      const preferred = (retrievalCfg as any)?.batch_id ? String((retrievalCfg as any).batch_id) : null;
+
+      const hasPreferred = preferred && batches.some((b) => String(b.batch_id) === preferred);
+      if (hasPreferred) {
+        setRagBatchId(preferred);
+        // Also immediately scope-fetch to match selection
+        if (String(batchId || "") !== preferred) {
+          void loadRagDebug(preferred);
+          return;
+        }
+      } else if (batches.length > 0) {
+        const first = String(batches[0].batch_id);
+        setRagBatchId(first);
+        if (String(batchId || "") !== first) {
+          void loadRagDebug(first);
+          return;
+        }
+      }
     }
-    if (!rpQuery.trim()) {
-      setErr("Enter a query for retrieval preview.");
-      return;
-    }
-
-    setPreviewLoading(true);
-    setErr(null);
-    setPreview(null);
-
-    const path = buildRetrieveQueryParams(run.workspace_id);
-    const res = await apiFetch<RetrieveResponse>(path, { method: "GET" });
-    setPreviewLoading(false);
-
-    if (!res.ok) {
-      setErr(`Retrieve preview failed: ${res.status} ${res.error}`);
-      return;
-    }
-    setPreview(res.data);
-  }
-
-  async function regenerateWithRetrieval() {
-    if (!run) {
-      setErr("Run not loaded yet.");
-      return;
-    }
-    if (!rpQuery.trim()) {
-      setErr("Enter a query for regenerate-with-retrieval.");
-      return;
-    }
-
-    setRegenWithRetrievalLoading(true);
-    setErr(null);
-
-    const body = {
-      retrieval: {
-        enabled: true,
-        query: rpQuery.trim(),
-        k: Number(rpK) || 5,
-        alpha: Number(rpAlpha) || 0.0,
-        source_types: normalizeSourceTypes(rpSourceTypes),
-        timeframe: buildTimeframeForRunsPayload(),
-        min_score: Number(rpMinScore) || 0.15,
-        overfetch_k: Number(rpOverfetchK) || 3,
-        rerank: Boolean(rpRerank),
-      },
-    };
-
-    const res = await apiFetch<Run>(`/runs/${rid}/regenerate-with-retrieval`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-
-    setRegenWithRetrievalLoading(false);
-
-    if (!res.ok) {
-      setErr(`Regenerate-with-retrieval failed: ${res.status} ${res.error}`);
-      return;
-    }
-
-    await loadAll();
-    if (ragOpen) await loadRagDebug();
   }
 
   function exportPdf(artifactId: string) {
@@ -431,7 +403,80 @@ export default function RunDetailPage() {
     }
 
     await loadAll();
-    if (ragOpen) await loadRagDebug();
+    if (ragOpen) await loadRagDebug(ragBatchId);
+  }
+
+  async function previewRetrieve() {
+    if (!run) {
+      setErr("Run not loaded yet.");
+      return;
+    }
+    if (!rpQuery.trim()) {
+      setErr("Enter a query for retrieval preview.");
+      return;
+    }
+
+    setPreviewLoading(true);
+    setErr(null);
+    setPreview(null);
+
+    const path = buildRetrieveQueryParams(run.workspace_id);
+    const res = await apiFetch<RetrieveResponse>(path, { method: "GET" });
+    setPreviewLoading(false);
+
+    if (!res.ok) {
+      setErr(`Retrieve preview failed: ${res.status} ${res.error}`);
+      return;
+    }
+    setPreview(res.data);
+  }
+
+  async function regenerateWithRetrieval() {
+    if (!run) {
+      setErr("Run not loaded yet.");
+      return;
+    }
+    if (!rpQuery.trim()) {
+      setErr("Enter a query for regenerate-with-retrieval.");
+      return;
+    }
+
+    setRegenWithRetrievalLoading(true);
+    setErr(null);
+
+    const body = {
+      retrieval: {
+        enabled: true,
+        query: rpQuery.trim(),
+        k: Number(rpK) || 5,
+        alpha: Number(rpAlpha) || 0.0,
+        source_types: normalizeSourceTypes(rpSourceTypes),
+        timeframe: buildTimeframeForRunsPayload(),
+        min_score: Number(rpMinScore) || 0.15,
+        overfetch_k: Number(rpOverfetchK) || 3,
+        rerank: Boolean(rpRerank),
+      },
+    };
+
+    const res = await apiFetch<Run>(`/runs/${rid}/regenerate-with-retrieval`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+
+    setRegenWithRetrievalLoading(false);
+
+    if (!res.ok) {
+      setErr(`Regenerate-with-retrieval failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    await loadAll();
+
+    // After regen, refresh rag batches (unscoped), then auto-select latest
+    if (ragOpen) {
+      setRagBatchId(null);
+      await loadRagDebug(null);
+    }
   }
 
   async function regenerate() {
@@ -489,7 +534,7 @@ export default function RunDetailPage() {
     }
 
     await loadAll();
-    if (ragOpen) await loadRagDebug();
+    if (ragOpen) await loadRagDebug(ragBatchId);
   }
 
   useEffect(() => {
@@ -501,7 +546,7 @@ export default function RunDetailPage() {
   useEffect(() => {
     if (!rid) return;
     if (!ragOpen) return;
-    void loadRagDebug();
+    void loadRagDebug(ragBatchId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ragOpen, rid]);
 
@@ -601,6 +646,11 @@ export default function RunDetailPage() {
                     knobs: min_score={String(retrievalCfg.min_score ?? "")}, overfetch_k=
                     {String(retrievalCfg.overfetch_k ?? "")}, rerank={String(retrievalCfg.rerank ?? "")}
                   </Text>
+                  {retrievalCfg.batch_id ? (
+                    <Text size="sm" c="dimmed">
+                      batch_id: <Code>{String(retrievalCfg.batch_id)}</Code>
+                    </Text>
+                  ) : null}
                 </Stack>
               </Card>
             ) : null}
@@ -645,8 +695,7 @@ export default function RunDetailPage() {
           <Collapse in={rpOpen}>
             <Stack gap="sm">
               <Text size="sm" c="dimmed">
-                Use this to preview retrieval results (no DB writes besides retrieval trace),
-                then regenerate a new artifact version using fresh retrieval evidence.
+                Use this to preview retrieval results, then regenerate a new artifact version using fresh retrieval evidence.
               </Text>
 
               <TextInput
@@ -847,7 +896,12 @@ export default function RunDetailPage() {
               <Button variant="light" onClick={() => setRagOpen((x) => !x)}>
                 {ragOpen ? "Hide" : "Show"}
               </Button>
-              <Button variant="default" onClick={loadRagDebug} loading={ragLoading} disabled={!ragOpen}>
+              <Button
+                variant="default"
+                onClick={() => loadRagDebug(ragBatchId)}
+                loading={ragLoading}
+                disabled={!ragOpen}
+              >
                 Refresh
               </Button>
             </Group>
@@ -855,16 +909,66 @@ export default function RunDetailPage() {
 
           <Collapse in={ragOpen}>
             <Stack gap="sm">
+              {/* NEW: Batch selector */}
               <Card withBorder>
-                <Text fw={600} mb={6}>
-                  retrieval_config (from run.input_payload._retrieval)
-                </Text>
-                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(retrievalCfg)}</pre>
+                <Stack gap="xs">
+                  <Text fw={600}>Batch scope</Text>
+                  <Text size="sm" c="dimmed">
+                    Select a batch to view only the evidence/logs created in that retrieval execution.
+                  </Text>
+
+                  <Group grow>
+                    <Select
+                      label="Batch"
+                      data={(ragDebug?.batches || []).map((b) => ({
+                        value: String(b.batch_id),
+                        label: fmtBatchLabel(b),
+                      }))}
+                      value={ragBatchId}
+                      onChange={(v) => {
+                        const next = v || null;
+                        setRagBatchId(next);
+                        if (next) void loadRagDebug(next);
+                      }}
+                      placeholder={(ragDebug?.batches || []).length === 0 ? "No batches yet" : "Select batch"}
+                      searchable
+                      nothingFoundMessage="No batches"
+                      disabled={(ragDebug?.batches || []).length === 0}
+                    />
+                    <Button
+                      mt={22}
+                      variant="default"
+                      onClick={() => {
+                        setRagBatchId(null);
+                        void loadRagDebug(null);
+                      }}
+                    >
+                      Show all
+                    </Button>
+                  </Group>
+
+                  {ragBatchId ? (
+                    <Text size="sm" c="dimmed">
+                      scoped batch_id: <Code>{ragBatchId}</Code>
+                    </Text>
+                  ) : (
+                    <Text size="sm" c="dimmed">
+                      showing all evidence (unscoped)
+                    </Text>
+                  )}
+                </Stack>
               </Card>
 
               <Card withBorder>
                 <Text fw={600} mb={6}>
-                  retrieval_log (latest retrieval RunLog meta)
+                  retrieval_config (best available for current scope)
+                </Text>
+                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(ragDebug?.retrieval_config ?? retrievalCfg)}</pre>
+              </Card>
+
+              <Card withBorder>
+                <Text fw={600} mb={6}>
+                  retrieval_log (scoped latest retrieval RunLog meta)
                 </Text>
                 <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
                   {safeJson(ragDebug?.retrieval_log ?? null)}
@@ -873,7 +977,7 @@ export default function RunDetailPage() {
 
               <Card withBorder>
                 <Group justify="space-between">
-                  <Text fw={600}>Evidence (from rag-debug)</Text>
+                  <Text fw={600}>Evidence (scoped)</Text>
                   <Badge variant="light">{ragDebug?.evidence?.length ?? 0}</Badge>
                 </Group>
                 <Divider my="sm" />
@@ -896,6 +1000,7 @@ export default function RunDetailPage() {
                           <Text size="sm">{e.excerpt}</Text>
                           <Text size="xs" c="dimmed">
                             {e.id}
+                            {e.created_at ? ` · ${new Date(e.created_at).toLocaleString()}` : ""}
                           </Text>
                         </Stack>
                       </Card>

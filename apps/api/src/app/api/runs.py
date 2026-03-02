@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -288,6 +288,129 @@ def _next_version_for_logical_key(db: Session, run_id: uuid.UUID, logical_key: s
     return int(max_ver or 0) + 1
 
 
+def _evidence_batch_id(e: Evidence) -> Optional[str]:
+    try:
+        meta = e.meta or {}
+        bid = meta.get("batch_id")
+        if bid is None:
+            return None
+        bid = str(bid).strip()
+        return bid or None
+    except Exception:
+        return None
+
+
+def _evidence_batch_kind(e: Evidence) -> Optional[str]:
+    try:
+        meta = e.meta or {}
+        bk = meta.get("batch_kind")
+        if bk is None:
+            return None
+        bk = str(bk).strip()
+        return bk or None
+    except Exception:
+        return None
+
+
+def _batch_retrieval_from_evidence(e: Evidence) -> Dict[str, Any]:
+    try:
+        meta = e.meta or {}
+        r = meta.get("retrieval") or {}
+        return r if isinstance(r, dict) else {}
+    except Exception:
+        return {}
+
+
+def _build_batches_from_evidence(evs: List[Evidence]) -> List[Dict[str, Any]]:
+    """
+    Build a small index for UI batch selector.
+    Groups:
+      - batch_id present => that batch
+      - no batch_id => "legacy"
+    """
+    buckets: Dict[str, Dict[str, Any]] = {}
+
+    for e in evs:
+        bid = _evidence_batch_id(e) or "legacy"
+        bk = _evidence_batch_kind(e) or ("legacy" if bid == "legacy" else "unknown")
+        created_at = e.created_at
+
+        if bid not in buckets:
+            buckets[bid] = {
+                "batch_id": bid,
+                "batch_kind": bk,
+                "created_at": created_at,
+                "evidence_count": 0,
+                "retrieval": {},
+            }
+
+        buckets[bid]["evidence_count"] = int(buckets[bid]["evidence_count"]) + 1
+
+        # keep newest timestamp for sorting/label
+        try:
+            if created_at and buckets[bid]["created_at"] and created_at > buckets[bid]["created_at"]:
+                buckets[bid]["created_at"] = created_at
+        except Exception:
+            buckets[bid]["created_at"] = created_at
+
+        # store a representative retrieval config if available
+        r = _batch_retrieval_from_evidence(e)
+        if r and not buckets[bid].get("retrieval"):
+            buckets[bid]["retrieval"] = r
+
+        # if kind changes, prefer non-unknown
+        if buckets[bid].get("batch_kind") in ("unknown", "legacy") and bk not in ("unknown", "legacy"):
+            buckets[bid]["batch_kind"] = bk
+
+    out = list(buckets.values())
+
+    def _ts(x: Dict[str, Any]) -> float:
+        dt = x.get("created_at")
+        if not isinstance(dt, datetime):
+            return 0.0
+        return dt.timestamp()
+
+    out.sort(key=_ts, reverse=True)
+    return out
+
+
+def _pick_retrieval_log_for_batch(logs: List[RunLog], batch_id: Optional[str]) -> Optional[RunLog]:
+    """
+    logs are expected newest-first.
+    If batch_id:
+      - match meta.batch_id
+      - if batch_id == "legacy", prefer logs WITHOUT batch_id
+    Else:
+      - return newest
+    """
+    if not logs:
+        return None
+
+    if not batch_id:
+        return logs[0]
+
+    if batch_id == "legacy":
+        for l in logs:
+            try:
+                meta = l.meta or {}
+                bid = meta.get("batch_id")
+                if not bid:
+                    return l
+            except Exception:
+                continue
+        return None
+
+    for l in logs:
+        try:
+            meta = l.meta or {}
+            bid = meta.get("batch_id")
+            if bid and str(bid) == str(batch_id):
+                return l
+        except Exception:
+            continue
+    return None
+
+
 @router.post("/workspaces/{workspace_id}/runs", response_model=RunOut)
 def create_run(
     workspace_id: str,
@@ -480,9 +603,6 @@ def create_run(
     )
 
 
-# -------------------------
-# V2.2: Regenerate with retrieval
-# -------------------------
 @router.post("/runs/{run_id}/regenerate-with-retrieval", response_model=RunOut)
 def regenerate_with_retrieval(
     run_id: str,
@@ -497,7 +617,6 @@ def regenerate_with_retrieval(
 
     require_workspace_role_min(str(r.workspace_id), "member", db, user)
 
-    # Determine base artifact key/type/versioning from latest artifact
     latest = _latest_artifact_for_run(db, r.id)
     if not latest:
         raise HTTPException(status_code=400, detail="No artifacts exist for this run yet")
@@ -506,7 +625,6 @@ def regenerate_with_retrieval(
     artifact_type = latest.type
     next_ver = _next_version_for_logical_key(db, r.id, logical_key)
 
-    # Use run input payload as-is, but persist new retrieval config into _retrieval
     rcfg = payload.retrieval
     if not rcfg.enabled or not (rcfg.query or "").strip():
         raise HTTPException(status_code=400, detail="retrieval.enabled=true and retrieval.query required")
@@ -535,7 +653,6 @@ def regenerate_with_retrieval(
         "rerank": rerank,
     }
 
-    # Retrieve
     items = hybrid_retrieve(
         db,
         workspace_id=str(r.workspace_id),
@@ -590,7 +707,6 @@ def regenerate_with_retrieval(
     retrieval_meta["evidence_count"] = len(ev_items)
     retrieval_meta["batch_id"] = batch_id
 
-    # Persist latest retrieval config onto run (for UI)
     ip = dict(r.input_payload or {})
     ip["_retrieval"] = retrieval_meta
     r.input_payload = ip
@@ -598,7 +714,6 @@ def regenerate_with_retrieval(
     db.commit()
     db.refresh(r)
 
-    # Audit logs + status event (completed -> completed)
     db.add(
         RunLog(
             run_id=r.id,
@@ -618,7 +733,6 @@ def regenerate_with_retrieval(
         meta={"artifact_type": artifact_type, "logical_key": logical_key, "new_version": next_ver, **retrieval_meta},
     )
 
-    # Generate new artifact
     if len(ev_items) == 0:
         _atype, _title, md = _no_evidence_md(r.agent_id, r.input_payload, retrieval_meta)
         title = latest.title or f"{artifact_type.replace('_', ' ').title()} — Draft"
@@ -642,7 +756,6 @@ def regenerate_with_retrieval(
     db.add(new_art)
     db.commit()
 
-    # Update summary (keep run status as-is)
     r.output_summary = build_run_summary(agent_id=r.agent_id, artifact_type=artifact_type)
     r.output_summary += f" Regenerated v{next_ver}."
     if ev_items:
@@ -865,44 +978,89 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
 
 
 @router.get("/runs/{run_id}/rag-debug")
-def rag_debug(run_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
+def rag_debug(
+    run_id: str,
+    batch_id: Optional[str] = Query(default=None, description="If provided, only return evidence/log for this batch_id (or 'legacy')."),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
     r = db.get(Run, run_id)
     if not r:
         raise HTTPException(status_code=404, detail="Run not found")
 
     _ensure_run_workspace_access(db, r, user)
 
-    evs = db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc())).scalars().all()
+    all_evs = db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc())).scalars().all()
+    batches = _build_batches_from_evidence(all_evs)
 
-    log = (
+    # Filter evidence by batch_id if requested
+    if batch_id:
+        bid = str(batch_id).strip()
+        if bid == "legacy":
+            evs = [e for e in all_evs if _evidence_batch_id(e) is None]
+        else:
+            evs = [e for e in all_evs if (_evidence_batch_id(e) or "") == bid]
+    else:
+        evs = all_evs
+
+    # Fetch relevant logs (newest-first) and pick best for batch
+    candidate_messages = [
+        "Pre-retrieval completed; evidence attached.",
+        "Regenerate-with-retrieval executed; evidence attached.",
+        "Regenerate-with-retrieval executed; no evidence found.",
+    ]
+
+    log_rows = (
         db.execute(
             select(RunLog)
             .where(RunLog.run_id == r.id)
-            .where(RunLog.message.in_(
-                [
-                    "Pre-retrieval completed; evidence attached.",
-                    "Regenerate-with-retrieval executed; evidence attached.",
-                    "Regenerate-with-retrieval executed; no evidence found.",
-                ]
-            ))
+            .where(RunLog.message.in_(candidate_messages))
             .order_by(RunLog.created_at.desc())
-            .limit(1)
+            .limit(50)
         )
         .scalars()
-        .first()
+        .all()
     )
 
+    picked_log = _pick_retrieval_log_for_batch(log_rows, batch_id)
+
+    # retrieval_config:
+    # - default to run.input_payload._retrieval
+    # - if batch_id provided, try derive from picked_log.meta, else from evidence.meta.retrieval
     retrieval_cfg = None
     try:
         retrieval_cfg = (r.input_payload or {}).get("_retrieval")
     except Exception:
         retrieval_cfg = None
 
+    if batch_id:
+        # Prefer log.meta when available
+        if picked_log and isinstance(picked_log.meta, dict) and picked_log.meta:
+            retrieval_cfg = picked_log.meta
+        else:
+            # Fall back to evidence meta.retrieval
+            if evs:
+                rr = _batch_retrieval_from_evidence(evs[0])
+                if rr:
+                    # decorate with batch id & count
+                    retrieval_cfg = {**rr, "batch_id": batch_id, "evidence_count": len(evs)}
+
     return {
         "ok": True,
         "run_id": str(r.id),
+        "batch_id": batch_id,
+        "batches": [
+            {
+                "batch_id": b.get("batch_id"),
+                "batch_kind": b.get("batch_kind"),
+                "created_at": (b.get("created_at").isoformat().replace("+00:00", "Z") if isinstance(b.get("created_at"), datetime) else None),
+                "evidence_count": int(b.get("evidence_count") or 0),
+                "retrieval": b.get("retrieval") or {},
+            }
+            for b in batches
+        ],
         "retrieval_config": retrieval_cfg,
-        "retrieval_log": (log.meta or {}) if log else None,
+        "retrieval_log": (picked_log.meta or {}) if picked_log else None,
         "evidence": [
             {
                 "id": str(e.id),
@@ -911,7 +1069,7 @@ def rag_debug(run_id: str, db: Session = Depends(get_db), user: User = Depends(r
                 "source_ref": e.source_ref,
                 "excerpt": e.excerpt,
                 "meta": e.meta or {},
-                "created_at": e.created_at,
+                "created_at": e.created_at.isoformat().replace("+00:00", "Z"),
             }
             for e in evs
         ],

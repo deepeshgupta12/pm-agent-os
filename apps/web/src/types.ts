@@ -85,6 +85,7 @@ export type Evidence = {
   source_ref?: string | null;
   excerpt: string;
   meta: Record<string, unknown>;
+  created_at?: string; // ISO (optional; rag-debug includes it)
 };
 
 /** Pipelines */
@@ -154,9 +155,19 @@ export type RunTimelineEvent = {
   meta: Record<string, unknown>;
 };
 
+export type RagBatch = {
+  batch_id: string; // uuid or "legacy"
+  batch_kind: string; // create_run | regenerate_with_retrieval | legacy | unknown
+  created_at?: string | null; // ISO
+  evidence_count: number;
+  retrieval?: Record<string, unknown>;
+};
+
 export type RagDebugResponse = {
   ok: boolean;
   run_id: string;
+  batch_id?: string | null;
+  batches?: RagBatch[];
   retrieval_config?: Record<string, unknown> | null;
   retrieval_log?: Record<string, unknown> | null;
   evidence: Evidence[];
