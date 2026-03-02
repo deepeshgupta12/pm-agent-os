@@ -1,8 +1,4 @@
-# pm-agent-os — RAG + Pipelines (V0 → V3.2) 🚀
-
-This README captures **everything completed so far**: the **problem statement**, **solution**, **scope across versions**, **features shipped**, **implementation notes**, **API/UI changes**, **testing + git workflow**, and practical **code snippets**.
-
----
+# pm-agent-os — RAG + Pipelines 🚀
 
 ## 1) Problem statement 🧩
 
