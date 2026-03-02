@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useLocation } from "react-router-dom";
 import {
   Badge,
   Button,
@@ -16,6 +16,7 @@ import {
   Collapse,
   Code,
   Checkbox,
+  Tooltip,
 } from "@mantine/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -31,6 +32,7 @@ import type {
   RetrieveItem,
   RagBatch,
   AttachPreviewEvidenceIn,
+  WorkspaceRole,
 } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL as string;
@@ -69,6 +71,13 @@ function logBadgeColor(level: string): string {
   return "blue";
 }
 
+function roleBadgeColor(role: string | null): string {
+  if (role === "admin") return "grape";
+  if (role === "member") return "blue";
+  if (role === "viewer") return "gray";
+  return "dark";
+}
+
 function safeJson(v: any): string {
   try {
     return JSON.stringify(v ?? {}, null, 2);
@@ -90,9 +99,25 @@ function fmtBatchLabel(b: RagBatch): string {
   return `${kind}${q} · ${b.evidence_count} ev${ts}`;
 }
 
+function MutateTooltip({
+  canMutate,
+  children,
+}: {
+  canMutate: boolean;
+  children: React.ReactNode;
+}) {
+  if (canMutate) return <>{children}</>;
+  return (
+    <Tooltip label="Viewer role: mutation disabled" withArrow>
+      <span style={{ display: "inline-block" }}>{children}</span>
+    </Tooltip>
+  );
+}
+
 export default function RunDetailPage() {
   const { runId } = useParams();
   const rid = runId || "";
+  const loc = useLocation();
 
   const [run, setRun] = useState<Run | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
@@ -100,6 +125,10 @@ export default function RunDetailPage() {
   const [timeline, setTimeline] = useState<RunTimelineEvent[]>([]);
   const [logs, setLogs] = useState<RunLog[]>([]);
   const [err, setErr] = useState<string | null>(null);
+
+  // V2.7: workspace role
+  const [wsRole, setWsRole] = useState<WorkspaceRole | null>(null);
+  const [wsRoleLoading, setWsRoleLoading] = useState(false);
 
   // RAG debug panel
   const [ragOpen, setRagOpen] = useState(false);
@@ -169,10 +198,7 @@ export default function RunDetailPage() {
   const [previewSelected, setPreviewSelected] = useState<Record<string, boolean>>({});
   const [attachLoading, setAttachLoading] = useState(false);
 
-  const artifactTypeOptions = useMemo(
-    () => ARTIFACT_TYPES.map((t) => ({ value: t, label: t })),
-    []
-  );
+  const artifactTypeOptions = useMemo(() => ARTIFACT_TYPES.map((t) => ({ value: t, label: t })), []);
 
   const latestArtifact = useMemo(() => {
     if (artifacts.length === 0) return null;
@@ -188,6 +214,9 @@ export default function RunDetailPage() {
     if (logFilter === "all") return logs;
     return logs.filter((l) => l.level === logFilter);
   }, [logs, logFilter]);
+
+  const roleStr = wsRole?.role ?? null;
+  const canMutate = roleStr === "admin" || roleStr === "member";
 
   function normalizeSourceTypes(s: string): string[] {
     return (s || "")
@@ -246,6 +275,18 @@ export default function RunDetailPage() {
     setPreviewSelected(next);
   }
 
+  async function loadWorkspaceRole(workspaceId: string) {
+    setWsRoleLoading(true);
+    const res = await apiFetch<WorkspaceRole>(`/workspaces/${workspaceId}/my-role`, { method: "GET" });
+    setWsRoleLoading(false);
+
+    if (!res.ok) {
+      setWsRole(null);
+      return;
+    }
+    setWsRole(res.data);
+  }
+
   async function loadAll() {
     setErr(null);
 
@@ -255,6 +296,10 @@ export default function RunDetailPage() {
       return;
     }
     setRun(runRes.data);
+
+    if (runRes.data?.workspace_id) {
+      void loadWorkspaceRole(runRes.data.workspace_id);
+    }
 
     const artRes = await apiFetch<Artifact[]>(`/runs/${rid}/artifacts`, { method: "GET" });
     if (!artRes.ok) {
@@ -302,10 +347,6 @@ export default function RunDetailPage() {
     const data = res.data;
     setRagDebug(data);
 
-    // If batch not selected yet, pick:
-    // 1) run._retrieval.batch_id if present AND exists in batches
-    // 2) newest batch in batches
-    // 3) null (shows unscoped)
     if (!ragBatchId) {
       const batches = data.batches || [];
       const preferred = (retrievalCfg as any)?.batch_id ? String((retrievalCfg as any).batch_id) : null;
@@ -353,13 +394,16 @@ export default function RunDetailPage() {
 
     setPreview(res.data);
 
-    // Reset selections for new preview
     const nextSel: Record<string, boolean> = {};
     for (const it of res.data.items || []) nextSel[it.chunk_id] = false;
     setPreviewSelected(nextSel);
   }
 
   async function regenerateWithRetrieval() {
+    if (!canMutate) {
+      setErr("Viewer role cannot regenerate.");
+      return;
+    }
     if (!run) {
       setErr("Run not loaded yet.");
       return;
@@ -400,7 +444,6 @@ export default function RunDetailPage() {
 
     await loadAll();
 
-    // After regen, refresh rag batches (unscoped), then auto-select latest
     if (ragOpen) {
       setRagBatchId(null);
       await loadRagDebug(null);
@@ -408,6 +451,10 @@ export default function RunDetailPage() {
   }
 
   async function attachSelectedPreviewAsEvidence() {
+    if (!canMutate) {
+      setErr("Viewer role cannot attach evidence.");
+      return;
+    }
     if (!run) {
       setErr("Run not loaded yet.");
       return;
@@ -481,6 +528,10 @@ export default function RunDetailPage() {
   }
 
   async function createArtifact() {
+    if (!canMutate) {
+      setErr("Viewer role cannot create artifacts.");
+      return;
+    }
     if (!atype) return;
     setCreatingArtifact(true);
     setErr(null);
@@ -506,6 +557,10 @@ export default function RunDetailPage() {
   }
 
   async function addEvidence() {
+    if (!canMutate) {
+      setErr("Viewer role cannot add evidence.");
+      return;
+    }
     if (!ekind) return;
     setCreatingEvidence(true);
     setErr(null);
@@ -541,6 +596,10 @@ export default function RunDetailPage() {
   }
 
   async function autoAddEvidence() {
+    if (!canMutate) {
+      setErr("Viewer role cannot auto-add evidence.");
+      return;
+    }
     if (!autoQuery.trim()) {
       setErr("Enter a query to auto-add evidence.");
       return;
@@ -569,6 +628,11 @@ export default function RunDetailPage() {
   }
 
   async function regenerate() {
+    if (!canMutate) {
+      setErr("Viewer role cannot regenerate.");
+      return;
+    }
+
     setRegenLoading(true);
     setErr(null);
 
@@ -588,6 +652,10 @@ export default function RunDetailPage() {
   }
 
   async function createLog() {
+    if (!canMutate) {
+      setErr("Viewer role cannot add logs.");
+      return;
+    }
     if (!logLevel) return;
     if (!logMessage.trim()) {
       setErr("Log message cannot be empty.");
@@ -626,9 +694,32 @@ export default function RunDetailPage() {
     if (ragOpen) await loadRagDebug(ragBatchId);
   }
 
+  // -------------------------
+  // Effects
+  // -------------------------
   useEffect(() => {
     if (!rid) return;
     void loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rid]);
+
+  // V3.2: deep-link behavior: /runs/{id}?ragOpen=1&batch_id=...
+  useEffect(() => {
+    if (!rid) return;
+
+    const params = new URLSearchParams(loc.search);
+    const open = (params.get("ragOpen") || "").toLowerCase();
+    const batch = params.get("batch_id");
+
+    const shouldOpen = open === "1" || open === "true";
+    if (!shouldOpen) return;
+
+    setRagOpen(true);
+
+    const bid = batch ? String(batch) : null;
+    if (bid) setRagBatchId(bid);
+
+    void loadRagDebug(bid);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rid]);
 
@@ -639,7 +730,7 @@ export default function RunDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ragOpen, rid]);
 
-  // helpful: prefill retrieval panel from run._retrieval once run loads
+  // Prefill retrieval panel from run._retrieval once run loads
   useEffect(() => {
     const cfg: any = retrievalCfg;
     if (!cfg) return;
@@ -672,7 +763,12 @@ export default function RunDetailPage() {
   return (
     <Stack gap="md">
       <Group justify="space-between">
-        <Title order={2}>Run · RAG Console</Title>
+        <Group gap="sm">
+          <Title order={2}>Run · RAG Console</Title>
+          <Badge variant="light" color={roleBadgeColor(roleStr)} title="Your role in this workspace">
+            Role: {wsRoleLoading ? "…" : roleStr ?? "unknown"}
+          </Badge>
+        </Group>
         <Button component={Link} to="/workspaces" variant="light">
           Back to Workspaces
         </Button>
@@ -692,11 +788,7 @@ export default function RunDetailPage() {
               <Group gap="sm">
                 <Badge>{run.status}</Badge>
                 <Text fw={700}>{run.agent_id}</Text>
-                {retrievalCfg ? (
-                  <Badge variant="light">retrieval enabled</Badge>
-                ) : (
-                  <Badge variant="light">no retrieval</Badge>
-                )}
+                {retrievalCfg ? <Badge variant="light">retrieval enabled</Badge> : <Badge variant="light">no retrieval</Badge>}
               </Group>
               <Text size="xs" c="dimmed">
                 {run.id}
@@ -726,14 +818,12 @@ export default function RunDetailPage() {
                   </Group>
                   <Text size="sm" c="dimmed">
                     source_types:{" "}
-                    {Array.isArray(retrievalCfg.source_types)
-                      ? retrievalCfg.source_types.join(", ")
-                      : "(none)"}{" "}
-                    · timeframe: {retrievalCfg.timeframe ? JSON.stringify(retrievalCfg.timeframe) : "(none)"}
+                    {Array.isArray(retrievalCfg.source_types) ? retrievalCfg.source_types.join(", ") : "(none)"} · timeframe:{" "}
+                    {retrievalCfg.timeframe ? JSON.stringify(retrievalCfg.timeframe) : "(none)"}
                   </Text>
                   <Text size="sm" c="dimmed">
-                    knobs: min_score={String(retrievalCfg.min_score ?? "")}, overfetch_k=
-                    {String(retrievalCfg.overfetch_k ?? "")}, rerank={String(retrievalCfg.rerank ?? "")}
+                    knobs: min_score={String(retrievalCfg.min_score ?? "")}, overfetch_k={String(retrievalCfg.overfetch_k ?? "")}, rerank=
+                    {String(retrievalCfg.rerank ?? "")}
                   </Text>
                   {retrievalCfg.batch_id ? (
                     <Text size="sm" c="dimmed">
@@ -746,13 +836,17 @@ export default function RunDetailPage() {
 
             {/* Existing regenerate */}
             <Group gap="sm">
-              <Button onClick={regenerate} loading={regenLoading} disabled={evidence.length === 0}>
-                Regenerate using evidence
-              </Button>
+              <MutateTooltip canMutate={canMutate}>
+                <Button onClick={regenerate} loading={regenLoading} disabled={!canMutate || evidence.length === 0}>
+                  Regenerate using evidence
+                </Button>
+              </MutateTooltip>
               <Text size="sm" c="dimmed">
                 {evidence.length === 0
                   ? "Add evidence first to enable regenerate."
-                  : `Uses ${evidence.length} evidence item(s). Creates a new artifact version.`}
+                  : canMutate
+                  ? `Uses ${evidence.length} evidence item(s). Creates a new artifact version.`
+                  : "Viewer: regenerate disabled."}
               </Text>
             </Group>
 
@@ -761,9 +855,7 @@ export default function RunDetailPage() {
               <Text fw={600} mb={6}>
                 Input payload
               </Text>
-              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                {JSON.stringify(run.input_payload, null, 2)}
-              </pre>
+              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(run.input_payload, null, 2)}</pre>
             </Card>
           </Stack>
         </Card>
@@ -784,8 +876,8 @@ export default function RunDetailPage() {
           <Collapse in={rpOpen}>
             <Stack gap="sm">
               <Text size="sm" c="dimmed">
-                Use this to preview retrieval results, attach selected preview items as evidence,
-                then regenerate a new artifact version using fresh retrieval evidence.
+                Use this to preview retrieval results (viewer+), attach selected preview items as evidence (member/admin),
+                then regenerate a new artifact version using fresh retrieval evidence (member/admin).
               </Text>
 
               <TextInput
@@ -796,21 +888,8 @@ export default function RunDetailPage() {
               />
 
               <Group grow>
-                <NumberInput
-                  label="k"
-                  value={rpK}
-                  min={1}
-                  max={50}
-                  onChange={(v) => setRpK(Number(v) || 5)}
-                />
-                <NumberInput
-                  label="alpha"
-                  value={rpAlpha}
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  onChange={(v) => setRpAlpha(Number(v) || 0)}
-                />
+                <NumberInput label="k" value={rpK} min={1} max={50} onChange={(v) => setRpK(Number(v) || 5)} />
+                <NumberInput label="alpha" value={rpAlpha} min={0} max={1} step={0.05} onChange={(v) => setRpAlpha(Number(v) || 0)} />
                 <TextInput
                   label="source_types (comma-separated)"
                   value={rpSourceTypes}
@@ -847,28 +926,10 @@ export default function RunDetailPage() {
               </Group>
 
               <Group grow>
-                <NumberInput
-                  label="min_score"
-                  value={rpMinScore}
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  onChange={(v) => setRpMinScore(Number(v) || 0.15)}
-                />
-                <NumberInput
-                  label="overfetch_k"
-                  value={rpOverfetchK}
-                  min={1}
-                  max={10}
-                  step={1}
-                  onChange={(v) => setRpOverfetchK(Number(v) || 3)}
-                />
+                <NumberInput label="min_score" value={rpMinScore} min={0} max={1} step={0.05} onChange={(v) => setRpMinScore(Number(v) || 0.15)} />
+                <NumberInput label="overfetch_k" value={rpOverfetchK} min={1} max={10} step={1} onChange={(v) => setRpOverfetchK(Number(v) || 3)} />
                 <div style={{ paddingTop: 26 }}>
-                  <Checkbox
-                    label="rerank"
-                    checked={rpRerank}
-                    onChange={(e) => setRpRerank(e.currentTarget.checked)}
-                  />
+                  <Checkbox label="rerank" checked={rpRerank} onChange={(e) => setRpRerank(e.currentTarget.checked)} />
                 </div>
               </Group>
 
@@ -876,9 +937,12 @@ export default function RunDetailPage() {
                 <Button onClick={previewRetrieve} loading={previewLoading} variant="default" disabled={!run}>
                   Retrieve Preview
                 </Button>
-                <Button onClick={regenerateWithRetrieval} loading={regenWithRetrievalLoading} disabled={!run}>
-                  Regenerate with Retrieval
-                </Button>
+
+                <MutateTooltip canMutate={canMutate}>
+                  <Button onClick={regenerateWithRetrieval} loading={regenWithRetrievalLoading} disabled={!run || !canMutate}>
+                    Regenerate with Retrieval
+                  </Button>
+                </MutateTooltip>
               </Group>
 
               {preview ? (
@@ -889,27 +953,16 @@ export default function RunDetailPage() {
                   </Group>
 
                   <Text size="sm" c="dimmed">
-                    q=<Code>{preview.q}</Code> · k=<Code>{String(preview.k)}</Code> · alpha=
-                    <Code>{String(preview.alpha)}</Code> · min_score=<Code>{String(preview.min_score)}</Code> ·
-                    overfetch_k=<Code>{String(preview.overfetch_k)}</Code> · rerank=<Code>{String(preview.rerank)}</Code>
+                    q=<Code>{preview.q}</Code> · k=<Code>{String(preview.k)}</Code> · alpha=<Code>{String(preview.alpha)}</Code> · min_score=
+                    <Code>{String(preview.min_score)}</Code> · overfetch_k=<Code>{String(preview.overfetch_k)}</Code> · rerank=<Code>{String(preview.rerank)}</Code>
                   </Text>
 
                   <Group justify="space-between" mt="sm">
                     <Group gap="xs">
-                      <Button
-                        size="xs"
-                        variant="light"
-                        onClick={() => toggleAllPreview(true)}
-                        disabled={!preview.items?.length}
-                      >
+                      <Button size="xs" variant="light" onClick={() => toggleAllPreview(true)} disabled={!preview.items?.length}>
                         Select all
                       </Button>
-                      <Button
-                        size="xs"
-                        variant="light"
-                        onClick={() => toggleAllPreview(false)}
-                        disabled={!preview.items?.length}
-                      >
+                      <Button size="xs" variant="light" onClick={() => toggleAllPreview(false)} disabled={!preview.items?.length}>
                         Clear
                       </Button>
                     </Group>
@@ -918,14 +971,17 @@ export default function RunDetailPage() {
                       <Badge variant="light">
                         selected {selectedPreviewItems().length}/{preview.items.length}
                       </Badge>
-                      <Button
-                        size="xs"
-                        onClick={attachSelectedPreviewAsEvidence}
-                        loading={attachLoading}
-                        disabled={selectedPreviewItems().length === 0}
-                      >
-                        Attach selected as Evidence
-                      </Button>
+
+                      <MutateTooltip canMutate={canMutate}>
+                        <Button
+                          size="xs"
+                          onClick={attachSelectedPreviewAsEvidence}
+                          loading={attachLoading}
+                          disabled={!canMutate || selectedPreviewItems().length === 0}
+                        >
+                          Attach selected as Evidence
+                        </Button>
+                      </MutateTooltip>
                     </Group>
                   </Group>
 
@@ -1013,8 +1069,7 @@ export default function RunDetailPage() {
             <Card withBorder style={{ maxHeight: 420, overflow: "auto" }}>
               <Stack gap={6}>
                 <Text size="sm" c="dimmed">
-                  {latestArtifact.type} · v{latestArtifact.version} · {latestArtifact.status} · key=
-                  {latestArtifact.logical_key}
+                  {latestArtifact.type} · v{latestArtifact.version} · {latestArtifact.status} · key={latestArtifact.logical_key}
                 </Text>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{latestArtifact.content_md || ""}</ReactMarkdown>
               </Stack>
@@ -1032,12 +1087,7 @@ export default function RunDetailPage() {
               <Button variant="light" onClick={() => setRagOpen((x) => !x)}>
                 {ragOpen ? "Hide" : "Show"}
               </Button>
-              <Button
-                variant="default"
-                onClick={() => loadRagDebug(ragBatchId)}
-                loading={ragLoading}
-                disabled={!ragOpen}
-              >
+              <Button variant="default" onClick={() => loadRagDebug(ragBatchId)} loading={ragLoading} disabled={!ragOpen}>
                 Refresh
               </Button>
             </Group>
@@ -1099,18 +1149,14 @@ export default function RunDetailPage() {
                 <Text fw={600} mb={6}>
                   retrieval_config (best available for current scope)
                 </Text>
-                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                  {safeJson(ragDebug?.retrieval_config ?? retrievalCfg)}
-                </pre>
+                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(ragDebug?.retrieval_config ?? retrievalCfg)}</pre>
               </Card>
 
               <Card withBorder>
                 <Text fw={600} mb={6}>
                   retrieval_log (scoped latest retrieval RunLog meta)
                 </Text>
-                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                  {safeJson(ragDebug?.retrieval_log ?? null)}
-                </pre>
+                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(ragDebug?.retrieval_log ?? null)}</pre>
               </Card>
 
               <Card withBorder>
@@ -1129,11 +1175,7 @@ export default function RunDetailPage() {
                           <Group gap="sm">
                             <Badge variant="light">{e.kind}</Badge>
                             <Text fw={600}>{e.source_name}</Text>
-                            {e.source_ref ? (
-                              <Text size="sm" c="dimmed">
-                                {e.source_ref}
-                              </Text>
-                            ) : null}
+                            {e.source_ref ? <Text size="sm" c="dimmed">{e.source_ref}</Text> : null}
                           </Group>
                           <Text size="sm">{e.excerpt}</Text>
                           <Text size="xs" c="dimmed">
@@ -1232,21 +1274,18 @@ export default function RunDetailPage() {
               ]}
               value={logLevel}
               onChange={setLogLevel}
+              disabled={!canMutate}
             />
-            <TextInput label="Message" value={logMessage} onChange={(e) => setLogMessage(e.currentTarget.value)} />
+            <TextInput label="Message" value={logMessage} onChange={(e) => setLogMessage(e.currentTarget.value)} disabled={!canMutate} />
           </Group>
 
-          <Textarea
-            label="Meta (JSON)"
-            autosize
-            minRows={2}
-            value={logMetaJson}
-            onChange={(e) => setLogMetaJson(e.currentTarget.value)}
-          />
+          <Textarea label="Meta (JSON)" autosize minRows={2} value={logMetaJson} onChange={(e) => setLogMetaJson(e.currentTarget.value)} disabled={!canMutate} />
 
-          <Button onClick={createLog} loading={creatingLog}>
-            Add Log
-          </Button>
+          <MutateTooltip canMutate={canMutate}>
+            <Button onClick={createLog} loading={creatingLog} disabled={!canMutate}>
+              Add Log
+            </Button>
+          </MutateTooltip>
 
           <Divider />
 
@@ -1282,7 +1321,7 @@ export default function RunDetailPage() {
         <Stack gap="sm">
           <Text fw={700}>Auto-add Evidence (from Retrieval)</Text>
           <Text size="sm" c="dimmed">
-            Provide a query. We’ll fetch top retrieval chunks and attach them as evidence.
+            Member/Admin only. Viewer can preview retrieval in the Retrieval Panel above.
           </Text>
 
           <Divider />
@@ -1292,10 +1331,11 @@ export default function RunDetailPage() {
             value={autoQuery}
             onChange={(e) => setAutoQuery(e.currentTarget.value)}
             placeholder='e.g., "refresh tokens"'
+            disabled={!canMutate}
           />
 
           <Group grow>
-            <NumberInput label="Top K" value={autoK} min={1} max={20} onChange={(v) => setAutoK(Number(v) || 6)} />
+            <NumberInput label="Top K" value={autoK} min={1} max={20} onChange={(v) => setAutoK(Number(v) || 6)} disabled={!canMutate} />
             <NumberInput
               label="Alpha (vector weight)"
               value={autoAlpha}
@@ -1303,12 +1343,15 @@ export default function RunDetailPage() {
               max={1}
               step={0.05}
               onChange={(v) => setAutoAlpha(Number(v) || 0.65)}
+              disabled={!canMutate}
             />
           </Group>
 
-          <Button onClick={autoAddEvidence} loading={autoLoading}>
-            Fetch & attach evidence
-          </Button>
+          <MutateTooltip canMutate={canMutate}>
+            <Button onClick={autoAddEvidence} loading={autoLoading} disabled={!canMutate}>
+              Fetch & attach evidence
+            </Button>
+          </MutateTooltip>
         </Stack>
       </Card>
 
@@ -1316,25 +1359,18 @@ export default function RunDetailPage() {
       <Card withBorder>
         <Stack gap="sm">
           <Text fw={700}>Create Artifact</Text>
-          <Select label="Type" data={artifactTypeOptions} value={atype} onChange={setAtype} />
+          <Select label="Type" data={artifactTypeOptions} value={atype} onChange={setAtype} disabled={!canMutate} />
           <Group grow>
-            <TextInput label="Title" value={title} onChange={(e) => setTitle(e.currentTarget.value)} />
-            <TextInput
-              label="Logical key (for versioning)"
-              value={logicalKey}
-              onChange={(e) => setLogicalKey(e.currentTarget.value)}
-            />
+            <TextInput label="Title" value={title} onChange={(e) => setTitle(e.currentTarget.value)} disabled={!canMutate} />
+            <TextInput label="Logical key (for versioning)" value={logicalKey} onChange={(e) => setLogicalKey(e.currentTarget.value)} disabled={!canMutate} />
           </Group>
-          <Textarea
-            label="Content (Markdown)"
-            autosize
-            minRows={6}
-            value={contentMd}
-            onChange={(e) => setContentMd(e.currentTarget.value)}
-          />
-          <Button onClick={createArtifact} loading={creatingArtifact}>
-            Create
-          </Button>
+          <Textarea label="Content (Markdown)" autosize minRows={6} value={contentMd} onChange={(e) => setContentMd(e.currentTarget.value)} disabled={!canMutate} />
+
+          <MutateTooltip canMutate={canMutate}>
+            <Button onClick={createArtifact} loading={creatingArtifact} disabled={!canMutate}>
+              Create
+            </Button>
+          </MutateTooltip>
         </Stack>
       </Card>
 
@@ -1352,21 +1388,20 @@ export default function RunDetailPage() {
               ]}
               value={ekind}
               onChange={setEkind}
+              disabled={!canMutate}
             />
-            <TextInput label="Source name" value={sourceName} onChange={(e) => setSourceName(e.currentTarget.value)} />
+            <TextInput label="Source name" value={sourceName} onChange={(e) => setSourceName(e.currentTarget.value)} disabled={!canMutate} />
           </Group>
 
-          <TextInput
-            label="Source ref (URL/id)"
-            value={sourceRef}
-            onChange={(e) => setSourceRef(e.currentTarget.value)}
-            placeholder="optional"
-          />
-          <Textarea label="Excerpt" autosize minRows={3} value={excerpt} onChange={(e) => setExcerpt(e.currentTarget.value)} />
-          <Textarea label="Meta (JSON)" autosize minRows={3} value={metaJson} onChange={(e) => setMetaJson(e.currentTarget.value)} />
-          <Button onClick={addEvidence} loading={creatingEvidence}>
-            Add Evidence
-          </Button>
+          <TextInput label="Source ref (URL/id)" value={sourceRef} onChange={(e) => setSourceRef(e.currentTarget.value)} placeholder="optional" disabled={!canMutate} />
+          <Textarea label="Excerpt" autosize minRows={3} value={excerpt} onChange={(e) => setExcerpt(e.currentTarget.value)} disabled={!canMutate} />
+          <Textarea label="Meta (JSON)" autosize minRows={3} value={metaJson} onChange={(e) => setMetaJson(e.currentTarget.value)} disabled={!canMutate} />
+
+          <MutateTooltip canMutate={canMutate}>
+            <Button onClick={addEvidence} loading={creatingEvidence} disabled={!canMutate}>
+              Add Evidence
+            </Button>
+          </MutateTooltip>
         </Stack>
       </Card>
     </Stack>

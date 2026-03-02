@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Badge, Button, Card, Group, Stack, Text, Title, Divider, Code } from "@mantine/core";
 import { apiFetch } from "../apiClient";
-import type { PipelineRun, PipelineStep, Run } from "../types";
+import type { PipelineRun, PipelineStep } from "../types";
 
 type NextResponse = {
   ok: boolean;
@@ -16,34 +16,12 @@ type ExecuteAllResponse = {
   pipeline_run: PipelineRun;
 };
 
-type RetrievalMeta = {
-  enabled?: boolean;
-  query?: string;
-  evidence_count?: number;
-  batch_id?: string;
-  batch_kind?: string;
-};
-
 function stepColor(status: string): string {
   const s = (status || "").toLowerCase();
   if (s === "completed") return "green";
   if (s === "running") return "blue";
   if (s === "failed") return "red";
   return "gray";
-}
-
-function extractRetrievalMeta(run: Run | null): RetrievalMeta | null {
-  if (!run) return null;
-  const ip: any = run.input_payload ?? {};
-  const r = ip?._retrieval;
-  if (!r || typeof r !== "object") return null;
-  return {
-    enabled: Boolean(r.enabled),
-    query: typeof r.query === "string" ? r.query : undefined,
-    evidence_count: typeof r.evidence_count === "number" ? r.evidence_count : undefined,
-    batch_id: typeof r.batch_id === "string" ? r.batch_id : undefined,
-    batch_kind: typeof r.batch_kind === "string" ? r.batch_kind : undefined,
-  };
 }
 
 export default function PipelineRunDetailPage() {
@@ -59,9 +37,6 @@ export default function PipelineRunDetailPage() {
   const [lastCreatedRunId, setLastCreatedRunId] = useState<string | null>(null);
   const [createdRunIds, setCreatedRunIds] = useState<string[]>([]);
 
-  // NEW: per-step run retrieval metadata (fetched from /runs/{run_id})
-  const [runMetaById, setRunMetaById] = useState<Record<string, { retrieval: RetrievalMeta | null }>>({});
-
   const canExecute = useMemo(() => {
     if (!pr) return false;
     const s = (pr.status || "").toLowerCase();
@@ -73,7 +48,6 @@ export default function PipelineRunDetailPage() {
     setErr(null);
     setLoading(true);
 
-    // V3.1 alias endpoint
     const res = await apiFetch<PipelineRun>(`/pipeline-runs/${prid}`, { method: "GET" });
 
     setLoading(false);
@@ -86,41 +60,11 @@ export default function PipelineRunDetailPage() {
     setPr(res.data);
   }
 
-  async function loadRunMetasForSteps(p: PipelineRun) {
-    const runIds = (p.steps || [])
-      .map((s) => s.run_id)
-      .filter((x): x is string => Boolean(x));
-
-    if (runIds.length === 0) return;
-
-    // Fetch only missing run_ids
-    const missing = runIds.filter((rid) => !runMetaById[rid]);
-    if (missing.length === 0) return;
-
-    // Basic fan-out (safe: small N)
-    const results = await Promise.all(
-      missing.map(async (rid) => {
-        const r = await apiFetch<Run>(`/runs/${rid}`, { method: "GET" });
-        if (!r.ok) return { rid, run: null as Run | null };
-        return { rid, run: r.data };
-      })
-    );
-
-    setRunMetaById((prev) => {
-      const next = { ...prev };
-      for (const it of results) {
-        next[it.rid] = { retrieval: extractRetrievalMeta(it.run) };
-      }
-      return next;
-    });
-  }
-
   async function executeNext() {
     if (!prid) return;
     setErr(null);
     setExecLoading(true);
 
-    // V3.1 alias endpoint
     const res = await apiFetch<NextResponse>(`/pipeline-runs/${prid}/execute-next`, {
       method: "POST",
       body: JSON.stringify({}),
@@ -139,8 +83,6 @@ export default function PipelineRunDetailPage() {
 
     if (rid) {
       setCreatedRunIds((prev) => [rid, ...prev.filter((x) => x !== rid)]);
-      // fetch retrieval meta for the newly created run
-      await loadRunMetasForSteps(res.data.pipeline_run);
     }
   }
 
@@ -149,7 +91,6 @@ export default function PipelineRunDetailPage() {
     setErr(null);
     setExecAllLoading(true);
 
-    // V3.1 alias endpoint
     const res = await apiFetch<ExecuteAllResponse>(`/pipeline-runs/${prid}/execute-all`, {
       method: "POST",
       body: JSON.stringify({}),
@@ -177,21 +118,12 @@ export default function PipelineRunDetailPage() {
         });
       });
     }
-
-    await loadRunMetasForSteps(res.data.pipeline_run);
   }
 
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prid]);
-
-  // whenever pipeline run updates, fetch per-step run retrieval meta
-  useEffect(() => {
-    if (!pr) return;
-    void loadRunMetasForSteps(pr);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pr?.id, pr?.steps?.map((s) => s.run_id).join("|")]);
 
   const workspaceId = pr?.workspace_id ?? "";
 
@@ -334,7 +266,9 @@ export default function PipelineRunDetailPage() {
 
                   const hasLatestArtifact = !!s.latest_artifact_id;
                   const runId = s.run_id || null;
-                  const retrieval = runId ? runMetaById[runId]?.retrieval ?? null : null;
+
+                  const retrievalEnabled = Boolean(s.retrieval_enabled);
+                  const batchId = s.retrieval_batch_id ?? null;
 
                   return (
                     <Card key={s.id} withBorder>
@@ -380,17 +314,37 @@ export default function PipelineRunDetailPage() {
 
                           <Group justify="space-between">
                             <Text fw={600}>Step Retrieval</Text>
-                            {retrieval?.enabled ? (
-                              <Badge variant="light">evidence: {retrieval.evidence_count ?? 0}</Badge>
+                            {runId ? (
+                              retrievalEnabled ? (
+                                <Badge variant="light">evidence: {s.retrieval_evidence_count ?? 0}</Badge>
+                              ) : (
+                                <Badge variant="outline">disabled</Badge>
+                              )
                             ) : (
-                              <Badge variant="outline">disabled</Badge>
+                              <Badge variant="outline">—</Badge>
                             )}
                           </Group>
 
-                          {retrieval?.enabled ? (
-                            <Text size="sm" c="dimmed">
-                              query: <Code>{retrieval.query ?? "(missing)"}</Code>
-                            </Text>
+                          {runId && retrievalEnabled ? (
+                            <>
+                              <Text size="sm" c="dimmed">
+                                query: <Code>{s.retrieval_query ?? "(missing)"}</Code>
+                              </Text>
+                              {batchId ? (
+                                <Text size="sm" c="dimmed">
+                                  batch_id: <Code>{batchId}</Code>{" "}
+                                  {s.retrieval_batch_kind ? (
+                                    <>
+                                      · kind: <Code>{s.retrieval_batch_kind}</Code>
+                                    </>
+                                  ) : null}
+                                </Text>
+                              ) : (
+                                <Text size="sm" c="dimmed">
+                                  batch_id: <Code>(missing)</Code>
+                                </Text>
+                              )}
+                            </>
                           ) : (
                             <Text size="sm" c="dimmed">
                               No retrieval metadata yet (run not created OR retrieval disabled).
@@ -407,9 +361,21 @@ export default function PipelineRunDetailPage() {
 
                         <Stack gap="xs" align="flex-end">
                           {runId ? (
-                            <Button component={Link} to={`/runs/${runId}`}>
-                              Open Run Console
-                            </Button>
+                            <>
+                              <Button component={Link} to={`/runs/${runId}`}>
+                                Open Run Console
+                              </Button>
+
+                              {batchId ? (
+                                <Button
+                                  component={Link}
+                                  to={`/runs/${runId}?ragOpen=1&batch_id=${encodeURIComponent(batchId)}`}
+                                  variant="light"
+                                >
+                                  Open RAG Debug (scoped)
+                                </Button>
+                              ) : null}
+                            </>
                           ) : (
                             <Badge variant="outline">run_id: null</Badge>
                           )}
