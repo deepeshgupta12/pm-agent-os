@@ -11,9 +11,35 @@ import {
   Textarea,
   TextInput,
   Title,
+  Divider,
+  Code,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
-import type { Agent, Run, Workspace, WorkspaceMember, WorkspaceRole } from "../types";
+import type {
+  Agent,
+  Run,
+  Workspace,
+  WorkspaceMember,
+  WorkspaceRole,
+  TemplateAdmin,
+} from "../types";
+
+function safeJsonParse(s: string): { ok: boolean; value: any; error?: string } {
+  try {
+    const v = s.trim() ? JSON.parse(s) : {};
+    return { ok: true, value: v };
+  } catch (e: any) {
+    return { ok: false, value: null, error: e?.message || "Invalid JSON" };
+  }
+}
+
+function stableJsonStringify(v: any): string {
+  try {
+    return JSON.stringify(v ?? {}, null, 2);
+  } catch {
+    return "{}";
+  }
+}
 
 export default function WorkspaceDetailPage() {
   const { workspaceId } = useParams();
@@ -37,7 +63,18 @@ export default function WorkspaceDetailPage() {
   );
   const [creating, setCreating] = useState(false);
 
-  const isAdmin = (myRole?.role || "").toLowerCase() === "admin";
+  // -------------------------
+  // Commit 2: Template Admin (workspace settings)
+  // -------------------------
+  const [tplAdmin, setTplAdmin] = useState<TemplateAdmin | null>(null);
+  const [tplAdminLoading, setTplAdminLoading] = useState(false);
+  const [tplAdminSaving, setTplAdminSaving] = useState(false);
+  const [tplAdminJson, setTplAdminJson] = useState<string>("{}");
+  const [tplAdminDirty, setTplAdminDirty] = useState(false);
+  const [tplAdminErr, setTplAdminErr] = useState<string | null>(null);
+
+  const roleStr = (myRole?.role || "").toLowerCase();
+  const isAdmin = roleStr === "admin";
 
   const selectedAgent = useMemo(() => agents.find((a) => a.id === agentId) || null, [agents, agentId]);
 
@@ -49,6 +86,62 @@ export default function WorkspaceDetailPage() {
       })),
     [agents]
   );
+
+  async function loadTemplateAdmin() {
+    if (!wid) return;
+    setTplAdminErr(null);
+    setTplAdminLoading(true);
+
+    const res = await apiFetch<TemplateAdmin>(`/workspaces/${wid}/template-admin`, { method: "GET" });
+
+    setTplAdminLoading(false);
+
+    if (!res.ok) {
+      // Not fatal for rest of page
+      setTplAdmin(null);
+      setTplAdminJson("{}");
+      setTplAdminDirty(false);
+      setTplAdminErr(`Template Admin load failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setTplAdmin(res.data);
+    setTplAdminJson(stableJsonStringify(res.data.template_admin_json || {}));
+    setTplAdminDirty(false);
+  }
+
+  async function saveTemplateAdmin() {
+    if (!wid) return;
+    if (!isAdmin) {
+      setTplAdminErr("Only admins can update Template Admin.");
+      return;
+    }
+
+    const parsed = safeJsonParse(tplAdminJson);
+    if (!parsed.ok) {
+      setTplAdminErr(`Template Admin JSON invalid: ${parsed.error}`);
+      return;
+    }
+
+    setTplAdminErr(null);
+    setTplAdminSaving(true);
+
+    const res = await apiFetch<TemplateAdmin>(`/workspaces/${wid}/template-admin`, {
+      method: "PUT",
+      body: JSON.stringify({ template_admin_json: parsed.value }),
+    });
+
+    setTplAdminSaving(false);
+
+    if (!res.ok) {
+      setTplAdminErr(`Template Admin save failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setTplAdmin(res.data);
+    setTplAdminJson(stableJsonStringify(res.data.template_admin_json || {}));
+    setTplAdminDirty(false);
+  }
 
   async function loadAll() {
     setErr(null);
@@ -83,6 +176,7 @@ export default function WorkspaceDetailPage() {
     setRuns(runsRes.data);
 
     await loadMembers();
+    await loadTemplateAdmin();
   }
 
   async function loadMembers() {
@@ -195,6 +289,8 @@ export default function WorkspaceDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wid]);
 
+  const tplAdminParsed = useMemo(() => safeJsonParse(tplAdminJson), [tplAdminJson]);
+
   return (
     <Stack gap="md">
       <Group justify="space-between">
@@ -219,6 +315,97 @@ export default function WorkspaceDetailPage() {
       ) : (
         <Text c="dimmed">Loading workspace…</Text>
       )}
+
+      {/* Commit 2: Template Admin */}
+      <Card withBorder>
+        <Stack gap="sm">
+          <Group justify="space-between">
+            <Group gap="sm">
+              <Text fw={700}>Template Admin</Text>
+              <Badge variant="light">V1</Badge>
+              <Badge variant="light" color={isAdmin ? "grape" : "gray"}>
+                {isAdmin ? "admin can edit" : "read-only"}
+              </Badge>
+            </Group>
+
+            <Group>
+              <Button variant="light" onClick={loadTemplateAdmin} loading={tplAdminLoading}>
+                Refresh
+              </Button>
+              <Button
+                onClick={saveTemplateAdmin}
+                loading={tplAdminSaving}
+                disabled={!isAdmin || tplAdminLoading || !tplAdminDirty}
+              >
+                Save
+              </Button>
+            </Group>
+          </Group>
+
+          <Text size="sm" c="dimmed">
+            Workspace-scoped configuration for PRD templates, event naming conventions, and research taxonomy tags.
+            Stored as JSON at <Code>workspaces.template_admin_json</Code>.
+          </Text>
+
+          {tplAdminErr ? (
+            <Card withBorder>
+              <Text c="red">{tplAdminErr}</Text>
+            </Card>
+          ) : null}
+
+          <Textarea
+            label="template_admin_json"
+            description={
+              tplAdminLoading
+                ? "Loading…"
+                : isAdmin
+                ? "Edit JSON and click Save."
+                : "Viewer/Member: read-only. Ask an admin to update."
+            }
+            autosize
+            minRows={10}
+            value={tplAdminJson}
+            onChange={(e) => {
+              setTplAdminJson(e.currentTarget.value);
+              setTplAdminDirty(true);
+              setTplAdminErr(null);
+            }}
+            disabled={!isAdmin || tplAdminLoading}
+          />
+
+          {!tplAdminParsed.ok ? (
+            <Text c="red" size="sm">
+              JSON error: {tplAdminParsed.error}
+            </Text>
+          ) : null}
+
+          <Divider />
+
+          <Text fw={600}>Suggested JSON shape (example)</Text>
+          <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+{`{
+  "prd_fields": {
+    "required": ["Summary", "Problem", "Users / Segments", "Success Metrics", "Scope", "Requirements"],
+    "optional": ["Risks", "Assumptions", "Open Questions", "Next Actions"]
+  },
+  "event_naming": {
+    "format": "category_action_object",
+    "examples": ["onboarding_click_cta", "pricing_view_plan"]
+  },
+  "research_taxonomy_tags": {
+    "themes": ["pricing", "onboarding", "performance", "trust"],
+    "personas": ["new_user", "power_user", "admin"]
+  }
+}`}
+          </pre>
+
+          {tplAdmin ? (
+            <Text size="xs" c="dimmed">
+              Loaded for workspace: <Code>{tplAdmin.workspace_id}</Code>
+            </Text>
+          ) : null}
+        </Stack>
+      </Card>
 
       <Card withBorder>
         <Stack gap="sm">

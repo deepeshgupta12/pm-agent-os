@@ -248,3 +248,8 @@ export type AttachPreviewEvidenceIn = {
     score_final?: number | null;
   }>;
 };
+
+export type TemplateAdmin = {
+  workspace_id: string;
+  template_admin_json: Record<string, unknown>;
+};

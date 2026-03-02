@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -17,3 +17,12 @@ class WorkspaceMemberOut(BaseModel):
 class WorkspaceRoleOut(BaseModel):
     workspace_id: str
     role: str
+
+
+class TemplateAdminOut(BaseModel):
+    workspace_id: str
+    template_admin_json: Dict[str, Any] = Field(default_factory=dict)
+
+
+class TemplateAdminUpdateIn(BaseModel):
+    template_admin_json: Dict[str, Any] = Field(default_factory=dict)
