@@ -28,7 +28,7 @@ class AgentOut(BaseModel):
     default_artifact_type: str
 
 
-# -------- Retrieval config (V1 True RAG) --------
+# -------- Retrieval config (V2) --------
 class RetrievalConfigIn(BaseModel):
     enabled: bool = True
     query: str = Field(default="", max_length=500)
@@ -41,15 +41,9 @@ class RetrievalConfigIn(BaseModel):
     # e.g. {"preset":"30d"} or {"preset":"custom","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}
     timeframe: Dict[str, Any] = Field(default_factory=dict)
 
-    # ---- V2 knobs (must be explicit here, otherwise Pydantic drops them) ----
-    # Minimum score cutoff applied after scoring (hybrid or final reranked).
+    # ---- V2 knobs (explicit; otherwise Pydantic drops them) ----
     min_score: float = Field(default=0.15, ge=0.0, le=1.0)
-
-    # Overfetch multiplier for candidate pool (k * overfetch_k) before filtering/rerank.
-    # Keep small for V2: 1..10
     overfetch_k: int = Field(default=3, ge=1, le=10)
-
-    # Optional rerank step (lightweight V2 heuristic / bonus scoring)
     rerank: bool = Field(default=False)
 
 
@@ -57,8 +51,6 @@ class RetrievalConfigIn(BaseModel):
 class RunCreateIn(BaseModel):
     agent_id: str
     input_payload: Dict[str, Any] = Field(default_factory=dict)
-
-    # ✅ retrieval is a first-class field
     retrieval: Optional[RetrievalConfigIn] = None
 
 
@@ -75,6 +67,11 @@ class RunOut(BaseModel):
 class RunStatusUpdateIn(BaseModel):
     status: str = Field(min_length=2, max_length=32)
     output_summary: Optional[str] = None
+
+
+# -------- V2.2: regenerate with retrieval --------
+class RunRegenerateWithRetrievalIn(BaseModel):
+    retrieval: RetrievalConfigIn
 
 
 # -------- Artifacts --------

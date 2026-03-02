@@ -15,6 +15,7 @@ import {
   Divider,
   Collapse,
   Code,
+  Checkbox,
 } from "@mantine/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -26,6 +27,8 @@ import type {
   RunLog,
   RunTimelineEvent,
   RagDebugResponse,
+  RetrieveResponse,
+  RetrieveItem,
 } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL as string;
@@ -72,6 +75,12 @@ function safeJson(v: any): string {
   }
 }
 
+function fmtScore(v: any): string {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "-";
+  return n.toFixed(3);
+}
+
 export default function RunDetailPage() {
   const { runId } = useParams();
   const rid = runId || "";
@@ -103,13 +112,13 @@ export default function RunDetailPage() {
   const [metaJson, setMetaJson] = useState("{}");
   const [creatingEvidence, setCreatingEvidence] = useState(false);
 
-  // Auto evidence
+  // Auto evidence (existing endpoint)
   const [autoQuery, setAutoQuery] = useState("");
   const [autoK, setAutoK] = useState<number>(6);
   const [autoAlpha, setAutoAlpha] = useState<number>(0.65);
   const [autoLoading, setAutoLoading] = useState(false);
 
-  // Regenerate
+  // Existing regenerate (uses evidence)
   const [regenLoading, setRegenLoading] = useState(false);
 
   // Logs (create)
@@ -120,6 +129,27 @@ export default function RunDetailPage() {
 
   // Logs filter
   const [logFilter, setLogFilter] = useState<string | null>("all");
+
+  // -------------------------
+  // V2.2 Retrieval Panel state
+  // -------------------------
+  const [rpOpen, setRpOpen] = useState(true);
+  const [rpQuery, setRpQuery] = useState("");
+  const [rpK, setRpK] = useState<number>(5);
+  const [rpAlpha, setRpAlpha] = useState<number>(0.0);
+  const [rpSourceTypes, setRpSourceTypes] = useState<string>("docs");
+  const [rpPreset, setRpPreset] = useState<string | null>("30d");
+  const [rpStartDate, setRpStartDate] = useState<string>("");
+  const [rpEndDate, setRpEndDate] = useState<string>("");
+
+  const [rpMinScore, setRpMinScore] = useState<number>(0.15);
+  const [rpOverfetchK, setRpOverfetchK] = useState<number>(3);
+  const [rpRerank, setRpRerank] = useState<boolean>(false);
+
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [preview, setPreview] = useState<RetrieveResponse | null>(null);
+
+  const [regenWithRetrievalLoading, setRegenWithRetrievalLoading] = useState(false);
 
   const artifactTypeOptions = useMemo(
     () => ARTIFACT_TYPES.map((t) => ({ value: t, label: t })),
@@ -140,6 +170,51 @@ export default function RunDetailPage() {
     if (logFilter === "all") return logs;
     return logs.filter((l) => l.level === logFilter);
   }, [logs, logFilter]);
+
+  function normalizeSourceTypes(s: string): string[] {
+    return (s || "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter((x) => !!x);
+  }
+
+  function buildTimeframeForRunsPayload(): any {
+    if (rpPreset === "custom") {
+      return {
+        preset: "custom",
+        ...(rpStartDate ? { start_date: rpStartDate } : {}),
+        ...(rpEndDate ? { end_date: rpEndDate } : {}),
+      };
+    }
+    if (rpPreset && ["7d", "30d", "90d"].includes(rpPreset)) {
+      return { preset: rpPreset };
+    }
+    return {};
+  }
+
+  function buildRetrieveQueryParams(workspaceId: string): string {
+    const q = (rpQuery || "").trim();
+    const params = new URLSearchParams();
+    params.set("q", q);
+    params.set("k", String(rpK));
+    params.set("alpha", String(rpAlpha));
+
+    const st = normalizeSourceTypes(rpSourceTypes);
+    if (st.length > 0) params.set("source_types", st.join(","));
+
+    if (rpPreset && rpPreset !== "custom") {
+      params.set("timeframe_preset", rpPreset);
+    } else if (rpPreset === "custom") {
+      if (rpStartDate) params.set("start_date", rpStartDate);
+      if (rpEndDate) params.set("end_date", rpEndDate);
+    }
+
+    params.set("min_score", String(rpMinScore));
+    params.set("overfetch_k", String(rpOverfetchK));
+    params.set("rerank", String(rpRerank));
+
+    return `/workspaces/${workspaceId}/retrieve?${params.toString()}`;
+  }
 
   async function loadAll() {
     setErr(null);
@@ -193,6 +268,74 @@ export default function RunDetailPage() {
       return;
     }
     setRagDebug(res.data);
+  }
+
+  async function previewRetrieve() {
+    if (!run) {
+      setErr("Run not loaded yet.");
+      return;
+    }
+    if (!rpQuery.trim()) {
+      setErr("Enter a query for retrieval preview.");
+      return;
+    }
+
+    setPreviewLoading(true);
+    setErr(null);
+    setPreview(null);
+
+    const path = buildRetrieveQueryParams(run.workspace_id);
+    const res = await apiFetch<RetrieveResponse>(path, { method: "GET" });
+    setPreviewLoading(false);
+
+    if (!res.ok) {
+      setErr(`Retrieve preview failed: ${res.status} ${res.error}`);
+      return;
+    }
+    setPreview(res.data);
+  }
+
+  async function regenerateWithRetrieval() {
+    if (!run) {
+      setErr("Run not loaded yet.");
+      return;
+    }
+    if (!rpQuery.trim()) {
+      setErr("Enter a query for regenerate-with-retrieval.");
+      return;
+    }
+
+    setRegenWithRetrievalLoading(true);
+    setErr(null);
+
+    const body = {
+      retrieval: {
+        enabled: true,
+        query: rpQuery.trim(),
+        k: Number(rpK) || 5,
+        alpha: Number(rpAlpha) || 0.0,
+        source_types: normalizeSourceTypes(rpSourceTypes),
+        timeframe: buildTimeframeForRunsPayload(),
+        min_score: Number(rpMinScore) || 0.15,
+        overfetch_k: Number(rpOverfetchK) || 3,
+        rerank: Boolean(rpRerank),
+      },
+    };
+
+    const res = await apiFetch<Run>(`/runs/${rid}/regenerate-with-retrieval`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+
+    setRegenWithRetrievalLoading(false);
+
+    if (!res.ok) {
+      setErr(`Regenerate-with-retrieval failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    await loadAll();
+    if (ragOpen) await loadRagDebug();
   }
 
   function exportPdf(artifactId: string) {
@@ -362,6 +505,36 @@ export default function RunDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ragOpen, rid]);
 
+  // helpful: prefill panel from run._retrieval once run loads
+  useEffect(() => {
+    const cfg: any = retrievalCfg;
+    if (!cfg) return;
+
+    if (typeof cfg.query === "string" && cfg.query.trim() && !rpQuery.trim()) setRpQuery(cfg.query);
+    if (typeof cfg.k === "number") setRpK(cfg.k);
+    if (typeof cfg.alpha === "number") setRpAlpha(cfg.alpha);
+
+    if (Array.isArray(cfg.source_types) && cfg.source_types.length > 0) {
+      setRpSourceTypes(cfg.source_types.join(", "));
+    }
+
+    const tf = cfg.timeframe;
+    if (tf && typeof tf === "object") {
+      if (tf.preset === "custom") {
+        setRpPreset("custom");
+        if (tf.start_date) setRpStartDate(String(tf.start_date));
+        if (tf.end_date) setRpEndDate(String(tf.end_date));
+      } else if (tf.preset && ["7d", "30d", "90d"].includes(String(tf.preset))) {
+        setRpPreset(String(tf.preset));
+      }
+    }
+
+    if (typeof cfg.min_score === "number") setRpMinScore(cfg.min_score);
+    if (typeof cfg.overfetch_k === "number") setRpOverfetchK(cfg.overfetch_k);
+    if (typeof cfg.rerank === "boolean") setRpRerank(cfg.rerank);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run?.id]);
+
   return (
     <Stack gap="md">
       <Group justify="space-between">
@@ -385,7 +558,11 @@ export default function RunDetailPage() {
               <Group gap="sm">
                 <Badge>{run.status}</Badge>
                 <Text fw={700}>{run.agent_id}</Text>
-                {retrievalCfg ? <Badge variant="light">retrieval enabled</Badge> : <Badge variant="light">no retrieval</Badge>}
+                {retrievalCfg ? (
+                  <Badge variant="light">retrieval enabled</Badge>
+                ) : (
+                  <Badge variant="light">no retrieval</Badge>
+                )}
               </Group>
               <Text size="xs" c="dimmed">
                 {run.id}
@@ -398,7 +575,7 @@ export default function RunDetailPage() {
             {retrievalCfg ? (
               <Card withBorder>
                 <Stack gap={6}>
-                  <Text fw={600}>Retrieval config</Text>
+                  <Text fw={600}>Last retrieval config (run._retrieval)</Text>
                   <Group gap="sm">
                     <Text size="sm">
                       query: <Code>{String(retrievalCfg.query ?? "")}</Code>
@@ -414,14 +591,21 @@ export default function RunDetailPage() {
                     </Text>
                   </Group>
                   <Text size="sm" c="dimmed">
-                    source_types: {Array.isArray(retrievalCfg.source_types) ? retrievalCfg.source_types.join(", ") : "(none)"} · timeframe:{" "}
-                    {retrievalCfg.timeframe ? JSON.stringify(retrievalCfg.timeframe) : "(none)"}
+                    source_types:{" "}
+                    {Array.isArray(retrievalCfg.source_types)
+                      ? retrievalCfg.source_types.join(", ")
+                      : "(none)"}{" "}
+                    · timeframe: {retrievalCfg.timeframe ? JSON.stringify(retrievalCfg.timeframe) : "(none)"}
+                  </Text>
+                  <Text size="sm" c="dimmed">
+                    knobs: min_score={String(retrievalCfg.min_score ?? "")}, overfetch_k=
+                    {String(retrievalCfg.overfetch_k ?? "")}, rerank={String(retrievalCfg.rerank ?? "")}
                   </Text>
                 </Stack>
               </Card>
             ) : null}
 
-            {/* Regenerate */}
+            {/* Existing regenerate */}
             <Group gap="sm">
               <Button onClick={regenerate} loading={regenLoading} disabled={evidence.length === 0}>
                 Regenerate using evidence
@@ -447,6 +631,175 @@ export default function RunDetailPage() {
       ) : (
         <Text c="dimmed">Loading run…</Text>
       )}
+
+      {/* V2.2 Retrieval panel */}
+      <Card withBorder>
+        <Stack gap="sm">
+          <Group justify="space-between">
+            <Text fw={700}>Retrieval Panel</Text>
+            <Button variant="light" onClick={() => setRpOpen((x) => !x)}>
+              {rpOpen ? "Hide" : "Show"}
+            </Button>
+          </Group>
+
+          <Collapse in={rpOpen}>
+            <Stack gap="sm">
+              <Text size="sm" c="dimmed">
+                Use this to preview retrieval results (no DB writes besides retrieval trace),
+                then regenerate a new artifact version using fresh retrieval evidence.
+              </Text>
+
+              <TextInput
+                label="Query"
+                value={rpQuery}
+                onChange={(e) => setRpQuery(e.currentTarget.value)}
+                placeholder='e.g., "save preferences"'
+              />
+
+              <Group grow>
+                <NumberInput
+                  label="k"
+                  value={rpK}
+                  min={1}
+                  max={50}
+                  onChange={(v) => setRpK(Number(v) || 5)}
+                />
+                <NumberInput
+                  label="alpha"
+                  value={rpAlpha}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  onChange={(v) => setRpAlpha(Number(v) || 0)}
+                />
+                <TextInput
+                  label="source_types (comma-separated)"
+                  value={rpSourceTypes}
+                  onChange={(e) => setRpSourceTypes(e.currentTarget.value)}
+                  placeholder="docs, github"
+                />
+              </Group>
+
+              <Group grow>
+                <Select
+                  label="timeframe preset"
+                  data={[
+                    { value: "7d", label: "7d" },
+                    { value: "30d", label: "30d" },
+                    { value: "90d", label: "90d" },
+                    { value: "custom", label: "custom" },
+                    { value: "none", label: "none" },
+                  ]}
+                  value={rpPreset}
+                  onChange={(v) => setRpPreset(v)}
+                />
+                <TextInput
+                  label="start_date (YYYY-MM-DD)"
+                  value={rpStartDate}
+                  onChange={(e) => setRpStartDate(e.currentTarget.value)}
+                  disabled={rpPreset !== "custom"}
+                />
+                <TextInput
+                  label="end_date (YYYY-MM-DD)"
+                  value={rpEndDate}
+                  onChange={(e) => setRpEndDate(e.currentTarget.value)}
+                  disabled={rpPreset !== "custom"}
+                />
+              </Group>
+
+              <Group grow>
+                <NumberInput
+                  label="min_score"
+                  value={rpMinScore}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  onChange={(v) => setRpMinScore(Number(v) || 0.15)}
+                />
+                <NumberInput
+                  label="overfetch_k"
+                  value={rpOverfetchK}
+                  min={1}
+                  max={10}
+                  step={1}
+                  onChange={(v) => setRpOverfetchK(Number(v) || 3)}
+                />
+                <div style={{ paddingTop: 26 }}>
+                  <Checkbox
+                    label="rerank"
+                    checked={rpRerank}
+                    onChange={(e) => setRpRerank(e.currentTarget.checked)}
+                  />
+                </div>
+              </Group>
+
+              <Group>
+                <Button onClick={previewRetrieve} loading={previewLoading} variant="default" disabled={!run}>
+                  Retrieve Preview
+                </Button>
+                <Button
+                  onClick={regenerateWithRetrieval}
+                  loading={regenWithRetrievalLoading}
+                  disabled={!run}
+                >
+                  Regenerate with Retrieval
+                </Button>
+              </Group>
+
+              {preview ? (
+                <Card withBorder>
+                  <Group justify="space-between">
+                    <Text fw={600}>Preview results</Text>
+                    <Badge variant="light">{preview.items?.length ?? 0}</Badge>
+                  </Group>
+                  <Text size="sm" c="dimmed">
+                    q=<Code>{preview.q}</Code> · k=<Code>{String(preview.k)}</Code> · alpha=<Code>{String(preview.alpha)}</Code> · min_score=<Code>{String(preview.min_score)}</Code> · overfetch_k=<Code>{String(preview.overfetch_k)}</Code> · rerank=<Code>{String(preview.rerank)}</Code>
+                  </Text>
+                  <Divider my="sm" />
+
+                  {preview.items.length === 0 ? (
+                    <Text c="dimmed">No results (after min_score filter).</Text>
+                  ) : (
+                    <Stack gap="xs">
+                      {preview.items.map((it: RetrieveItem) => (
+                        <Card key={it.chunk_id} withBorder>
+                          <Stack gap={6}>
+                            <Group justify="space-between" align="flex-start">
+                              <Stack gap={2}>
+                                <Text fw={700}>{it.document_title}</Text>
+                                <Text size="xs" c="dimmed">
+                                  doc={it.document_id} · chunk={it.chunk_id} · idx={it.chunk_index}
+                                </Text>
+                              </Stack>
+                              <Group gap="xs">
+                                <Badge variant="light">hyb {fmtScore(it.score_hybrid)}</Badge>
+                                {it.score_final != null ? (
+                                  <Badge color="grape" variant="light">
+                                    final {fmtScore(it.score_final)}
+                                  </Badge>
+                                ) : null}
+                              </Group>
+                            </Group>
+
+                            <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
+                              {it.snippet}
+                            </Text>
+
+                            <Text size="xs" c="dimmed">
+                              fts={fmtScore(it.score_fts)} · vec={fmtScore(it.score_vec)}
+                              {it.score_rerank_bonus != null ? ` · bonus=${fmtScore(it.score_rerank_bonus)}` : ""}
+                            </Text>
+                          </Stack>
+                        </Card>
+                      ))}
+                    </Stack>
+                  )}
+                </Card>
+              ) : null}
+            </Stack>
+          </Collapse>
+        </Stack>
+      </Card>
 
       {/* Latest artifact console */}
       <Card withBorder>
@@ -506,14 +859,12 @@ export default function RunDetailPage() {
                 <Text fw={600} mb={6}>
                   retrieval_config (from run.input_payload._retrieval)
                 </Text>
-                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                  {safeJson(retrievalCfg)}
-                </pre>
+                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(retrievalCfg)}</pre>
               </Card>
 
               <Card withBorder>
                 <Text fw={600} mb={6}>
-                  retrieval_log (latest “Pre-retrieval…” RunLog meta)
+                  retrieval_log (latest retrieval RunLog meta)
                 </Text>
                 <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
                   {safeJson(ragDebug?.retrieval_log ?? null)}
@@ -526,7 +877,7 @@ export default function RunDetailPage() {
                   <Badge variant="light">{ragDebug?.evidence?.length ?? 0}</Badge>
                 </Group>
                 <Divider my="sm" />
-                {(!ragDebug || !ragDebug.evidence || ragDebug.evidence.length === 0) ? (
+                {!ragDebug || !ragDebug.evidence || ragDebug.evidence.length === 0 ? (
                   <Text c="dimmed">No evidence attached.</Text>
                 ) : (
                   <Stack gap="xs">

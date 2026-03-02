@@ -30,8 +30,15 @@ from app.db.models import (
     User,
     RunStatusEvent,
 )
-from app.schemas.core import RunCreateIn, RunOut, RunStatusUpdateIn
-from app.schemas.core import RunLogCreateIn, RunLogOut, RunTimelineEventOut
+from app.schemas.core import (
+    RunCreateIn,
+    RunOut,
+    RunStatusUpdateIn,
+    RunLogCreateIn,
+    RunLogOut,
+    RunTimelineEventOut,
+    RunRegenerateWithRetrievalIn,
+)
 
 router = APIRouter(tags=["runs"])
 
@@ -96,7 +103,7 @@ def _set_run_status(
 
 def _timeframe_to_bounds(timeframe: Optional[Dict[str, Any]]) -> tuple[Optional[datetime], Optional[datetime]]:
     """
-    Accepts the RunCreate retrieval.timeframe JSON (your existing structure) and returns (start_ts,end_ts) in UTC.
+    Accepts retrieval.timeframe JSON and returns (start_ts,end_ts) in UTC.
 
     Supported:
       - {"preset":"7d"|"30d"|"90d"}
@@ -124,7 +131,6 @@ def _timeframe_to_bounds(timeframe: Optional[Dict[str, Any]]) -> tuple[Optional[
             end_ts = end_ts + timedelta(days=1) - timedelta(seconds=1)
         return start_ts, end_ts
 
-    # no timeframe
     return None, None
 
 
@@ -252,10 +258,34 @@ Evidence Pack (cite as [n]):
 
         return artifact_type, title, md
 
-    artifact_type2, title2, md2 = build_initial_artifact(agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text)
+    artifact_type2, title2, md2 = build_initial_artifact(
+        agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text
+    )
     if len(evidence_items) > 0 and "## Unknowns / Assumptions" not in md2:
         md2 = md2.rstrip() + "\n\n## Unknowns / Assumptions\n- Evidence attached, but citation-grounded generation requires LLM mode.\n"
     return artifact_type2, title2, md2
+
+
+def _latest_artifact_for_run(db: Session, run_id: uuid.UUID) -> Optional[Artifact]:
+    return (
+        db.execute(select(Artifact).where(Artifact.run_id == run_id).order_by(Artifact.created_at.desc()).limit(1))
+        .scalars()
+        .first()
+    )
+
+
+def _next_version_for_logical_key(db: Session, run_id: uuid.UUID, logical_key: str) -> int:
+    max_ver = (
+        db.execute(
+            select(Artifact.version)
+            .where(Artifact.run_id == run_id, Artifact.logical_key == logical_key)
+            .order_by(Artifact.version.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+    return int(max_ver or 0) + 1
 
 
 @router.post("/workspaces/{workspace_id}/runs", response_model=RunOut)
@@ -296,9 +326,8 @@ def create_run(
         source_types = [s.strip() for s in (rcfg.source_types or []) if s.strip()]
         timeframe = rcfg.timeframe or {}
 
-        # V2.1 knobs (use getattr so schema lag won’t break)
-        min_score = getattr(rcfg, "min_score", None)
-        overfetch_k = getattr(rcfg, "overfetch_k", None)
+        min_score = float(getattr(rcfg, "min_score", 0.15))
+        overfetch_k = int(getattr(rcfg, "overfetch_k", 3))
         rerank = bool(getattr(rcfg, "rerank", False))
 
         start_ts, end_ts = _timeframe_to_bounds(timeframe)
@@ -310,8 +339,8 @@ def create_run(
             "alpha": alpha,
             "source_types": source_types,
             "timeframe": timeframe,
-            "min_score": 0.15 if min_score is None else float(min_score),
-            "overfetch_k": 3 if overfetch_k is None else int(overfetch_k),
+            "min_score": min_score,
+            "overfetch_k": overfetch_k,
             "rerank": rerank,
         }
 
@@ -324,14 +353,18 @@ def create_run(
             source_types=source_types or None,
             start_ts=start_ts,
             end_ts=end_ts,
-            min_score=retrieval_meta["min_score"],
-            overfetch_k=retrieval_meta["overfetch_k"],
+            min_score=min_score,
+            overfetch_k=overfetch_k,
             rerank=rerank,
         )
+
+        batch_id = str(uuid.uuid4())
 
         for rank, it in enumerate(items, start=1):
             source_ref = f"doc:{it.get('document_id')}#chunk:{it.get('chunk_id')}"
             meta = {
+                "batch_id": batch_id,
+                "batch_kind": "create_run",
                 "rank": rank,
                 "score_hybrid": float(it.get("score_hybrid") or 0.0),
                 "score_fts": float(it.get("score_fts") or 0.0),
@@ -347,8 +380,8 @@ def create_run(
                     "alpha": alpha,
                     "source_types": source_types,
                     "timeframe": timeframe,
-                    "min_score": retrieval_meta["min_score"],
-                    "overfetch_k": retrieval_meta["overfetch_k"],
+                    "min_score": min_score,
+                    "overfetch_k": overfetch_k,
                     "rerank": rerank,
                 },
             }
@@ -369,6 +402,8 @@ def create_run(
             db.refresh(e)
 
         retrieval_meta["evidence_count"] = len(ev_items)
+        retrieval_meta["batch_id"] = batch_id
+
         ip = dict(r.input_payload or {})
         ip["_retrieval"] = retrieval_meta
         r.input_payload = ip
@@ -382,14 +417,7 @@ def create_run(
                 level="info",
                 message="Pre-retrieval completed; evidence attached.",
                 meta={
-                    "query": q,
-                    "k": k,
-                    "alpha": alpha,
-                    "source_types": source_types,
-                    "timeframe": timeframe,
-                    "min_score": retrieval_meta["min_score"],
-                    "overfetch_k": retrieval_meta["overfetch_k"],
-                    "rerank": rerank,
+                    **retrieval_meta,
                     "evidence_count": len(ev_items),
                 },
             )
@@ -440,6 +468,188 @@ def create_run(
         message="Run completed",
         meta={"artifact_type": artifact_type, "evidence_count": len(ev_items)},
     )
+
+    return RunOut(
+        id=str(r.id),
+        workspace_id=str(r.workspace_id),
+        agent_id=r.agent_id,
+        created_by_user_id=str(r.created_by_user_id),
+        status=r.status,
+        input_payload=r.input_payload,
+        output_summary=r.output_summary,
+    )
+
+
+# -------------------------
+# V2.2: Regenerate with retrieval
+# -------------------------
+@router.post("/runs/{run_id}/regenerate-with-retrieval", response_model=RunOut)
+def regenerate_with_retrieval(
+    run_id: str,
+    payload: RunRegenerateWithRetrievalIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    run_uuid = _parse_uuid(run_id)
+    r = db.get(Run, run_uuid)
+    if not r:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    require_workspace_role_min(str(r.workspace_id), "member", db, user)
+
+    # Determine base artifact key/type/versioning from latest artifact
+    latest = _latest_artifact_for_run(db, r.id)
+    if not latest:
+        raise HTTPException(status_code=400, detail="No artifacts exist for this run yet")
+
+    logical_key = latest.logical_key or latest.type
+    artifact_type = latest.type
+    next_ver = _next_version_for_logical_key(db, r.id, logical_key)
+
+    # Use run input payload as-is, but persist new retrieval config into _retrieval
+    rcfg = payload.retrieval
+    if not rcfg.enabled or not (rcfg.query or "").strip():
+        raise HTTPException(status_code=400, detail="retrieval.enabled=true and retrieval.query required")
+
+    q = rcfg.query.strip()
+    k = int(rcfg.k or 6)
+    alpha = float(rcfg.alpha) if rcfg.alpha is not None else 0.65
+    source_types = [s.strip() for s in (rcfg.source_types or []) if s.strip()]
+    timeframe = rcfg.timeframe or {}
+
+    min_score = float(getattr(rcfg, "min_score", 0.15))
+    overfetch_k = int(getattr(rcfg, "overfetch_k", 3))
+    rerank = bool(getattr(rcfg, "rerank", False))
+
+    start_ts, end_ts = _timeframe_to_bounds(timeframe)
+
+    retrieval_meta: Dict[str, Any] = {
+        "enabled": True,
+        "query": q,
+        "k": k,
+        "alpha": alpha,
+        "source_types": source_types,
+        "timeframe": timeframe,
+        "min_score": min_score,
+        "overfetch_k": overfetch_k,
+        "rerank": rerank,
+    }
+
+    # Retrieve
+    items = hybrid_retrieve(
+        db,
+        workspace_id=str(r.workspace_id),
+        q=q,
+        k=k,
+        alpha=alpha,
+        source_types=source_types or None,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        min_score=min_score,
+        overfetch_k=overfetch_k,
+        rerank=rerank,
+    )
+
+    batch_id = str(uuid.uuid4())
+    ev_items: List[Evidence] = []
+
+    for rank, it in enumerate(items, start=1):
+        source_ref = f"doc:{it.get('document_id')}#chunk:{it.get('chunk_id')}"
+        meta = {
+            "batch_id": batch_id,
+            "batch_kind": "regenerate_with_retrieval",
+            "rank": rank,
+            "score_hybrid": float(it.get("score_hybrid") or 0.0),
+            "score_fts": float(it.get("score_fts") or 0.0),
+            "score_vec": float(it.get("score_vec") or 0.0),
+            "score_rerank_bonus": it.get("score_rerank_bonus"),
+            "score_final": it.get("score_final"),
+            "document_title": it.get("document_title", ""),
+            "source_id": it.get("source_id", ""),
+            "chunk_index": int(it.get("chunk_index") or 0),
+            "retrieval": {
+                **retrieval_meta,
+            },
+        }
+
+        ev = Evidence(
+            run_id=r.id,
+            kind="snippet",
+            source_name="retrieval",
+            source_ref=source_ref,
+            excerpt=str(it.get("snippet") or ""),
+            meta=meta,
+        )
+        db.add(ev)
+        ev_items.append(ev)
+
+    db.commit()
+    for e in ev_items:
+        db.refresh(e)
+
+    retrieval_meta["evidence_count"] = len(ev_items)
+    retrieval_meta["batch_id"] = batch_id
+
+    # Persist latest retrieval config onto run (for UI)
+    ip = dict(r.input_payload or {})
+    ip["_retrieval"] = retrieval_meta
+    r.input_payload = ip
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+
+    # Audit logs + status event (completed -> completed)
+    db.add(
+        RunLog(
+            run_id=r.id,
+            level="info" if ev_items else "warn",
+            message="Regenerate-with-retrieval executed; evidence attached." if ev_items else "Regenerate-with-retrieval executed; no evidence found.",
+            meta=retrieval_meta,
+        )
+    )
+    db.commit()
+
+    _write_status_event(
+        db,
+        run=r,
+        from_status=r.status,
+        to_status=r.status,
+        message="Regenerate with retrieval",
+        meta={"artifact_type": artifact_type, "logical_key": logical_key, "new_version": next_ver, **retrieval_meta},
+    )
+
+    # Generate new artifact
+    if len(ev_items) == 0:
+        _atype, _title, md = _no_evidence_md(r.agent_id, r.input_payload, retrieval_meta)
+        title = latest.title or f"{artifact_type.replace('_', ' ').title()} — Draft"
+    else:
+        _atype, _title, md = _generate_md_with_evidence(
+            agent_id=r.agent_id,
+            input_payload=r.input_payload,
+            evidence_items=ev_items,
+        )
+        title = latest.title or _title
+
+    new_art = Artifact(
+        run_id=r.id,
+        type=artifact_type,
+        title=title,
+        content_md=md,
+        logical_key=logical_key,
+        version=next_ver,
+        status="draft",
+    )
+    db.add(new_art)
+    db.commit()
+
+    # Update summary (keep run status as-is)
+    r.output_summary = build_run_summary(agent_id=r.agent_id, artifact_type=artifact_type)
+    r.output_summary += f" Regenerated v{next_ver}."
+    if ev_items:
+        r.output_summary += f" Evidence attached: {len(ev_items)} snippet(s)."
+    db.add(r)
+    db.commit()
+    db.refresh(r)
 
     return RunOut(
         id=str(r.id),
@@ -668,7 +878,13 @@ def rag_debug(run_id: str, db: Session = Depends(get_db), user: User = Depends(r
         db.execute(
             select(RunLog)
             .where(RunLog.run_id == r.id)
-            .where(RunLog.message == "Pre-retrieval completed; evidence attached.")
+            .where(RunLog.message.in_(
+                [
+                    "Pre-retrieval completed; evidence attached.",
+                    "Regenerate-with-retrieval executed; evidence attached.",
+                    "Regenerate-with-retrieval executed; no evidence found.",
+                ]
+            ))
             .order_by(RunLog.created_at.desc())
             .limit(1)
         )
