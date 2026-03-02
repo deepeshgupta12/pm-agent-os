@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, Link, useLocation } from "react-router-dom";
 import {
   Badge,
@@ -137,6 +137,9 @@ export default function RunDetailPage() {
 
   // V2.3: batch selector state
   const [ragBatchId, setRagBatchId] = useState<string | null>(null);
+
+  // V3.2 deep-link: prevent immediate double-fetch after programmatic open
+  const skipNextRagOpenFetchRef = useRef(false);
 
   // Create artifact form
   const [atype, setAtype] = useState<string | null>("prd");
@@ -704,31 +707,42 @@ export default function RunDetailPage() {
   }, [rid]);
 
   // V3.2: deep-link behavior: /runs/{id}?ragOpen=1&batch_id=...
+  // - React to loc.search changes (same run, different batch_id)
+  // - Avoid the immediate "ragOpen effect" double-fetch by skipping next ragOpen-triggered fetch
   useEffect(() => {
     if (!rid) return;
 
     const params = new URLSearchParams(loc.search);
     const open = (params.get("ragOpen") || "").toLowerCase();
     const batch = params.get("batch_id");
-
     const shouldOpen = open === "1" || open === "true";
     if (!shouldOpen) return;
 
-    setRagOpen(true);
-
     const bid = batch ? String(batch) : null;
-    if (bid) setRagBatchId(bid);
+
+    // Prevent immediate duplicate fetch from the ragOpen watcher effect
+    skipNextRagOpenFetchRef.current = true;
+
+    setRagOpen(true);
+    setRagBatchId(bid);
 
     void loadRagDebug(bid);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rid]);
+  }, [rid, loc.search]);
 
+  // When user opens RAG or changes batch manually, load scoped debug
   useEffect(() => {
     if (!rid) return;
     if (!ragOpen) return;
+
+    if (skipNextRagOpenFetchRef.current) {
+      skipNextRagOpenFetchRef.current = false;
+      return;
+    }
+
     void loadRagDebug(ragBatchId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ragOpen, rid]);
+  }, [ragOpen, rid, ragBatchId]);
 
   // Prefill retrieval panel from run._retrieval once run loads
   useEffect(() => {
@@ -926,8 +940,22 @@ export default function RunDetailPage() {
               </Group>
 
               <Group grow>
-                <NumberInput label="min_score" value={rpMinScore} min={0} max={1} step={0.05} onChange={(v) => setRpMinScore(Number(v) || 0.15)} />
-                <NumberInput label="overfetch_k" value={rpOverfetchK} min={1} max={10} step={1} onChange={(v) => setRpOverfetchK(Number(v) || 3)} />
+                <NumberInput
+                  label="min_score"
+                  value={rpMinScore}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  onChange={(v) => setRpMinScore(Number(v) || 0.15)}
+                />
+                <NumberInput
+                  label="overfetch_k"
+                  value={rpOverfetchK}
+                  min={1}
+                  max={10}
+                  step={1}
+                  onChange={(v) => setRpOverfetchK(Number(v) || 3)}
+                />
                 <div style={{ paddingTop: 26 }}>
                   <Checkbox label="rerank" checked={rpRerank} onChange={(e) => setRpRerank(e.currentTarget.checked)} />
                 </div>
@@ -1276,10 +1304,22 @@ export default function RunDetailPage() {
               onChange={setLogLevel}
               disabled={!canMutate}
             />
-            <TextInput label="Message" value={logMessage} onChange={(e) => setLogMessage(e.currentTarget.value)} disabled={!canMutate} />
+            <TextInput
+              label="Message"
+              value={logMessage}
+              onChange={(e) => setLogMessage(e.currentTarget.value)}
+              disabled={!canMutate}
+            />
           </Group>
 
-          <Textarea label="Meta (JSON)" autosize minRows={2} value={logMetaJson} onChange={(e) => setLogMetaJson(e.currentTarget.value)} disabled={!canMutate} />
+          <Textarea
+            label="Meta (JSON)"
+            autosize
+            minRows={2}
+            value={logMetaJson}
+            onChange={(e) => setLogMetaJson(e.currentTarget.value)}
+            disabled={!canMutate}
+          />
 
           <MutateTooltip canMutate={canMutate}>
             <Button onClick={createLog} loading={creatingLog} disabled={!canMutate}>
@@ -1335,7 +1375,14 @@ export default function RunDetailPage() {
           />
 
           <Group grow>
-            <NumberInput label="Top K" value={autoK} min={1} max={20} onChange={(v) => setAutoK(Number(v) || 6)} disabled={!canMutate} />
+            <NumberInput
+              label="Top K"
+              value={autoK}
+              min={1}
+              max={20}
+              onChange={(v) => setAutoK(Number(v) || 6)}
+              disabled={!canMutate}
+            />
             <NumberInput
               label="Alpha (vector weight)"
               value={autoAlpha}
@@ -1362,9 +1409,21 @@ export default function RunDetailPage() {
           <Select label="Type" data={artifactTypeOptions} value={atype} onChange={setAtype} disabled={!canMutate} />
           <Group grow>
             <TextInput label="Title" value={title} onChange={(e) => setTitle(e.currentTarget.value)} disabled={!canMutate} />
-            <TextInput label="Logical key (for versioning)" value={logicalKey} onChange={(e) => setLogicalKey(e.currentTarget.value)} disabled={!canMutate} />
+            <TextInput
+              label="Logical key (for versioning)"
+              value={logicalKey}
+              onChange={(e) => setLogicalKey(e.currentTarget.value)}
+              disabled={!canMutate}
+            />
           </Group>
-          <Textarea label="Content (Markdown)" autosize minRows={6} value={contentMd} onChange={(e) => setContentMd(e.currentTarget.value)} disabled={!canMutate} />
+          <Textarea
+            label="Content (Markdown)"
+            autosize
+            minRows={6}
+            value={contentMd}
+            onChange={(e) => setContentMd(e.currentTarget.value)}
+            disabled={!canMutate}
+          />
 
           <MutateTooltip canMutate={canMutate}>
             <Button onClick={createArtifact} loading={creatingArtifact} disabled={!canMutate}>
@@ -1390,12 +1449,37 @@ export default function RunDetailPage() {
               onChange={setEkind}
               disabled={!canMutate}
             />
-            <TextInput label="Source name" value={sourceName} onChange={(e) => setSourceName(e.currentTarget.value)} disabled={!canMutate} />
+            <TextInput
+              label="Source name"
+              value={sourceName}
+              onChange={(e) => setSourceName(e.currentTarget.value)}
+              disabled={!canMutate}
+            />
           </Group>
 
-          <TextInput label="Source ref (URL/id)" value={sourceRef} onChange={(e) => setSourceRef(e.currentTarget.value)} placeholder="optional" disabled={!canMutate} />
-          <Textarea label="Excerpt" autosize minRows={3} value={excerpt} onChange={(e) => setExcerpt(e.currentTarget.value)} disabled={!canMutate} />
-          <Textarea label="Meta (JSON)" autosize minRows={3} value={metaJson} onChange={(e) => setMetaJson(e.currentTarget.value)} disabled={!canMutate} />
+          <TextInput
+            label="Source ref (URL/id)"
+            value={sourceRef}
+            onChange={(e) => setSourceRef(e.currentTarget.value)}
+            placeholder="optional"
+            disabled={!canMutate}
+          />
+          <Textarea
+            label="Excerpt"
+            autosize
+            minRows={3}
+            value={excerpt}
+            onChange={(e) => setExcerpt(e.currentTarget.value)}
+            disabled={!canMutate}
+          />
+          <Textarea
+            label="Meta (JSON)"
+            autosize
+            minRows={3}
+            value={metaJson}
+            onChange={(e) => setMetaJson(e.currentTarget.value)}
+            disabled={!canMutate}
+          />
 
           <MutateTooltip canMutate={canMutate}>
             <Button onClick={addEvidence} loading={creatingEvidence} disabled={!canMutate}>
