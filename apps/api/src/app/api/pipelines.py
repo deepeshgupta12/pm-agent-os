@@ -17,6 +17,8 @@ from app.core.citations import (
     output_has_any_citations,
     body_has_inline_citations,
     build_inline_citation_patch,
+    citation_enforcement_report,
+    render_citation_compliance_md,
 )
 from app.core.retrieval_search import hybrid_retrieve
 from app.db.session import get_db
@@ -110,6 +112,7 @@ CANONICAL_PIPELINES: List[Dict[str, Any]] = [
     },
 ]
 
+
 # -------------------------
 # Helpers
 # -------------------------
@@ -178,7 +181,7 @@ def _latest_artifact_map(db: Session, steps: List[PipelineStep]) -> Dict[str, Di
 
 def _run_retrieval_meta_map(db: Session, steps: List[PipelineStep]) -> Dict[str, Dict[str, Any]]:
     """
-    V3.2: Fetch run.input_payload["_retrieval"] for each step.run_id in ONE query.
+    Fetch run.input_payload["_retrieval"] for each step.run_id in ONE query.
     Returns: { run_id_str: retrieval_dict_or_empty }
     """
     run_ids = [s.run_id for s in steps if s.run_id is not None]
@@ -217,7 +220,6 @@ def _step_to_out(
         if isinstance(v, int):
             auto_regenerated = v >= 2
 
-    # V3.2 retrieval fields
     retrieval_enabled = None
     retrieval_query = None
     retrieval_evidence_count = None
@@ -256,7 +258,6 @@ def _step_to_out(
         latest_artifact_version=latest.get("latest_artifact_version"),
         latest_artifact_type=latest.get("latest_artifact_type"),
         latest_artifact_title=latest.get("latest_artifact_title"),
-        # V3.2
         retrieval_enabled=retrieval_enabled,
         retrieval_query=retrieval_query,
         retrieval_evidence_count=retrieval_evidence_count,
@@ -278,10 +279,7 @@ def _run_to_out(db: Session, pr: PipelineRun, steps: List[PipelineStep]) -> Pipe
         status=pr.status,
         current_step_index=pr.current_step_index,
         input_payload=pr.input_payload or {},
-        steps=[
-            _step_to_out(s, prev_map, latest_map, retrieval_map)
-            for s in sorted(steps, key=lambda x: x.step_index)
-        ],
+        steps=[_step_to_out(s, prev_map, latest_map, retrieval_map) for s in sorted(steps, key=lambda x: x.step_index)],
     )
 
 
@@ -299,9 +297,7 @@ def _validate_pipeline_definition(db: Session, steps_def: Any) -> None:
             raise HTTPException(status_code=400, detail=f"Invalid agent_id in pipeline step: {agent_id}")
 
 
-def _seed_canonical_templates_for_workspace(
-    db: Session, ws: Workspace
-) -> Tuple[List[PipelineTemplate], List[PipelineTemplate]]:
+def _seed_canonical_templates_for_workspace(db: Session, ws: Workspace) -> Tuple[List[PipelineTemplate], List[PipelineTemplate]]:
     existing = db.execute(select(PipelineTemplate).where(PipelineTemplate.workspace_id == ws.id)).scalars().all()
     by_name = {t.name.strip().lower(): t for t in existing}
 
@@ -774,6 +770,23 @@ def _create_completed_run_with_artifact_and_step_retrieval(
             evidence_items=ev_items,
         )
 
+    # V1 enforcement for pipeline step run (only when evidence exists)
+    try:
+        rep = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
+        if len(ev_items) > 0:
+            md = md.rstrip() + "\n\n" + render_citation_compliance_md(rep) + "\n"
+            db.add(
+                RunLog(
+                    run_id=r.id,
+                    level="info" if rep.get("ok") else "warn",
+                    message="Citation enforcement check",
+                    meta=rep,
+                )
+            )
+            db.commit()
+    except Exception:
+        pass
+
     art = Artifact(
         run_id=r.id,
         type=artifact_type,
@@ -790,6 +803,15 @@ def _create_completed_run_with_artifact_and_step_retrieval(
     r.output_summary = build_run_summary(agent_id=r.agent_id, artifact_type=artifact_type)
     if ev_items:
         r.output_summary += f" Evidence attached: {len(ev_items)} snippet(s)."
+
+    try:
+        if len(ev_items) > 0:
+            rep2 = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
+            if not rep2.get("ok"):
+                r.output_summary += f" ⚠️ Citation check failed (confidence={float(rep2.get('confidence_score') or 0.0):.2f})."
+    except Exception:
+        pass
+
     db.add(r)
     db.commit()
     db.refresh(r)
@@ -827,7 +849,7 @@ def _regenerate_run_with_evidence_internal(db: Session, run_uuid: uuid.UUID) -> 
         system_prompt = build_system_prompt()
         base_user_prompt = build_user_prompt(agent_id=r.agent_id, input_payload=r.input_payload, evidence_text=evidence_text)
 
-        citation_rules = f"""
+        citation_rules = """
 You MUST ground claims in the Evidence Pack below.
 
 Citation rules:
@@ -839,7 +861,7 @@ Output requirements (MANDATORY):
 1) Start with a clear H1 title.
 2) Include a section "## Unknowns / Assumptions".
 3) Include a section "## Sources" at the end with the exact [n] references.
-"""
+""".strip()
 
         evidence_pack = f"""
 Evidence Pack (cite as [n]):
@@ -847,7 +869,7 @@ Evidence Pack (cite as [n]):
 {citations_block}
 """.strip()
 
-        user_prompt = "\n\n".join([base_user_prompt.strip(), citation_rules.strip(), evidence_pack])
+        user_prompt = "\n\n".join([base_user_prompt.strip(), citation_rules, evidence_pack])
         md = llm_generate_markdown(system_prompt=system_prompt, user_prompt=user_prompt)
 
         if not md.lstrip().startswith("#"):
@@ -872,7 +894,6 @@ Evidence Pack (cite as [n]):
         if len(ev_items) > 0 and not body_has_inline_citations(md):
             patch = build_inline_citation_patch(normalized)
             md = md.rstrip() + "\n\n" + patch + "\n"
-
     else:
         _, _, md = build_initial_artifact(agent_id=r.agent_id, input_payload=r.input_payload)
         if "## Unknowns / Assumptions" not in md:
@@ -882,12 +903,31 @@ Evidence Pack (cite as [n]):
         if not body_has_inline_citations(md):
             md = md.rstrip() + "\n\n" + build_inline_citation_patch(normalized) + "\n"
 
-    max_ver = db.execute(
-        select(Artifact.version)
-        .where(Artifact.run_id == r.id, Artifact.logical_key == artifact_type)
-        .order_by(Artifact.version.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+    # V1 enforcement for internal regen
+    try:
+        rep = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
+        md = md.rstrip() + "\n\n" + render_citation_compliance_md(rep) + "\n"
+        db.add(
+            RunLog(
+                run_id=r.id,
+                level="info" if rep.get("ok") else "warn",
+                message="Citation enforcement check",
+                meta=rep,
+            )
+        )
+        db.commit()
+    except Exception:
+        pass
+
+    max_ver = (
+        db.execute(
+            select(Artifact.version)
+            .where(Artifact.run_id == r.id, Artifact.logical_key == artifact_type)
+            .order_by(Artifact.version.desc())
+            .limit(1)
+        )
+        .scalar_one_or_none()
+    )
     next_ver = int(max_ver or 0) + 1
 
     new_art = Artifact(
@@ -902,6 +942,13 @@ Evidence Pack (cite as [n]):
     db.add(new_art)
 
     r.output_summary = f"Auto-regenerated via pipeline using {len(ev_items)} evidence item(s). Latest version: v{next_ver}."
+    try:
+        rep2 = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
+        if not rep2.get("ok"):
+            r.output_summary += f" ⚠️ Citation check failed (confidence={float(rep2.get('confidence_score') or 0.0):.2f})."
+    except Exception:
+        pass
+
     db.add(r)
     db.commit()
 
@@ -914,7 +961,6 @@ def _mark_step_failed(db: Session, pr: PipelineRun, step: PipelineStep, *, error
     pr.status = "failed"
     db.add(pr)
 
-    # best-effort log
     try:
         if step.run_id:
             db.add(
@@ -1329,7 +1375,7 @@ def execute_all_steps(
 
 
 # -------------------------
-# V3.1 OPTION A: Alias routes
+# Alias routes (stable links)
 # -------------------------
 @router.get("/pipeline-runs/{pipeline_run_id}", response_model=PipelineRunOut)
 def get_pipeline_run_alias(

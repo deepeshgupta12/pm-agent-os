@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 import re
 import hashlib
 
 
+# -------------------------
+# Existing helpers (kept)
+# -------------------------
 def _fingerprint(ev: Dict[str, Any]) -> str:
     source_ref = str(ev.get("source_ref") or "").strip()
     excerpt = str(ev.get("excerpt") or "").strip()
@@ -15,14 +18,13 @@ def _fingerprint(ev: Dict[str, Any]) -> str:
 def build_citation_pack(evidence: List[Dict[str, Any]]) -> Tuple[str, str, List[Dict[str, Any]]]:
     """
     Returns:
-      (citations_block_for_prompt, sources_section_markdown, normalized_citations)
+    (citations_block_for_prompt, sources_section_markdown, normalized_citations)
 
     Dedupes evidence rows to avoid exploding citation lists when auto-evidence is run multiple times.
     """
     normalized: List[Dict[str, Any]] = []
     seen: set[str] = set()
 
-    # Deduplicate while keeping order
     deduped: List[Dict[str, Any]] = []
     for ev in evidence:
         fp = _fingerprint(ev)
@@ -101,9 +103,7 @@ def build_inline_citation_patch(citations: List[Dict[str, Any]]) -> str:
 
     lines: List[str] = []
     lines.append("## Evidence-backed notes")
-    lines.append(
-        "_Inline citations were missing in the draft body. This section was auto-added to anchor key statements to sources._"
-    )
+    lines.append("_Inline citations were missing in the draft body. This section was auto-added to anchor key statements to sources._")
     lines.append("")
 
     for c in citations[:10]:
@@ -115,4 +115,177 @@ def build_inline_citation_patch(citations: List[Dict[str, Any]]) -> str:
     lines.append("## Inline citation checklist")
     lines.append("- Add citations like `[1]` at the end of sentences that rely on evidence.")
     lines.append("- If a claim cannot be grounded, move it to **Unknowns / Assumptions**.")
+    return "\n".join(lines).strip()
+
+
+# -------------------------
+# NEW: Hard citation enforcement
+# -------------------------
+
+# Heuristic: split into sentences-ish chunks. We avoid heavy NLP.
+_SENT_SPLIT = re.compile(r"(?<=[\.\!\?])\s+|\n+")
+
+# Inline citation tokens like [1] [12]
+_CITE = re.compile(r"\[[0-9]{1,3}\]")
+
+# Ignore code blocks entirely (often contain brackets)
+_FENCE = re.compile(r"```.*?```", re.DOTALL)
+
+# Headings
+_H2 = re.compile(r"^##\s+(.+)$", re.MULTILINE)
+
+
+def _strip_code(md: str) -> str:
+    if not md:
+        return ""
+    return re.sub(_FENCE, "", md)
+
+
+def _count_cites(s: str) -> int:
+    return len(re.findall(_CITE, s or ""))
+
+
+def _sentence_chunks(body: str) -> List[str]:
+    body = (body or "").strip()
+    if not body:
+        return []
+    parts = re.split(_SENT_SPLIT, body)
+    out = []
+    for p in parts:
+        t = (p or "").strip()
+        if not t:
+            continue
+        # skip tiny fragments
+        if len(t) < 20:
+            continue
+        out.append(t)
+    return out
+
+
+def _artifact_thresholds(artifact_type: str) -> Dict[str, Any]:
+    """
+    Rule knobs per artifact type.
+    min_cited_sentence_ratio: fraction of meaningful sentences that contain >=1 citation
+    require_inline_if_evidence: if True, evidence_count>0 requires inline citations in body
+    """
+    # tuned for V1: strict enough to stop fluff, not so strict that it blocks everything
+    base = {
+        "require_inline_if_evidence": True,
+        "min_cited_sentence_ratio": 0.25,
+    }
+
+    t = (artifact_type or "").strip().lower()
+    if t == "prd":
+        return {**base, "min_cited_sentence_ratio": 0.35}
+    if t in {"qa_suite", "tracking_spec", "experiment_plan"}:
+        return {**base, "min_cited_sentence_ratio": 0.30}
+    if t in {"problem_brief", "research_summary", "competitive_matrix"}:
+        return {**base, "min_cited_sentence_ratio": 0.25}
+    # default memo-ish
+    return base
+
+
+def citation_enforcement_report(
+    *,
+    artifact_type: str,
+    md: str,
+    evidence_count: int,
+) -> Dict[str, Any]:
+    """
+    Returns:
+      {
+        ok: bool,
+        confidence_score: float (0..1),
+        evidence_count: int,
+        total_sentences: int,
+        cited_sentences: int,
+        cited_sentence_ratio: float,
+        reasons: list[str],
+        thresholds: dict,
+      }
+    """
+    thresholds = _artifact_thresholds(artifact_type)
+
+    body, sources = split_body_and_sources(md or "")
+    body = _strip_code(body)
+    sources = _strip_code(sources)
+
+    sentences = _sentence_chunks(body)
+    total = len(sentences)
+    cited = 0
+    for s in sentences:
+        if _count_cites(s) > 0:
+            cited += 1
+
+    ratio = (cited / total) if total > 0 else 0.0
+
+    reasons: List[str] = []
+    ok = True
+
+    # Evidence exists => must have inline citations (not just a Sources section)
+    if evidence_count > 0 and thresholds.get("require_inline_if_evidence", True):
+        if not body_has_inline_citations(md):
+            ok = False
+            reasons.append("Evidence was attached, but the draft body has no inline citations like [1].")
+
+    # Density check
+    min_ratio = float(thresholds.get("min_cited_sentence_ratio", 0.25))
+    if evidence_count > 0:
+        # only enforce density when evidence exists
+        if ratio + 1e-9 < min_ratio:
+            ok = False
+            reasons.append(
+                f"Citation density too low: cited_sentence_ratio={ratio:.2f} < required {min_ratio:.2f}."
+            )
+
+    # Sources section presence (so user can inspect)
+    if evidence_count > 0 and "## Sources" not in (md or ""):
+        ok = False
+        reasons.append("Missing '## Sources' section.")
+
+    # Confidence score (simple)
+    confidence = max(0.0, min(1.0, ratio))
+
+    return {
+        "ok": bool(ok),
+        "confidence_score": float(confidence),
+        "evidence_count": int(evidence_count),
+        "total_sentences": int(total),
+        "cited_sentences": int(cited),
+        "cited_sentence_ratio": float(ratio),
+        "reasons": reasons,
+        "thresholds": thresholds,
+    }
+
+
+def render_citation_compliance_md(report: Dict[str, Any]) -> str:
+    ok = bool(report.get("ok"))
+    cs = float(report.get("confidence_score") or 0.0)
+    ev = int(report.get("evidence_count") or 0)
+    total = int(report.get("total_sentences") or 0)
+    cited = int(report.get("cited_sentences") or 0)
+    ratio = float(report.get("cited_sentence_ratio") or 0.0)
+
+    lines: List[str] = []
+    lines.append("## Citation Compliance")
+    lines.append(f"- Status: {'✅ PASS' if ok else '❌ FAIL'}")
+    lines.append(f"- Evidence attached: `{ev}`")
+    lines.append(f"- Confidence score: `{cs:.2f}` (proxy = cited sentence ratio)")
+    lines.append(f"- Cited sentences: `{cited}/{total}` (`{ratio:.2f}`)")
+    thresholds = report.get("thresholds") or {}
+    lines.append(f"- Thresholds: `{thresholds}`")
+
+    reasons = report.get("reasons") or []
+    if reasons:
+        lines.append("")
+        lines.append("### Issues")
+        for r in reasons:
+            lines.append(f"- {r}")
+
+    lines.append("")
+    lines.append("### How to fix")
+    lines.append("- Add inline citations like `[1]` at the end of sentences that rely on evidence.")
+    lines.append("- If something cannot be grounded, move it to **Unknowns / Assumptions**.")
+    lines.append("- Ensure **## Sources** lists the evidence IDs.")
+
     return "\n".join(lines).strip()
