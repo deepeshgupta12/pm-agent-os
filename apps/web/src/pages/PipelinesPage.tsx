@@ -10,11 +10,22 @@ import {
   Text,
   TextInput,
   Title,
+  Divider,
+  Code,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import type { PipelineRun, PipelineTemplate } from "../types";
 
 type TemplateListResponse = PipelineTemplate[] | { items: PipelineTemplate[] };
+
+type SeedResponse = {
+  ok: boolean;
+  workspace_id: string;
+  created_count: number;
+  existing_count: number;
+  created_template_ids: string[];
+  existing_template_ids: string[];
+};
 
 function normalizeTemplates(res: TemplateListResponse): PipelineTemplate[] {
   if (Array.isArray(res)) return res;
@@ -29,6 +40,10 @@ export default function PipelinesPage() {
   const [templates, setTemplates] = useState<PipelineTemplate[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [loadingTemplates, setLoadingTemplates] = useState(false);
+
+  // Commit 3: seeding UX
+  const [seeding, setSeeding] = useState(false);
+  const [seedInfo, setSeedInfo] = useState<SeedResponse | null>(null);
 
   // Create pipeline run form
   const [templateId, setTemplateId] = useState<string | null>(null);
@@ -47,8 +62,6 @@ export default function PipelinesPage() {
     setErr(null);
     setLoadingTemplates(true);
 
-    // Expected endpoint:
-    // GET /workspaces/{workspace_id}/pipelines/templates
     const res = await apiFetch<TemplateListResponse>(`/workspaces/${wid}/pipelines/templates`, {
       method: "GET",
     });
@@ -56,7 +69,6 @@ export default function PipelinesPage() {
     setLoadingTemplates(false);
 
     if (!res.ok) {
-      // Not fatal: allow manual template id entry
       setTemplates([]);
       setErr(
         `Templates load failed (${res.status}). You can still start a pipeline by pasting template_id manually.`
@@ -69,6 +81,28 @@ export default function PipelinesPage() {
     if (!templateId && items.length > 0) setTemplateId(items[0].id);
   }
 
+  async function seedCanonicalTemplates() {
+    if (!wid) return;
+    setErr(null);
+    setSeeding(true);
+    setSeedInfo(null);
+
+    const res = await apiFetch<SeedResponse>(`/workspaces/${wid}/pipelines/templates/seed`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+
+    setSeeding(false);
+
+    if (!res.ok) {
+      setErr(`Seed templates failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setSeedInfo(res.data);
+    await loadTemplates();
+  }
+
   async function createPipelineRun() {
     if (!wid) return;
     if (!templateId) {
@@ -79,8 +113,6 @@ export default function PipelinesPage() {
     setErr(null);
     setCreating(true);
 
-    // Expected endpoint:
-    // POST /workspaces/{workspace_id}/pipelines/runs
     const res = await apiFetch<PipelineRun>(`/workspaces/${wid}/pipelines/runs`, {
       method: "POST",
       body: JSON.stringify({
@@ -129,13 +161,74 @@ export default function PipelinesPage() {
         </Card>
       ) : null}
 
+      {/* Commit 3: seed UX */}
+      <Card withBorder>
+        <Stack gap="sm">
+          <Group justify="space-between">
+            <Group gap="sm">
+              <Text fw={700}>Pipeline Templates</Text>
+              <Badge variant="light">V1</Badge>
+            </Group>
+            <Group>
+              <Button variant="default" onClick={seedCanonicalTemplates} loading={seeding} disabled={!wid}>
+                Seed canonical templates
+              </Button>
+              <Button variant="light" onClick={loadTemplates} loading={loadingTemplates} disabled={!wid}>
+                Refresh templates
+              </Button>
+            </Group>
+          </Group>
+
+          <Text size="sm" c="dimmed">
+            Seeding will create the 4 canonical pipelines (Discovery→Strategy→PRD, PRD→UX→Feasibility, Analytics→QA→Launch,
+            Launch→Monitoring→Stakeholders) if they don’t exist already.
+          </Text>
+
+          {seedInfo ? (
+            <Card withBorder>
+              <Stack gap={6}>
+                <Text fw={600}>Seed result</Text>
+                <Text size="sm">
+                  created=<Code>{String(seedInfo.created_count)}</Code> · existing=<Code>{String(
+                    seedInfo.existing_count
+                  )}</Code>
+                </Text>
+
+                {seedInfo.created_template_ids?.length ? (
+                  <Text size="sm" c="dimmed">
+                    created ids: <Code>{seedInfo.created_template_ids.join(", ")}</Code>
+                  </Text>
+                ) : null}
+
+                {seedInfo.existing_template_ids?.length ? (
+                  <Text size="sm" c="dimmed">
+                    existing ids: <Code>{seedInfo.existing_template_ids.join(", ")}</Code>
+                  </Text>
+                ) : null}
+
+                <Text size="xs" c="dimmed">
+                  workspace_id: <Code>{seedInfo.workspace_id}</Code>
+                </Text>
+              </Stack>
+            </Card>
+          ) : null}
+
+          <Divider />
+
+          <Group justify="space-between">
+            <Text size="sm" c="dimmed">
+              Loaded templates: <Code>{String(templates.length)}</Code>
+            </Text>
+            <Badge variant="light">workspace: {wid.slice(0, 8)}…</Badge>
+          </Group>
+        </Stack>
+      </Card>
+
+      {/* Create pipeline run */}
       <Card withBorder>
         <Stack gap="sm">
           <Group justify="space-between">
             <Text fw={700}>Start a pipeline run</Text>
-            <Button variant="light" onClick={loadTemplates} loading={loadingTemplates}>
-              Refresh templates
-            </Button>
           </Group>
 
           <Group gap="sm" align="flex-end">
@@ -149,10 +242,8 @@ export default function PipelinesPage() {
               searchable
               nothingFoundMessage="No templates loaded"
             />
-            <Badge variant="light">workspace: {wid.slice(0, 8)}…</Badge>
           </Group>
 
-          {/* Manual override if templates endpoint isn't present */}
           {templates.length === 0 ? (
             <TextInput
               label="Template ID (manual)"
@@ -176,6 +267,7 @@ export default function PipelinesPage() {
               placeholder="e.g., Mobile web / iOS / B2B admin"
             />
           </Group>
+
           <TextInput
             label="Constraints (optional)"
             value={constraints}
@@ -188,8 +280,8 @@ export default function PipelinesPage() {
           </Button>
 
           <Text size="sm" c="dimmed">
-            After creation, you’ll execute steps one-by-one. Each step creates a normal <b>Run</b> and an initial
-            draft <b>Artifact</b>.
+            After creation, you’ll execute steps one-by-one. Each step creates a normal <b>Run</b> and an initial draft{" "}
+            <b>Artifact</b>.
           </Text>
         </Stack>
       </Card>
