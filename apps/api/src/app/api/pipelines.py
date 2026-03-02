@@ -45,6 +45,8 @@ from app.schemas.pipelines import (
 
 router = APIRouter(tags=["pipelines"])
 
+VALID_STEP_STATUS = {"created", "running", "completed", "failed"}
+VALID_PIPELINE_STATUS = {"created", "running", "completed", "failed"}
 
 # -------------------------
 # Canonical templates (V1)
@@ -298,11 +300,6 @@ def _latest_artifact_snapshot(db: Session, run_id: uuid.UUID) -> Optional[Dict[s
 
 
 def _timeframe_to_bounds(timeframe: Optional[Dict[str, Any]]) -> tuple[Optional[datetime], Optional[datetime]]:
-    """
-    Same semantics as runs.py:
-      - {"preset":"7d"|"30d"|"90d"}
-      - {"preset":"custom","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}
-    """
     tf = timeframe or {}
     preset = (tf.get("preset") or "").strip().lower()
     now = datetime.now(timezone.utc)
@@ -525,10 +522,6 @@ def _attach_retrieval_evidence_for_run(
     workspace_id: str,
     retrieval_cfg: Dict[str, Any],
 ) -> Tuple[List[Evidence], Dict[str, Any]]:
-    """
-    Executes hybrid_retrieve and attaches evidence rows to the run.
-    Returns (ev_items, retrieval_meta)
-    """
     q = str(retrieval_cfg.get("query") or "").strip()
     if not q:
         return [], {"enabled": False}
@@ -631,10 +624,6 @@ def _create_completed_run_with_artifact_and_step_retrieval(
     template_definition: Dict[str, Any],
     step_definition: Dict[str, Any],
 ) -> Run:
-    """
-    V3.0: create a run for a pipeline step and perform retrieval-first inside the step.
-    Evidence is stored on the run (batch-scoped), and run.input_payload["_retrieval"] is updated.
-    """
     agent = db.get(AgentDefinition, agent_id)
     if not agent:
         raise HTTPException(status_code=400, detail=f"Invalid agent_id: {agent_id}")
@@ -650,20 +639,17 @@ def _create_completed_run_with_artifact_and_step_retrieval(
     db.commit()
     db.refresh(r)
 
-    # run state
     r.status = "running"
     db.add(r)
     db.commit()
     db.refresh(r)
 
-    # ----- Build retrieval cfg (template defaults + step overrides + auto query) -----
     tpl_retrieval = template_definition.get("retrieval") if isinstance(template_definition, dict) else None
     tpl_retrieval = tpl_retrieval if isinstance(tpl_retrieval, dict) else {}
 
     step_retrieval = (step_definition or {}).get("retrieval")
     step_retrieval = step_retrieval if isinstance(step_retrieval, dict) else {}
 
-    # pipeline input payload conventions (from RunBuilderPage)
     sources_selected = base_input_payload.get("sources_selected") or []
     if not isinstance(sources_selected, list):
         sources_selected = []
@@ -704,25 +690,25 @@ def _create_completed_run_with_artifact_and_step_retrieval(
             retrieval_cfg=retrieval_cfg,
         )
 
-        # persist retrieval meta into run input payload (same contract as runs.py)
-        ip = dict(r.input_payload or {})
-        ip["_retrieval"] = retrieval_meta
-        r.input_payload = ip
-        db.add(r)
-        db.commit()
-        db.refresh(r)
+    ip = dict(r.input_payload or {})
+    ip["_retrieval"] = retrieval_meta
+    r.input_payload = ip
+    db.add(r)
+    db.commit()
+    db.refresh(r)
 
-        db.add(
-            RunLog(
-                run_id=r.id,
-                level="info" if ev_items else "warn",
-                message="Pipeline step pre-retrieval completed; evidence attached." if ev_items else "Pipeline step pre-retrieval executed; no evidence found.",
-                meta=retrieval_meta,
-            )
+    db.add(
+        RunLog(
+            run_id=r.id,
+            level="info" if ev_items else "warn",
+            message="Pipeline step pre-retrieval completed; evidence attached."
+            if ev_items
+            else "Pipeline step pre-retrieval executed; no evidence found.",
+            meta=retrieval_meta,
         )
-        db.commit()
+    )
+    db.commit()
 
-    # ----- Generate artifact for this step -----
     if retrieval_meta.get("enabled") and len(ev_items) == 0:
         artifact_type, title, md = _no_evidence_md(r.agent_id, r.input_payload, retrieval_meta)
     else:
@@ -756,11 +742,6 @@ def _create_completed_run_with_artifact_and_step_retrieval(
 
 
 def _regenerate_run_with_evidence_internal(db: Session, run_uuid: uuid.UUID) -> None:
-    """
-    Existing pipeline internal regen; now benefits from:
-    - pipeline_prev_artifact evidence
-    - pipeline_step_retrieval evidence
-    """
     r = db.get(Run, run_uuid)
     if not r:
         return
@@ -869,6 +850,31 @@ Evidence Pack (cite as [n]):
     db.commit()
 
 
+def _mark_step_failed(db: Session, pr: PipelineRun, step: PipelineStep, *, error: str) -> None:
+    step.status = "failed"
+    step.completed_at = datetime.now(timezone.utc)
+    db.add(step)
+
+    pr.status = "failed"
+    db.add(pr)
+
+    # optional: also record a run log if run_id exists (best-effort)
+    try:
+        if step.run_id:
+            db.add(
+                RunLog(
+                    run_id=step.run_id,
+                    level="error",
+                    message="Pipeline step failed",
+                    meta={"pipeline_run_id": str(pr.id), "step_index": step.step_index, "step_name": step.step_name, "error": error},
+                )
+            )
+    except Exception:
+        pass
+
+    db.commit()
+
+
 def _execute_one_step(
     db: Session,
     ws: Workspace,
@@ -910,14 +916,12 @@ def _execute_one_step(
     definition = (tpl.definition_json or {}) if tpl else {}
     steps_def = definition.get("steps") or []
 
-    # Get current step definition (for optional retrieval overrides)
     step_def: Dict[str, Any] = {}
     if isinstance(steps_def, list) and 0 <= step.step_index < len(steps_def):
         sd = steps_def[step.step_index]
         if isinstance(sd, dict):
             step_def = sd
 
-    # V3.0: create run with step retrieval-first
     new_run = _create_completed_run_with_artifact_and_step_retrieval(
         db=db,
         ws=ws,
@@ -929,7 +933,6 @@ def _execute_one_step(
         step_definition=step_def,
     )
 
-    # Step 17A: auto-evidence (prev artifact snapshot)
     if prev_artifact is not None:
         _auto_attach_prev_artifact_as_evidence(
             db=db,
@@ -942,7 +945,6 @@ def _execute_one_step(
             prev_artifact=prev_artifact,
         )
 
-    # Step 18: auto-regenerate with evidence (only for step 1+)
     if auto_regen and step.step_index > 0:
         _regenerate_run_with_evidence_internal(db=db, run_uuid=new_run.id)
 
@@ -1062,11 +1064,7 @@ def start_pipeline_run(
         if not agent:
             raise HTTPException(status_code=400, detail=f"Invalid agent_id in pipeline step: {agent_id}")
 
-        step_payload = {
-            "agent_step": idx,
-            "agent_id": agent_id,
-            "pipeline_step_name": name,
-        }
+        step_payload = {"agent_step": idx, "agent_id": agent_id, "pipeline_step_name": name}
 
         steps_rows.append(
             PipelineStep(
@@ -1122,6 +1120,10 @@ def run_next_step(
 
     ws, _role = require_workspace_role_min(str(pr.workspace_id), "member", db, user)
 
+    if (pr.status or "").lower() == "failed":
+        steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
+        return PipelineNextOut(ok=False, pipeline_run=_run_to_out(db, pr, steps), created_run_id=None)
+
     tpl = db.get(PipelineTemplate, pr.template_id)
     definition = (tpl.definition_json or {}) if tpl else {}
     auto_regen = bool(definition.get("auto_regenerate_with_evidence", True))
@@ -1153,7 +1155,18 @@ def run_next_step(
         steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
         return PipelineNextOut(ok=True, pipeline_run=_run_to_out(db, pr, steps), created_run_id=None)
 
-    created_run_id = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step, auto_regen=auto_regen)
+    # ensure pipeline status is running when executing
+    if (pr.status or "").lower() == "created":
+        pr.status = "running"
+        db.add(pr)
+        db.commit()
+
+    try:
+        created_run_id = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step, auto_regen=auto_regen)
+    except Exception as e:
+        _mark_step_failed(db, pr, step, error=str(e))
+        steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
+        return PipelineNextOut(ok=False, pipeline_run=_run_to_out(db, pr, steps), created_run_id=None)
 
     pr.current_step_index += 1
     if pr.current_step_index >= len(steps):
@@ -1179,6 +1192,10 @@ def execute_all_steps(
 
     ws, _role = require_workspace_role_min(str(pr.workspace_id), "member", db, user)
 
+    if (pr.status or "").lower() == "failed":
+        steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
+        return PipelineExecuteAllOut(ok=False, pipeline_run=_run_to_out(db, pr, steps), created_run_ids=[])
+
     tpl = db.get(PipelineTemplate, pr.template_id)
     definition = (tpl.definition_json or {}) if tpl else {}
     auto_regen = bool(definition.get("auto_regenerate_with_evidence", True))
@@ -1197,15 +1214,30 @@ def execute_all_steps(
 
     created_run_ids: List[str] = []
 
+    if (pr.status or "").lower() == "created":
+        pr.status = "running"
+        db.add(pr)
+        db.commit()
+        db.refresh(pr)
+
+    ok = True
+
     while pr.current_step_index < len(steps):
         step = steps[pr.current_step_index]
 
         if step.status == "completed":
             pr.current_step_index += 1
+            db.add(pr)
+            db.commit()
             continue
 
-        rid = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step, auto_regen=auto_regen)
-        created_run_ids.append(rid)
+        try:
+            rid = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step, auto_regen=auto_regen)
+            created_run_ids.append(rid)
+        except Exception as e:
+            ok = False
+            _mark_step_failed(db, pr, step, error=str(e))
+            break
 
         steps = (
             db.execute(
@@ -1218,15 +1250,49 @@ def execute_all_steps(
         )
 
         pr.current_step_index += 1
+        db.add(pr)
+        db.commit()
+        db.refresh(pr)
 
-    pr.status = "completed"
-    db.add(pr)
-    db.commit()
-    db.refresh(pr)
+    if ok and pr.current_step_index >= len(steps):
+        pr.status = "completed"
+        db.add(pr)
+        db.commit()
+        db.refresh(pr)
 
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
     return PipelineExecuteAllOut(
-        ok=True,
+        ok=ok,
         pipeline_run=_run_to_out(db, pr, steps),
         created_run_ids=created_run_ids,
     )
+
+
+# -------------------------
+# V3.1 OPTION A: Alias routes
+# -------------------------
+@router.get("/pipeline-runs/{pipeline_run_id}", response_model=PipelineRunOut)
+def get_pipeline_run_alias(
+    pipeline_run_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    return get_pipeline_run(pipeline_run_id=pipeline_run_id, db=db, user=user)
+
+
+@router.post("/pipeline-runs/{pipeline_run_id}/execute-next", response_model=PipelineNextOut)
+def execute_next_alias(
+    pipeline_run_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    return run_next_step(pipeline_run_id=pipeline_run_id, db=db, user=user)
+
+
+@router.post("/pipeline-runs/{pipeline_run_id}/execute-all", response_model=PipelineExecuteAllOut)
+def execute_all_alias(
+    pipeline_run_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    return execute_all_steps(pipeline_run_id=pipeline_run_id, db=db, user=user)
