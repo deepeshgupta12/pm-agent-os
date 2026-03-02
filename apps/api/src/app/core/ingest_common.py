@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -47,7 +48,6 @@ def get_or_create_source(
     db.refresh(s)
     return s
 
-
 def upsert_document(
     db: Session,
     *,
@@ -57,6 +57,8 @@ def upsert_document(
     title: str,
     raw_text: str,
     meta: Dict[str, Any],
+    source_created_at: Optional[datetime] = None,
+    source_updated_at: Optional[datetime] = None,
 ) -> Tuple[Document, bool]:
     """
     Returns (doc, created_new).
@@ -76,6 +78,8 @@ def upsert_document(
         doc.title = title
         doc.raw_text = raw_text
         doc.meta = meta
+        doc.source_created_at = source_created_at
+        doc.source_updated_at = source_updated_at
         db.add(doc)
         db.commit()
         db.refresh(doc)
@@ -88,6 +92,8 @@ def upsert_document(
         title=title,
         raw_text=raw_text,
         meta=meta,
+        source_created_at=source_created_at,
+        source_updated_at=source_updated_at,
     )
     db.add(doc)
     db.commit()

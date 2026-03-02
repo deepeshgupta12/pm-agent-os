@@ -12,7 +12,7 @@ from reportlab.pdfgen import canvas
 
 def _wrap_text(text: str, font: str, font_size: int, max_width: float) -> List[str]:
     """
-    Very simple word-wrap for PDF.
+    Simple word-wrap for PDF.
     """
     words = text.split()
     lines: List[str] = []
@@ -32,11 +32,17 @@ def _wrap_text(text: str, font: str, font_size: int, max_width: float) -> List[s
     return lines
 
 
+_BULLET_RE = re.compile(r"^(\-|\*)\s+")
+_NUM_RE = re.compile(r"^(\d+)\.\s+")
+
+
 def markdown_to_pdf_bytes(title: str, markdown: str) -> bytes:
     """
-    Minimal Markdown → PDF:
+    Minimal Markdown → PDF (small upgrade):
     - # / ## headings
     - bullets starting with '-' or '*'
+    - numbered lists like '1. '
+    - fenced code blocks ``` ... ``` rendered in Courier
     - paragraphs
     """
     buf = io.BytesIO()
@@ -60,7 +66,7 @@ def markdown_to_pdf_bytes(title: str, markdown: str) -> bytes:
     # Title
     c.setFont("Helvetica-Bold", 16)
     ensure_space(2, 18)
-    c.drawString(left, y, title)
+    c.drawString(left, y, title or "Export")
     y -= 22
 
     c.setFont("Helvetica", 10)
@@ -68,13 +74,33 @@ def markdown_to_pdf_bytes(title: str, markdown: str) -> bytes:
     c.drawString(left, y, "Exported from PM Agent OS")
     y -= 18
 
-    # Body
-    lines = markdown.splitlines()
+    lines = (markdown or "").splitlines()
+
+    in_code = False
+    code_font = "Courier"
+    code_size = 9
+
     for raw in lines:
         line = raw.rstrip()
 
+        # toggle fenced code
+        if line.strip().startswith("```"):
+            in_code = not in_code
+            # add a tiny gap around fences
+            y -= 6
+            continue
+
         if not line.strip():
             y -= 8
+            continue
+
+        if in_code:
+            c.setFont(code_font, code_size)
+            wrapped = _wrap_text(line, code_font, code_size, max_width)
+            ensure_space(len(wrapped), 12)
+            for w in wrapped:
+                c.drawString(left, y, w)
+                y -= 12
             continue
 
         # Heading 1
@@ -104,17 +130,34 @@ def markdown_to_pdf_bytes(title: str, markdown: str) -> bytes:
             continue
 
         # Bullet
-        if re.match(r"^(\-|\*)\s+", line):
-            txt = re.sub(r"^(\-|\*)\s+", "", line).strip()
+        if _BULLET_RE.match(line):
+            txt = _BULLET_RE.sub("", line).strip()
             c.setFont("Helvetica", 11)
-            wrapped = _wrap_text(txt, "Helvetica", 11, max_width - 14)
+            wrapped = _wrap_text(txt, "Helvetica", 11, max_width - 18)
             ensure_space(len(wrapped), 14)
             if wrapped:
                 c.drawString(left, y, u"\u2022")
-                c.drawString(left + 12, y, wrapped[0])
+                c.drawString(left + 14, y, wrapped[0])
                 y -= 14
                 for w in wrapped[1:]:
-                    c.drawString(left + 12, y, w)
+                    c.drawString(left + 14, y, w)
+                    y -= 14
+            continue
+
+        # Numbered list
+        nm = _NUM_RE.match(line)
+        if nm:
+            prefix = nm.group(1) + "."
+            txt = _NUM_RE.sub("", line).strip()
+            c.setFont("Helvetica", 11)
+            wrapped = _wrap_text(txt, "Helvetica", 11, max_width - 24)
+            ensure_space(len(wrapped), 14)
+            if wrapped:
+                c.drawString(left, y, prefix)
+                c.drawString(left + 18, y, wrapped[0])
+                y -= 14
+                for w in wrapped[1:]:
+                    c.drawString(left + 18, y, w)
                     y -= 14
             continue
 

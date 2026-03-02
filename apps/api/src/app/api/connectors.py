@@ -11,9 +11,9 @@ from sqlalchemy.orm import Session
 from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
 from app.core.github_client import GitHubClient, GitHubAPIError
 from app.core.ingest_common import get_or_create_source, upsert_document, rebuild_chunks, embed_document
+from app.core.google_client import GoogleClient, GoogleAPIError
 from app.db.session import get_db
 from app.db.models import Connector, IngestionJob, User
-from app.core.google_client import GoogleClient, GoogleAPIError
 from app.schemas.connectors import (
     ConnectorCreateIn,
     ConnectorUpdateIn,
@@ -34,6 +34,36 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
     if not dt:
         return None
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_rfc3339(s: Optional[str]) -> Optional[datetime]:
+    """
+    Parse RFC3339 timestamps from Google APIs.
+    Example: "2026-02-27T10:11:12.345Z"
+    """
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            s = s.replace("Z", "+00:00")
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _parse_github_ts(s: Optional[str]) -> Optional[datetime]:
+    """
+    Parse GitHub ISO 8601 timestamps.
+    Example: "2026-02-27T10:11:12Z"
+    """
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            s = s.replace("Z", "+00:00")
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
 
 
 def _to_out(c: Connector) -> ConnectorOut:
@@ -295,6 +325,7 @@ def create_docs_ingestion_job(
                 **(d.meta or {}),
             }
 
+            # Manual docs payload has no canonical upstream timestamps; leave as None.
             doc, created = upsert_document(
                 db,
                 workspace_id=ws.id,
@@ -303,6 +334,8 @@ def create_docs_ingestion_job(
                 title=d.title,
                 raw_text=d.text,
                 meta=meta,
+                source_created_at=None,
+                source_updated_at=None,
             )
             if created:
                 stats["docs_created"] += 1
@@ -431,6 +464,10 @@ def create_github_ingestion_job(
                 title = f"[Release] {name}".strip()
                 raw = f"# {title}\n\nTag: {tag}\n\nURL: {url}\n\n{body}".strip()
 
+                # Canonical timestamps from GitHub
+                src_created = _parse_github_ts(rel.get("published_at") or rel.get("created_at"))
+                src_updated = _parse_github_ts(rel.get("updated_at") or rel.get("published_at"))
+
                 meta = {
                     "kind": "release",
                     "external_id": f"release:{rid}",
@@ -439,6 +476,9 @@ def create_github_ingestion_job(
                     "connector_id": str(c.id),
                     "ingestion_job_id": str(job.id),
                     "repo": f"{owner}/{repo}",
+                    "github_created_at": rel.get("created_at"),
+                    "github_updated_at": rel.get("updated_at"),
+                    "github_published_at": rel.get("published_at"),
                     "fetched_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 }
 
@@ -450,6 +490,8 @@ def create_github_ingestion_job(
                     title=title,
                     raw_text=raw,
                     meta=meta,
+                    source_created_at=src_created,
+                    source_updated_at=src_updated,
                 )
                 stats["documents_upserted"] += 1
                 if created:
@@ -478,6 +520,10 @@ def create_github_ingestion_job(
                 title = f"[PR] #{number} {pr_title}".strip()
                 raw = f"# {title}\n\nState: {state}\nMerged: {merged}\n\nURL: {url}\n\n{body}".strip()
 
+                # Canonical timestamps from GitHub
+                src_created = _parse_github_ts(pr.get("created_at"))
+                src_updated = _parse_github_ts(pr.get("updated_at"))
+
                 meta = {
                     "kind": "pull_request",
                     "external_id": f"pr:{pid}",
@@ -488,6 +534,9 @@ def create_github_ingestion_job(
                     "connector_id": str(c.id),
                     "ingestion_job_id": str(job.id),
                     "repo": f"{owner}/{repo}",
+                    "github_created_at": pr.get("created_at"),
+                    "github_updated_at": pr.get("updated_at"),
+                    "github_merged_at": pr.get("merged_at"),
                     "fetched_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 }
 
@@ -499,6 +548,8 @@ def create_github_ingestion_job(
                     title=title,
                     raw_text=raw,
                     meta=meta,
+                    source_created_at=src_created,
+                    source_updated_at=src_updated,
                 )
                 stats["documents_upserted"] += 1
                 if created:
@@ -529,6 +580,10 @@ def create_github_ingestion_job(
                 title = f"[Issue] #{number} {title_txt}".strip()
                 raw = f"# {title}\n\nState: {state}\n\nLabels: {', '.join(labels)}\n\nURL: {url}\n\n{body}".strip()
 
+                # Canonical timestamps from GitHub
+                src_created = _parse_github_ts(issue.get("created_at"))
+                src_updated = _parse_github_ts(issue.get("updated_at"))
+
                 meta = {
                     "kind": "issue",
                     "external_id": f"issue:{iid}",
@@ -539,6 +594,9 @@ def create_github_ingestion_job(
                     "connector_id": str(c.id),
                     "ingestion_job_id": str(job.id),
                     "repo": f"{owner}/{repo}",
+                    "github_created_at": issue.get("created_at"),
+                    "github_updated_at": issue.get("updated_at"),
+                    "github_closed_at": issue.get("closed_at"),
                     "fetched_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 }
 
@@ -550,6 +608,8 @@ def create_github_ingestion_job(
                     title=title,
                     raw_text=raw,
                     meta=meta,
+                    source_created_at=src_created,
+                    source_updated_at=src_updated,
                 )
                 stats["documents_upserted"] += 1
                 if created:
@@ -709,8 +769,11 @@ def create_google_docs_ingestion_job(
                     ext_id = f"docx:{file_id}" if payload.upsert else None
                     kind = "docx"
                 else:
-                    # Shouldn't happen due to query filter, but keep safe.
                     continue
+
+                # Canonical upstream timestamps
+                src_created = _parse_rfc3339(f.get("createdTime"))
+                src_updated = _parse_rfc3339(f.get("modifiedTime"))
 
                 meta = {
                     "provider": "google_drive",
@@ -735,6 +798,8 @@ def create_google_docs_ingestion_job(
                     title=title,
                     raw_text=text,
                     meta=meta,
+                    source_created_at=src_created,
+                    source_updated_at=src_updated,
                 )
                 stats["documents_upserted"] += 1
                 if created:

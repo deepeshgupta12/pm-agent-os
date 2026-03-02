@@ -59,6 +59,7 @@ export default function ArtifactDetailPage() {
   const role = (myRole?.role || "").toLowerCase();
   const canWrite = role === "admin" || role === "member";
   const isAdmin = role === "admin";
+  const isViewer = role === "viewer";
 
   const latestReview = useMemo(() => (reviews.length > 0 ? reviews[0] : null), [reviews]);
   const latestReviewState = (latestReview?.state || "").toLowerCase();
@@ -305,6 +306,10 @@ export default function ArtifactDetailPage() {
     window.open(`${API_BASE}/artifacts/${aid}/export/pdf`, "_blank");
   }
 
+  function exportDocx() {
+    window.open(`${API_BASE}/artifacts/${aid}/export/docx`, "_blank");
+  }
+
   async function loadDiff() {
     if (!otherId) return;
     setDiffLoading(true);
@@ -337,6 +342,12 @@ export default function ArtifactDetailPage() {
     return null;
   }, [canWrite, isFinal, isInReview, latestReviewState]);
 
+  const viewerHint = useMemo(() => {
+    if (!myRole) return null;
+    if (!isViewer) return null;
+    return "You have viewer access. You can export and copy, but cannot edit, version, submit for review, or publish.";
+  }, [myRole, isViewer]);
+
   return (
     <Stack gap="md">
       <Group justify="space-between">
@@ -345,6 +356,12 @@ export default function ArtifactDetailPage() {
           Back
         </Button>
       </Group>
+
+      {viewerHint ? (
+        <Card withBorder>
+          <Text c="dimmed">{viewerHint}</Text>
+        </Card>
+      ) : null}
 
       {err && (
         <Card withBorder>
@@ -374,9 +391,7 @@ export default function ArtifactDetailPage() {
               <Stack gap="xs">
                 <Group justify="space-between">
                   <Text fw={700}>Approvals</Text>
-                  <Badge variant="light">
-                    {isFinal ? "final" : isInReview ? "in_review" : "draft"}
-                  </Badge>
+                  <Badge variant="light">{isFinal ? "final" : isInReview ? "in_review" : "draft"}</Badge>
                 </Group>
 
                 {latestReview ? (
@@ -480,6 +495,9 @@ export default function ArtifactDetailPage() {
               </Button>
               <Button variant="default" onClick={exportPdf}>
                 Export PDF
+              </Button>
+              <Button variant="default" onClick={exportDocx}>
+                Export DOCX
               </Button>
 
               {!isFinal ? (

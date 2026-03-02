@@ -13,9 +13,22 @@ import {
   Title,
   NumberInput,
   Divider,
+  Collapse,
+  Code,
 } from "@mantine/core";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { apiFetch } from "../apiClient";
-import type { Artifact, Evidence, Run, RunLog, RunTimelineEvent } from "../types";
+import type {
+  Artifact,
+  Evidence,
+  Run,
+  RunLog,
+  RunTimelineEvent,
+  RagDebugResponse,
+} from "../types";
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL as string;
 
 const ARTIFACT_TYPES = [
   "problem_brief",
@@ -51,6 +64,14 @@ function logBadgeColor(level: string): string {
   return "blue";
 }
 
+function safeJson(v: any): string {
+  try {
+    return JSON.stringify(v ?? {}, null, 2);
+  } catch {
+    return "{}";
+  }
+}
+
 export default function RunDetailPage() {
   const { runId } = useParams();
   const rid = runId || "";
@@ -61,6 +82,11 @@ export default function RunDetailPage() {
   const [timeline, setTimeline] = useState<RunTimelineEvent[]>([]);
   const [logs, setLogs] = useState<RunLog[]>([]);
   const [err, setErr] = useState<string | null>(null);
+
+  // RAG debug panel
+  const [ragOpen, setRagOpen] = useState(false);
+  const [ragLoading, setRagLoading] = useState(false);
+  const [ragDebug, setRagDebug] = useState<RagDebugResponse | null>(null);
 
   // Create artifact form
   const [atype, setAtype] = useState<string | null>("prd");
@@ -105,6 +131,11 @@ export default function RunDetailPage() {
     return artifacts[0]; // newest first
   }, [artifacts]);
 
+  const retrievalCfg = useMemo(() => {
+    const ip: any = run?.input_payload ?? {};
+    return (ip?._retrieval as any) || null;
+  }, [run]);
+
   const filteredLogs = useMemo(() => {
     if (logFilter === "all") return logs;
     return logs.filter((l) => l.level === logFilter);
@@ -134,7 +165,6 @@ export default function RunDetailPage() {
     }
     setEvidence(evRes.data);
 
-    // Timeline
     const tlRes = await apiFetch<RunTimelineEvent[]>(`/runs/${rid}/timeline`, { method: "GET" });
     if (!tlRes.ok) {
       setErr(`Timeline load failed: ${tlRes.status} ${tlRes.error}`);
@@ -142,13 +172,35 @@ export default function RunDetailPage() {
     }
     setTimeline(tlRes.data);
 
-    // Logs
     const logsRes = await apiFetch<RunLog[]>(`/runs/${rid}/logs`, { method: "GET" });
     if (!logsRes.ok) {
       setErr(`Logs load failed: ${logsRes.status} ${logsRes.error}`);
       return;
     }
     setLogs(logsRes.data);
+  }
+
+  async function loadRagDebug() {
+    setRagLoading(true);
+    setErr(null);
+
+    const res = await apiFetch<RagDebugResponse>(`/runs/${rid}/rag-debug`, { method: "GET" });
+    setRagLoading(false);
+
+    if (!res.ok) {
+      setErr(`RAG debug failed: ${res.status} ${res.error}`);
+      setRagDebug(null);
+      return;
+    }
+    setRagDebug(res.data);
+  }
+
+  function exportPdf(artifactId: string) {
+    window.open(`${API_BASE}/artifacts/${artifactId}/export/pdf`, "_blank");
+  }
+
+  function exportDocx(artifactId: string) {
+    window.open(`${API_BASE}/artifacts/${artifactId}/export/docx`, "_blank");
   }
 
   async function createArtifact() {
@@ -236,6 +288,7 @@ export default function RunDetailPage() {
     }
 
     await loadAll();
+    if (ragOpen) await loadRagDebug();
   }
 
   async function regenerate() {
@@ -293,6 +346,7 @@ export default function RunDetailPage() {
     }
 
     await loadAll();
+    if (ragOpen) await loadRagDebug();
   }
 
   useEffect(() => {
@@ -301,15 +355,29 @@ export default function RunDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rid]);
 
+  useEffect(() => {
+    if (!rid) return;
+    if (!ragOpen) return;
+    void loadRagDebug();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ragOpen, rid]);
+
   return (
     <Stack gap="md">
       <Group justify="space-between">
-        <Title order={2}>Run</Title>
+        <Title order={2}>Run · RAG Console</Title>
         <Button component={Link} to="/workspaces" variant="light">
           Back to Workspaces
         </Button>
       </Group>
 
+      {err && (
+        <Card withBorder>
+          <Text c="red">{err}</Text>
+        </Card>
+      )}
+
+      {/* Run overview */}
       {run ? (
         <Card withBorder>
           <Stack gap="xs">
@@ -317,6 +385,7 @@ export default function RunDetailPage() {
               <Group gap="sm">
                 <Badge>{run.status}</Badge>
                 <Text fw={700}>{run.agent_id}</Text>
+                {retrievalCfg ? <Badge variant="light">retrieval enabled</Badge> : <Badge variant="light">no retrieval</Badge>}
               </Group>
               <Text size="xs" c="dimmed">
                 {run.id}
@@ -325,6 +394,34 @@ export default function RunDetailPage() {
 
             {run.output_summary ? <Text c="dimmed">{run.output_summary}</Text> : null}
 
+            {/* Retrieval summary */}
+            {retrievalCfg ? (
+              <Card withBorder>
+                <Stack gap={6}>
+                  <Text fw={600}>Retrieval config</Text>
+                  <Group gap="sm">
+                    <Text size="sm">
+                      query: <Code>{String(retrievalCfg.query ?? "")}</Code>
+                    </Text>
+                    <Text size="sm">
+                      k: <Code>{String(retrievalCfg.k ?? "")}</Code>
+                    </Text>
+                    <Text size="sm">
+                      alpha: <Code>{String(retrievalCfg.alpha ?? "")}</Code>
+                    </Text>
+                    <Text size="sm">
+                      evidence_count: <Code>{String(retrievalCfg.evidence_count ?? "")}</Code>
+                    </Text>
+                  </Group>
+                  <Text size="sm" c="dimmed">
+                    source_types: {Array.isArray(retrievalCfg.source_types) ? retrievalCfg.source_types.join(", ") : "(none)"} · timeframe:{" "}
+                    {retrievalCfg.timeframe ? JSON.stringify(retrievalCfg.timeframe) : "(none)"}
+                  </Text>
+                </Stack>
+              </Card>
+            ) : null}
+
+            {/* Regenerate */}
             <Group gap="sm">
               <Button onClick={regenerate} loading={regenLoading} disabled={evidence.length === 0}>
                 Regenerate using evidence
@@ -336,6 +433,7 @@ export default function RunDetailPage() {
               </Text>
             </Group>
 
+            {/* Input payload */}
             <Card withBorder>
               <Text fw={600} mb={6}>
                 Input payload
@@ -344,27 +442,122 @@ export default function RunDetailPage() {
                 {JSON.stringify(run.input_payload, null, 2)}
               </pre>
             </Card>
-
-            {latestArtifact ? (
-              <Group>
-                <Button component={Link} to={`/artifacts/${latestArtifact.id}`}>
-                  Open latest artifact
-                </Button>
-              </Group>
-            ) : null}
           </Stack>
         </Card>
       ) : (
         <Text c="dimmed">Loading run…</Text>
       )}
 
-      {err && (
-        <Card withBorder>
-          <Text c="red">{err}</Text>
-        </Card>
-      )}
+      {/* Latest artifact console */}
+      <Card withBorder>
+        <Stack gap="sm">
+          <Group justify="space-between">
+            <Text fw={700}>Latest Artifact</Text>
+            {latestArtifact ? (
+              <Group>
+                <Button size="xs" variant="light" component={Link} to={`/artifacts/${latestArtifact.id}`}>
+                  Open
+                </Button>
+                <Button size="xs" variant="default" onClick={() => exportPdf(latestArtifact.id)}>
+                  Export PDF
+                </Button>
+                <Button size="xs" variant="default" onClick={() => exportDocx(latestArtifact.id)}>
+                  Export DOCX
+                </Button>
+              </Group>
+            ) : (
+              <Badge variant="light">none</Badge>
+            )}
+          </Group>
 
-      {/* NEW: Timeline */}
+          {!latestArtifact ? (
+            <Text c="dimmed">No artifacts yet.</Text>
+          ) : (
+            <Card withBorder style={{ maxHeight: 420, overflow: "auto" }}>
+              <Stack gap={6}>
+                <Text size="sm" c="dimmed">
+                  {latestArtifact.type} · v{latestArtifact.version} · {latestArtifact.status} · key={latestArtifact.logical_key}
+                </Text>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{latestArtifact.content_md || ""}</ReactMarkdown>
+              </Stack>
+            </Card>
+          )}
+        </Stack>
+      </Card>
+
+      {/* RAG debug */}
+      <Card withBorder>
+        <Stack gap="sm">
+          <Group justify="space-between">
+            <Text fw={700}>RAG Debug</Text>
+            <Group>
+              <Button variant="light" onClick={() => setRagOpen((x) => !x)}>
+                {ragOpen ? "Hide" : "Show"}
+              </Button>
+              <Button variant="default" onClick={loadRagDebug} loading={ragLoading} disabled={!ragOpen}>
+                Refresh
+              </Button>
+            </Group>
+          </Group>
+
+          <Collapse in={ragOpen}>
+            <Stack gap="sm">
+              <Card withBorder>
+                <Text fw={600} mb={6}>
+                  retrieval_config (from run.input_payload._retrieval)
+                </Text>
+                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+                  {safeJson(retrievalCfg)}
+                </pre>
+              </Card>
+
+              <Card withBorder>
+                <Text fw={600} mb={6}>
+                  retrieval_log (latest “Pre-retrieval…” RunLog meta)
+                </Text>
+                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+                  {safeJson(ragDebug?.retrieval_log ?? null)}
+                </pre>
+              </Card>
+
+              <Card withBorder>
+                <Group justify="space-between">
+                  <Text fw={600}>Evidence (from rag-debug)</Text>
+                  <Badge variant="light">{ragDebug?.evidence?.length ?? 0}</Badge>
+                </Group>
+                <Divider my="sm" />
+                {(!ragDebug || !ragDebug.evidence || ragDebug.evidence.length === 0) ? (
+                  <Text c="dimmed">No evidence attached.</Text>
+                ) : (
+                  <Stack gap="xs">
+                    {ragDebug.evidence.map((e) => (
+                      <Card key={e.id} withBorder>
+                        <Stack gap={4}>
+                          <Group gap="sm">
+                            <Badge variant="light">{e.kind}</Badge>
+                            <Text fw={600}>{e.source_name}</Text>
+                            {e.source_ref ? (
+                              <Text size="sm" c="dimmed">
+                                {e.source_ref}
+                              </Text>
+                            ) : null}
+                          </Group>
+                          <Text size="sm">{e.excerpt}</Text>
+                          <Text size="xs" c="dimmed">
+                            {e.id}
+                          </Text>
+                        </Stack>
+                      </Card>
+                    ))}
+                  </Stack>
+                )}
+              </Card>
+            </Stack>
+          </Collapse>
+        </Stack>
+      </Card>
+
+      {/* Timeline */}
       <Card withBorder>
         <Stack gap="sm">
           <Group justify="space-between">
@@ -394,7 +587,6 @@ export default function RunDetailPage() {
                       </Text>
                     </Stack>
 
-                    {/* Quick action if artifact */}
                     {ev.kind === "artifact" && ev.ref_id ? (
                       <Button size="xs" variant="light" component={Link} to={`/artifacts/${ev.ref_id}`}>
                         Open
@@ -408,7 +600,7 @@ export default function RunDetailPage() {
         </Stack>
       </Card>
 
-      {/* NEW: Logs */}
+      {/* Logs */}
       <Card withBorder>
         <Stack gap="sm">
           <Group justify="space-between">
@@ -502,7 +694,7 @@ export default function RunDetailPage() {
         <Stack gap="sm">
           <Text fw={700}>Auto-add Evidence (from Retrieval)</Text>
           <Text size="sm" c="dimmed">
-            Provide a query. We’ll fetch top retrieval chunks (docs/issues/manual) and attach them as evidence.
+            Provide a query. We’ll fetch top retrieval chunks and attach them as evidence.
           </Text>
 
           <Divider />
@@ -564,46 +756,6 @@ export default function RunDetailPage() {
         </Stack>
       </Card>
 
-      {/* Artifacts list */}
-      <Card withBorder>
-        <Stack gap="sm">
-          <Group justify="space-between">
-            <Text fw={700}>Artifacts</Text>
-            <Button variant="light" onClick={loadAll}>
-              Refresh
-            </Button>
-          </Group>
-
-          {artifacts.length === 0 ? (
-            <Text c="dimmed">No artifacts yet.</Text>
-          ) : (
-            <Stack gap="xs">
-              {artifacts.map((a) => (
-                <Card key={a.id} withBorder>
-                  <Group justify="space-between" align="flex-start">
-                    <Stack gap={2}>
-                      <Group gap="sm">
-                        <Badge variant="light">{a.type}</Badge>
-                        <Badge>{a.status}</Badge>
-                        <Text fw={600}>
-                          v{a.version} · {a.title}
-                        </Text>
-                      </Group>
-                      <Text size="xs" c="dimmed">
-                        {a.id} · key={a.logical_key}
-                      </Text>
-                    </Stack>
-                    <Button component={Link} to={`/artifacts/${a.id}`}>
-                      Open
-                    </Button>
-                  </Group>
-                </Card>
-              ))}
-            </Stack>
-          )}
-        </Stack>
-      </Card>
-
       {/* Evidence create */}
       <Card withBorder>
         <Stack gap="sm">
@@ -649,44 +801,6 @@ export default function RunDetailPage() {
           <Button onClick={addEvidence} loading={creatingEvidence}>
             Add Evidence
           </Button>
-        </Stack>
-      </Card>
-
-      {/* Evidence list */}
-      <Card withBorder>
-        <Stack gap="sm">
-          <Group justify="space-between">
-            <Text fw={700}>Evidence</Text>
-            <Button variant="light" onClick={loadAll}>
-              Refresh
-            </Button>
-          </Group>
-
-          {evidence.length === 0 ? (
-            <Text c="dimmed">No evidence yet.</Text>
-          ) : (
-            <Stack gap="xs">
-              {evidence.map((e) => (
-                <Card key={e.id} withBorder>
-                  <Stack gap={4}>
-                    <Group gap="sm">
-                      <Badge variant="light">{e.kind}</Badge>
-                      <Text fw={600}>{e.source_name}</Text>
-                      {e.source_ref ? (
-                        <Text size="sm" c="dimmed">
-                          {e.source_ref}
-                        </Text>
-                      ) : null}
-                    </Group>
-                    <Text size="sm">{e.excerpt}</Text>
-                    <Text size="xs" c="dimmed">
-                      {e.id}
-                    </Text>
-                  </Stack>
-                </Card>
-              ))}
-            </Stack>
-          )}
         </Stack>
       </Card>
     </Stack>

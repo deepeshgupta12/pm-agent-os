@@ -55,6 +55,10 @@ class Document(Base):
     raw_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
     meta: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
+    # NEW: canonical timestamps from the upstream source system (Drive/GitHub/etc)
+    source_created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()

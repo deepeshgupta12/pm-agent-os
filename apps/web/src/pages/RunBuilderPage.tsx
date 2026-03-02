@@ -200,7 +200,21 @@ export default function RunBuilderPage() {
 
       const res = await apiFetch<Run>(`/workspaces/${wid}/runs`, {
         method: "POST",
-        body: JSON.stringify({ agent_id: agentId, input_payload: inputPayload }),
+        body: JSON.stringify({
+          agent_id: agentId,
+          input_payload: inputPayload,
+          retrieval: {
+            enabled: Boolean(rq.trim()),
+            query: rq.trim(),
+            k: rk || 6,
+            alpha: ralpha ?? 0.65,
+            source_types: selectedSources,
+            timeframe:
+              preset === "custom"
+                ? { preset: "custom", start_date: startDate.trim(), end_date: endDate.trim() }
+                : { preset },
+          },
+        }),
       });
 
       setCreating(false);
