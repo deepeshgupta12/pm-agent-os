@@ -114,6 +114,13 @@ export type PipelineStep = {
   latest_artifact_version?: number | null;
   latest_artifact_type?: string | null;
   latest_artifact_title?: string | null;
+
+  // V3.2
+  retrieval_enabled?: boolean | null;
+  retrieval_query?: string | null;
+  retrieval_evidence_count?: number | null;
+  retrieval_batch_id?: string | null;
+  retrieval_batch_kind?: string | null;
 };
 
 export type PipelineRun = {
