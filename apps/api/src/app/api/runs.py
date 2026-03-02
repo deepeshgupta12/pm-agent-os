@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
@@ -27,18 +28,14 @@ from app.db.models import (
     Artifact,
     Evidence,
     User,
-    RunStatusEvent,  # NEW
+    RunStatusEvent,
 )
-from app.db.retrieval_models import Source
 from app.schemas.core import RunCreateIn, RunOut, RunStatusUpdateIn
 from app.schemas.core import RunLogCreateIn, RunLogOut, RunTimelineEventOut
 
 router = APIRouter(tags=["runs"])
 
 
-# -------------------------
-# Helpers
-# -------------------------
 def _parse_uuid(id_str: str) -> uuid.UUID:
     try:
         return uuid.UUID(id_str)
@@ -87,7 +84,6 @@ def _set_run_status(
     db.commit()
     db.refresh(run)
 
-    # write auditable status transition
     _write_status_event(
         db,
         run=run,
@@ -98,74 +94,47 @@ def _set_run_status(
     )
 
 
-def _call_hybrid_retrieve(
-    db: Session,
-    *,
-    workspace_id: str,
-    q: str,
-    k: int,
-    alpha: float,
-    source_types: Optional[List[str]] = None,
-    timeframe: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
+def _timeframe_to_bounds(timeframe: Optional[Dict[str, Any]]) -> tuple[Optional[datetime], Optional[datetime]]:
     """
-    Compatibility shim:
-    - If hybrid_retrieve supports source/timeframe args, pass them.
-    - Otherwise fall back and filter in Python.
+    Accepts the RunCreate retrieval.timeframe JSON (your existing structure) and returns (start_ts,end_ts) in UTC.
+
+    Supported:
+      - {"preset":"7d"|"30d"|"90d"}
+      - {"preset":"custom","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}
     """
-    source_types = source_types or []
-    timeframe = timeframe or {}
+    tf = timeframe or {}
+    preset = (tf.get("preset") or "").strip().lower()
+    now = datetime.now(timezone.utc)
 
-    try:
-        # Newer signature (if you already added it)
-        return hybrid_retrieve(
-            db,
-            workspace_id=workspace_id,
-            q=q,
-            k=k,
-            alpha=alpha,
-            source_types=source_types,
-            timeframe=timeframe,
-        )
-    except TypeError:
-        items = hybrid_retrieve(db, workspace_id=workspace_id, q=q, k=k, alpha=alpha)
+    if preset in {"7d", "30d", "90d"}:
+        days = int(preset.replace("d", ""))
+        return now - timedelta(days=days), now
 
-        if source_types:
-            src_ids = set(
-                str(x)
-                for x in db.execute(
-                    select(Source.id).where(
-                        Source.workspace_id == uuid.UUID(workspace_id),
-                        Source.type.in_(source_types),
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            items = [it for it in items if str(it.get("source_id", "")) in src_ids]
+    if preset == "custom":
+        start_date = tf.get("start_date")
+        end_date = tf.get("end_date")
 
-        # timeframe filtering best-effort no-op in old core
-        return items
+        def parse_ymd(s: str) -> datetime:
+            dt = datetime.strptime(s, "%Y-%m-%d")
+            return dt.replace(tzinfo=timezone.utc)
+
+        start_ts = parse_ymd(start_date) if start_date else None
+        end_ts = parse_ymd(end_date) if end_date else None
+        if end_ts is not None:
+            end_ts = end_ts + timedelta(days=1) - timedelta(seconds=1)
+        return start_ts, end_ts
+
+    # no timeframe
+    return None, None
 
 
 def _no_evidence_md(agent_id: str, input_payload: Dict[str, Any], retrieval_meta: Dict[str, Any]) -> Tuple[str, str, str]:
-    """
-    Evidence=0 mode:
-    - do NOT call LLM
-    - return a draft that is explicitly "no evidence found" + questions-only.
-    """
     artifact_type = AGENT_TO_DEFAULT_ARTIFACT_TYPE.get(agent_id, "strategy_memo")
     title = f"{artifact_type.replace('_', ' ').title()} — Draft"
 
     goal = (input_payload.get("goal") or "").strip()
     context = (input_payload.get("context") or "").strip()
     constraints = (input_payload.get("constraints") or "").strip()
-
-    q = retrieval_meta.get("query") or retrieval_meta.get("q") or ""
-    k = retrieval_meta.get("k")
-    alpha = retrieval_meta.get("alpha")
-    source_types = retrieval_meta.get("source_types")
-    timeframe = retrieval_meta.get("timeframe")
 
     md = f"""# {title}
 
@@ -182,11 +151,14 @@ No evidence was found for the requested retrieval query, so this draft does **no
 {constraints or "- (not provided)"}
 
 ## Retrieval Attempt
-- Query: `{q}`
-- k: `{k}`
-- alpha: `{alpha}`
-- source_types: `{source_types}`
-- timeframe: `{timeframe}`
+- Query: `{retrieval_meta.get("query")}`
+- k: `{retrieval_meta.get("k")}`
+- alpha: `{retrieval_meta.get("alpha")}`
+- source_types: `{retrieval_meta.get("source_types")}`
+- timeframe: `{retrieval_meta.get("timeframe")}`
+- min_score: `{retrieval_meta.get("min_score")}`
+- overfetch_k: `{retrieval_meta.get("overfetch_k")}`
+- rerank: `{retrieval_meta.get("rerank")}`
 - evidence_count: `0`
 
 ## What this means
@@ -196,8 +168,8 @@ No evidence was found for the requested retrieval query, so this draft does **no
 ## Open Questions (required to proceed)
 1. Which exact doc(s) should be considered the source of truth for this run (title or link)?
 2. Are those docs already ingested into this workspace? If yes, confirm the correct source_type (docs/github/manual).
-3. Should retrieval broaden (higher k, multiple source_types) or narrow (more precise query)?
-4. Do we need embeddings (embed_after=true) for these documents to improve recall?
+3. Should retrieval broaden (higher k / overfetch / multiple source_types) or narrow (more precise query)?
+4. Should rerank be enabled (rerank=true) and do we need embeddings (embed_after=true) for recall?
 
 ## Next Actions
 - Ingest/sync the missing documents into the workspace
@@ -213,15 +185,11 @@ def _generate_md_with_evidence(
     input_payload: Dict[str, Any],
     evidence_items: List[Evidence],
 ) -> Tuple[str, str, str]:
-    """
-    Returns (artifact_type, title, md) for initial artifact, grounded in evidence if LLM is on.
-    """
     artifact_type = AGENT_TO_DEFAULT_ARTIFACT_TYPE.get(agent_id, "strategy_memo")
     title = f"{artifact_type.replace('_', ' ').title()} — Draft"
 
     ev_text = format_evidence_for_prompt(evidence_items)
 
-    # If LLM on -> enforce citations
     if settings.LLM_ENABLED and settings.OPENAI_API_KEY:
         from app.core.prompts import build_system_prompt, build_user_prompt
         from app.core.llm_client import llm_generate_markdown
@@ -284,16 +252,12 @@ Evidence Pack (cite as [n]):
 
         return artifact_type, title, md
 
-    # LLM off -> deterministic scaffold + note
     artifact_type2, title2, md2 = build_initial_artifact(agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text)
     if len(evidence_items) > 0 and "## Unknowns / Assumptions" not in md2:
         md2 = md2.rstrip() + "\n\n## Unknowns / Assumptions\n- Evidence attached, but citation-grounded generation requires LLM mode.\n"
     return artifact_type2, title2, md2
 
 
-# -------------------------
-# APIs
-# -------------------------
 @router.post("/workspaces/{workspace_id}/runs", response_model=RunOut)
 def create_run(
     workspace_id: str,
@@ -318,18 +282,11 @@ def create_run(
     db.commit()
     db.refresh(r)
 
-    # status history
     _write_status_event(db, run=r, from_status=None, to_status="created", message="Run created", meta={})
-
-    # Move to running
     _set_run_status(db, run=r, to_status="running", message="Run started", meta={})
 
-    # ----------------------------
-    # True RAG: pre-retrieve & attach evidence
-    # ----------------------------
     ev_items: List[Evidence] = []
     rcfg = payload.retrieval
-
     retrieval_meta: Optional[Dict[str, Any]] = None
 
     if rcfg and rcfg.enabled and (rcfg.query or "").strip():
@@ -339,6 +296,13 @@ def create_run(
         source_types = [s.strip() for s in (rcfg.source_types or []) if s.strip()]
         timeframe = rcfg.timeframe or {}
 
+        # V2.1 knobs (use getattr so schema lag won’t break)
+        min_score = getattr(rcfg, "min_score", None)
+        overfetch_k = getattr(rcfg, "overfetch_k", None)
+        rerank = bool(getattr(rcfg, "rerank", False))
+
+        start_ts, end_ts = _timeframe_to_bounds(timeframe)
+
         retrieval_meta = {
             "enabled": True,
             "query": q,
@@ -346,16 +310,23 @@ def create_run(
             "alpha": alpha,
             "source_types": source_types,
             "timeframe": timeframe,
+            "min_score": 0.15 if min_score is None else float(min_score),
+            "overfetch_k": 3 if overfetch_k is None else int(overfetch_k),
+            "rerank": rerank,
         }
 
-        items = _call_hybrid_retrieve(
+        items = hybrid_retrieve(
             db,
             workspace_id=str(ws.id),
             q=q,
             k=k,
             alpha=alpha,
-            source_types=source_types,
-            timeframe=timeframe,
+            source_types=source_types or None,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            min_score=retrieval_meta["min_score"],
+            overfetch_k=retrieval_meta["overfetch_k"],
+            rerank=rerank,
         )
 
         for rank, it in enumerate(items, start=1):
@@ -365,6 +336,8 @@ def create_run(
                 "score_hybrid": float(it.get("score_hybrid") or 0.0),
                 "score_fts": float(it.get("score_fts") or 0.0),
                 "score_vec": float(it.get("score_vec") or 0.0),
+                "score_rerank_bonus": it.get("score_rerank_bonus"),
+                "score_final": it.get("score_final"),
                 "document_title": it.get("document_title", ""),
                 "source_id": it.get("source_id", ""),
                 "chunk_index": int(it.get("chunk_index") or 0),
@@ -374,6 +347,9 @@ def create_run(
                     "alpha": alpha,
                     "source_types": source_types,
                     "timeframe": timeframe,
+                    "min_score": retrieval_meta["min_score"],
+                    "overfetch_k": retrieval_meta["overfetch_k"],
+                    "rerank": rerank,
                 },
             }
 
@@ -392,7 +368,6 @@ def create_run(
         for e in ev_items:
             db.refresh(e)
 
-        # Persist retrieval config on Run.input_payload (V1 hardening)
         retrieval_meta["evidence_count"] = len(ev_items)
         ip = dict(r.input_payload or {})
         ip["_retrieval"] = retrieval_meta
@@ -401,7 +376,6 @@ def create_run(
         db.commit()
         db.refresh(r)
 
-        # Log retrieval action (auditable)
         db.add(
             RunLog(
                 run_id=r.id,
@@ -413,19 +387,17 @@ def create_run(
                     "alpha": alpha,
                     "source_types": source_types,
                     "timeframe": timeframe,
+                    "min_score": retrieval_meta["min_score"],
+                    "overfetch_k": retrieval_meta["overfetch_k"],
+                    "rerank": rerank,
                     "evidence_count": len(ev_items),
                 },
             )
         )
         db.commit()
 
-    # ----------------------------
-    # Generate artifact grounded in evidence
-    # ----------------------------
     if retrieval_meta and retrieval_meta.get("enabled") and len(ev_items) == 0:
-        # Evidence=0 mode (do not call LLM)
         artifact_type, title, md = _no_evidence_md(r.agent_id, r.input_payload, retrieval_meta)
-        # status note
         db.add(
             RunLog(
                 run_id=r.id,
@@ -454,7 +426,6 @@ def create_run(
     db.add(art)
     db.commit()
 
-    # Complete run
     r.output_summary = build_run_summary(agent_id=r.agent_id, artifact_type=artifact_type)
     if ev_items:
         r.output_summary += f" Evidence attached: {len(ev_items)} snippet(s)."
@@ -485,11 +456,7 @@ def create_run(
 def list_runs(workspace_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
     ws, _role = require_workspace_access(workspace_id, db, user)
 
-    runs = (
-        db.execute(select(Run).where(Run.workspace_id == ws.id).order_by(Run.created_at.desc()))
-        .scalars()
-        .all()
-    )
+    runs = db.execute(select(Run).where(Run.workspace_id == ws.id).order_by(Run.created_at.desc())).scalars().all()
     return [
         RunOut(
             id=str(r.id),
@@ -580,14 +547,9 @@ def list_run_logs(run_id: str, db: Session = Depends(get_db), user: User = Depen
     r = db.get(Run, run_id)
     if not r:
         raise HTTPException(status_code=404, detail="Run not found")
-
     _ensure_run_workspace_access(db, r, user)
 
-    rows = (
-        db.execute(select(RunLog).where(RunLog.run_id == r.id).order_by(RunLog.created_at.desc()))
-        .scalars()
-        .all()
-    )
+    rows = db.execute(select(RunLog).where(RunLog.run_id == r.id).order_by(RunLog.created_at.desc())).scalars().all()
     return [_to_log_out(x) for x in rows]
 
 
@@ -604,12 +566,7 @@ def create_run_log(run_id: str, payload: RunLogCreateIn, db: Session = Depends(g
     if level not in {"info", "warn", "error", "debug"}:
         raise HTTPException(status_code=400, detail="Invalid log level")
 
-    l = RunLog(
-        run_id=r.id,
-        level=level,
-        message=payload.message,
-        meta=payload.meta or {},
-    )
+    l = RunLog(run_id=r.id, level=level, message=payload.message, meta=payload.meta or {})
     db.add(l)
     db.commit()
     db.refresh(l)
@@ -618,15 +575,6 @@ def create_run_log(run_id: str, payload: RunLogCreateIn, db: Session = Depends(g
 
 @router.get("/runs/{run_id}/timeline", response_model=list[RunTimelineEventOut])
 def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
-    """
-    Viewer+ read ok.
-    Timeline is a merged view:
-    - run created
-    - status transitions from run_status_events (authoritative)
-    - artifacts
-    - evidence
-    - logs
-    """
     r = db.get(Run, run_id)
     if not r:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -635,7 +583,6 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
 
     events: list[RunTimelineEventOut] = []
 
-    # Run created (always)
     events.append(
         RunTimelineEventOut(
             ts=r.created_at,
@@ -646,7 +593,6 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
         )
     )
 
-    # Status transitions (authoritative)
     status_events = (
         db.execute(select(RunStatusEvent).where(RunStatusEvent.run_id == r.id).order_by(RunStatusEvent.created_at.desc()))
         .scalars()
@@ -668,12 +614,7 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
             )
         )
 
-    # Artifacts
-    arts = (
-        db.execute(select(Artifact).where(Artifact.run_id == r.id).order_by(Artifact.created_at.desc()))
-        .scalars()
-        .all()
-    )
+    arts = db.execute(select(Artifact).where(Artifact.run_id == r.id).order_by(Artifact.created_at.desc())).scalars().all()
     for a in arts:
         events.append(
             RunTimelineEventOut(
@@ -685,12 +626,7 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
             )
         )
 
-    # Evidence
-    evs = (
-        db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc()))
-        .scalars()
-        .all()
-    )
+    evs = db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc())).scalars().all()
     for e in evs:
         events.append(
             RunTimelineEventOut(
@@ -702,12 +638,7 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
             )
         )
 
-    # Logs
-    logs = (
-        db.execute(select(RunLog).where(RunLog.run_id == r.id).order_by(RunLog.created_at.desc()))
-        .scalars()
-        .all()
-    )
+    logs = db.execute(select(RunLog).where(RunLog.run_id == r.id).order_by(RunLog.created_at.desc())).scalars().all()
     for l in logs:
         events.append(
             RunTimelineEventOut(
@@ -725,23 +656,13 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
 
 @router.get("/runs/{run_id}/rag-debug")
 def rag_debug(run_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
-    """
-    Returns:
-    - retrieval_config from Run.input_payload["_retrieval"] if present
-    - latest pre-retrieval log meta (back-compat)
-    - all evidence items attached to this run (newest first)
-    """
     r = db.get(Run, run_id)
     if not r:
         raise HTTPException(status_code=404, detail="Run not found")
 
     _ensure_run_workspace_access(db, r, user)
 
-    evs = (
-        db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc()))
-        .scalars()
-        .all()
-    )
+    evs = db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc())).scalars().all()
 
     log = (
         db.execute(
