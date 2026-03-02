@@ -52,6 +52,13 @@ class PipelineStepOut(BaseModel):
     latest_artifact_type: Optional[str] = None
     latest_artifact_title: Optional[str] = None
 
+    # V3.2: step-level retrieval metadata (from Run.input_payload["_retrieval"])
+    retrieval_enabled: Optional[bool] = None
+    retrieval_query: Optional[str] = None
+    retrieval_evidence_count: Optional[int] = None
+    retrieval_batch_id: Optional[str] = None
+    retrieval_batch_kind: Optional[str] = None
+
 
 class PipelineRunOut(BaseModel):
     id: str
