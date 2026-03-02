@@ -17,6 +17,8 @@ from app.core.citations import (
     output_has_any_citations,
     body_has_inline_citations,
     build_inline_citation_patch,
+    citation_enforcement_report,
+    render_citation_compliance_md,
 )
 from app.core.retrieval_search import hybrid_retrieve
 from app.db.session import get_db
@@ -43,6 +45,9 @@ from app.schemas.core import (
 router = APIRouter(tags=["runs"])
 
 
+# -------------------------
+# Helpers
+# -------------------------
 def _parse_uuid(id_str: str) -> uuid.UUID:
     try:
         return uuid.UUID(id_str)
@@ -106,8 +111,8 @@ def _timeframe_to_bounds(timeframe: Optional[Dict[str, Any]]) -> tuple[Optional[
     Accepts retrieval.timeframe JSON and returns (start_ts,end_ts) in UTC.
 
     Supported:
-      - {"preset":"7d"|"30d"|"90d"}
-      - {"preset":"custom","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}
+    - {"preset":"7d"|"30d"|"90d"}
+    - {"preset":"custom","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}
     """
     tf = timeframe or {}
     preset = (tf.get("preset") or "").strip().lower()
@@ -258,9 +263,8 @@ Evidence Pack (cite as [n]):
 
         return artifact_type, title, md
 
-    artifact_type2, title2, md2 = build_initial_artifact(
-        agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text
-    )
+    # Fallback deterministic template (V0 mode)
+    artifact_type2, title2, md2 = build_initial_artifact(agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text)
     if len(evidence_items) > 0 and "## Unknowns / Assumptions" not in md2:
         md2 = md2.rstrip() + "\n\n## Unknowns / Assumptions\n- Evidence attached, but citation-grounded generation requires LLM mode.\n"
     return artifact_type2, title2, md2
@@ -288,129 +292,9 @@ def _next_version_for_logical_key(db: Session, run_id: uuid.UUID, logical_key: s
     return int(max_ver or 0) + 1
 
 
-def _evidence_batch_id(e: Evidence) -> Optional[str]:
-    try:
-        meta = e.meta or {}
-        bid = meta.get("batch_id")
-        if bid is None:
-            return None
-        bid = str(bid).strip()
-        return bid or None
-    except Exception:
-        return None
-
-
-def _evidence_batch_kind(e: Evidence) -> Optional[str]:
-    try:
-        meta = e.meta or {}
-        bk = meta.get("batch_kind")
-        if bk is None:
-            return None
-        bk = str(bk).strip()
-        return bk or None
-    except Exception:
-        return None
-
-
-def _batch_retrieval_from_evidence(e: Evidence) -> Dict[str, Any]:
-    try:
-        meta = e.meta or {}
-        r = meta.get("retrieval") or {}
-        return r if isinstance(r, dict) else {}
-    except Exception:
-        return {}
-
-
-def _build_batches_from_evidence(evs: List[Evidence]) -> List[Dict[str, Any]]:
-    """
-    Build a small index for UI batch selector.
-    Groups:
-      - batch_id present => that batch
-      - no batch_id => "legacy"
-    """
-    buckets: Dict[str, Dict[str, Any]] = {}
-
-    for e in evs:
-        bid = _evidence_batch_id(e) or "legacy"
-        bk = _evidence_batch_kind(e) or ("legacy" if bid == "legacy" else "unknown")
-        created_at = e.created_at
-
-        if bid not in buckets:
-            buckets[bid] = {
-                "batch_id": bid,
-                "batch_kind": bk,
-                "created_at": created_at,
-                "evidence_count": 0,
-                "retrieval": {},
-            }
-
-        buckets[bid]["evidence_count"] = int(buckets[bid]["evidence_count"]) + 1
-
-        # keep newest timestamp for sorting/label
-        try:
-            if created_at and buckets[bid]["created_at"] and created_at > buckets[bid]["created_at"]:
-                buckets[bid]["created_at"] = created_at
-        except Exception:
-            buckets[bid]["created_at"] = created_at
-
-        # store a representative retrieval config if available
-        r = _batch_retrieval_from_evidence(e)
-        if r and not buckets[bid].get("retrieval"):
-            buckets[bid]["retrieval"] = r
-
-        # if kind changes, prefer non-unknown
-        if buckets[bid].get("batch_kind") in ("unknown", "legacy") and bk not in ("unknown", "legacy"):
-            buckets[bid]["batch_kind"] = bk
-
-    out = list(buckets.values())
-
-    def _ts(x: Dict[str, Any]) -> float:
-        dt = x.get("created_at")
-        if not isinstance(dt, datetime):
-            return 0.0
-        return dt.timestamp()
-
-    out.sort(key=_ts, reverse=True)
-    return out
-
-
-def _pick_retrieval_log_for_batch(logs: List[RunLog], batch_id: Optional[str]) -> Optional[RunLog]:
-    """
-    logs are expected newest-first.
-    If batch_id:
-      - match meta.batch_id
-      - if batch_id == "legacy", prefer logs WITHOUT batch_id
-    Else:
-      - return newest
-    """
-    if not logs:
-        return None
-
-    if not batch_id:
-        return logs[0]
-
-    if batch_id == "legacy":
-        for l in logs:
-            try:
-                meta = l.meta or {}
-                bid = meta.get("batch_id")
-                if not bid:
-                    return l
-            except Exception:
-                continue
-        return None
-
-    for l in logs:
-        try:
-            meta = l.meta or {}
-            bid = meta.get("batch_id")
-            if bid and str(bid) == str(batch_id):
-                return l
-        except Exception:
-            continue
-    return None
-
-
+# -------------------------
+# Routes
+# -------------------------
 @router.post("/workspaces/{workspace_id}/runs", response_model=RunOut)
 def create_run(
     workspace_id: str,
@@ -539,10 +423,7 @@ def create_run(
                 run_id=r.id,
                 level="info",
                 message="Pre-retrieval completed; evidence attached.",
-                meta={
-                    **retrieval_meta,
-                    "evidence_count": len(ev_items),
-                },
+                meta={**retrieval_meta, "evidence_count": len(ev_items)},
             )
         )
         db.commit()
@@ -565,6 +446,29 @@ def create_run(
             evidence_items=ev_items,
         )
 
+    # -------------------------
+    # V1: Hard citation enforcement (only when evidence exists)
+    # -------------------------
+    try:
+        rep = citation_enforcement_report(
+            artifact_type=artifact_type,
+            md=md,
+            evidence_count=len(ev_items),
+        )
+        if len(ev_items) > 0:
+            md = md.rstrip() + "\n\n" + render_citation_compliance_md(rep) + "\n"
+            db.add(
+                RunLog(
+                    run_id=r.id,
+                    level="info" if rep.get("ok") else "warn",
+                    message="Citation enforcement check",
+                    meta=rep,
+                )
+            )
+            db.commit()
+    except Exception:
+        pass
+
     art = Artifact(
         run_id=r.id,
         type=artifact_type,
@@ -580,6 +484,16 @@ def create_run(
     r.output_summary = build_run_summary(agent_id=r.agent_id, artifact_type=artifact_type)
     if ev_items:
         r.output_summary += f" Evidence attached: {len(ev_items)} snippet(s)."
+
+    # add enforcement outcome to summary if failed
+    try:
+        if len(ev_items) > 0:
+            rep2 = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
+            if not rep2.get("ok"):
+                r.output_summary += f" ⚠️ Citation check failed (confidence={float(rep2.get('confidence_score') or 0.0):.2f})."
+    except Exception:
+        pass
+
     db.add(r)
     db.commit()
     db.refresh(r)
@@ -684,9 +598,7 @@ def regenerate_with_retrieval(
             "document_title": it.get("document_title", ""),
             "source_id": it.get("source_id", ""),
             "chunk_index": int(it.get("chunk_index") or 0),
-            "retrieval": {
-                **retrieval_meta,
-            },
+            "retrieval": {**retrieval_meta},
         }
 
         ev = Evidence(
@@ -744,6 +656,23 @@ def regenerate_with_retrieval(
         )
         title = latest.title or _title
 
+    # V1 enforcement
+    try:
+        rep = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
+        if len(ev_items) > 0:
+            md = md.rstrip() + "\n\n" + render_citation_compliance_md(rep) + "\n"
+            db.add(
+                RunLog(
+                    run_id=r.id,
+                    level="info" if rep.get("ok") else "warn",
+                    message="Citation enforcement check",
+                    meta=rep,
+                )
+            )
+            db.commit()
+    except Exception:
+        pass
+
     new_art = Artifact(
         run_id=r.id,
         type=artifact_type,
@@ -760,6 +689,15 @@ def regenerate_with_retrieval(
     r.output_summary += f" Regenerated v{next_ver}."
     if ev_items:
         r.output_summary += f" Evidence attached: {len(ev_items)} snippet(s)."
+
+    try:
+        if len(ev_items) > 0:
+            rep2 = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
+            if not rep2.get("ok"):
+                r.output_summary += f" ⚠️ Citation check failed (confidence={float(rep2.get('confidence_score') or 0.0):.2f})."
+    except Exception:
+        pass
+
     db.add(r)
     db.commit()
     db.refresh(r)
@@ -767,7 +705,7 @@ def regenerate_with_retrieval(
     return RunOut(
         id=str(r.id),
         workspace_id=str(r.workspace_id),
-        agent_id=r.agent_id,
+        agent_id=str(r.agent_id),
         created_by_user_id=str(r.created_by_user_id),
         status=r.status,
         input_payload=r.input_payload,
@@ -784,7 +722,7 @@ def list_runs(workspace_id: str, db: Session = Depends(get_db), user: User = Dep
         RunOut(
             id=str(r.id),
             workspace_id=str(r.workspace_id),
-            agent_id=r.agent_id,
+            agent_id=str(r.agent_id),
             created_by_user_id=str(r.created_by_user_id),
             status=r.status,
             input_payload=r.input_payload,
@@ -805,7 +743,7 @@ def get_run(run_id: str, db: Session = Depends(get_db), user: User = Depends(req
     return RunOut(
         id=str(r.id),
         workspace_id=str(r.workspace_id),
-        agent_id=r.agent_id,
+        agent_id=str(r.agent_id),
         created_by_user_id=str(r.created_by_user_id),
         status=r.status,
         input_payload=r.input_payload,
@@ -846,7 +784,7 @@ def update_run_status(
     return RunOut(
         id=str(r.id),
         workspace_id=str(r.workspace_id),
-        agent_id=r.agent_id,
+        agent_id=str(r.agent_id),
         created_by_user_id=str(r.created_by_user_id),
         status=r.status,
         input_payload=r.input_payload,
@@ -990,10 +928,111 @@ def rag_debug(
 
     _ensure_run_workspace_access(db, r, user)
 
+    # ---------- evidence batch helpers ----------
+    def _evidence_batch_id(e: Evidence) -> Optional[str]:
+        try:
+            meta = e.meta or {}
+            bid = meta.get("batch_id")
+            if bid is None:
+                return None
+            bid = str(bid).strip()
+            return bid or None
+        except Exception:
+            return None
+
+    def _evidence_batch_kind(e: Evidence) -> Optional[str]:
+        try:
+            meta = e.meta or {}
+            bk = meta.get("batch_kind")
+            if bk is None:
+                return None
+            bk = str(bk).strip()
+            return bk or None
+        except Exception:
+            return None
+
+    def _batch_retrieval_from_evidence(e: Evidence) -> Dict[str, Any]:
+        try:
+            meta = e.meta or {}
+            rr = meta.get("retrieval") or {}
+            return rr if isinstance(rr, dict) else {}
+        except Exception:
+            return {}
+
+    def _build_batches_from_evidence(evs: List[Evidence]) -> List[Dict[str, Any]]:
+        buckets: Dict[str, Dict[str, Any]] = {}
+
+        for e in evs:
+            bid = _evidence_batch_id(e) or "legacy"
+            bk = _evidence_batch_kind(e) or ("legacy" if bid == "legacy" else "unknown")
+            created_at = e.created_at
+
+            if bid not in buckets:
+                buckets[bid] = {
+                    "batch_id": bid,
+                    "batch_kind": bk,
+                    "created_at": created_at,
+                    "evidence_count": 0,
+                    "retrieval": {},
+                }
+
+            buckets[bid]["evidence_count"] = int(buckets[bid]["evidence_count"]) + 1
+
+            try:
+                if created_at and buckets[bid]["created_at"] and created_at > buckets[bid]["created_at"]:
+                    buckets[bid]["created_at"] = created_at
+            except Exception:
+                buckets[bid]["created_at"] = created_at
+
+            rr = _batch_retrieval_from_evidence(e)
+            if rr and not buckets[bid].get("retrieval"):
+                buckets[bid]["retrieval"] = rr
+
+            if buckets[bid].get("batch_kind") in ("unknown", "legacy") and bk not in ("unknown", "legacy"):
+                buckets[bid]["batch_kind"] = bk
+
+        out = list(buckets.values())
+
+        def _ts(x: Dict[str, Any]) -> float:
+            dt = x.get("created_at")
+            if not isinstance(dt, datetime):
+                return 0.0
+            return dt.timestamp()
+
+        out.sort(key=_ts, reverse=True)
+        return out
+
+    def _pick_retrieval_log_for_batch(logs: List[RunLog], batch_id_val: Optional[str]) -> Optional[RunLog]:
+        if not logs:
+            return None
+        if not batch_id_val:
+            return logs[0]
+
+        if batch_id_val == "legacy":
+            for l in logs:
+                try:
+                    meta = l.meta or {}
+                    bid = meta.get("batch_id")
+                    if not bid:
+                        return l
+                except Exception:
+                    continue
+            return None
+
+        for l in logs:
+            try:
+                meta = l.meta or {}
+                bid = meta.get("batch_id")
+                if bid and str(bid) == str(batch_id_val):
+                    return l
+            except Exception:
+                continue
+        return None
+
+    # ---------- collect ----------
     all_evs = db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc())).scalars().all()
     batches = _build_batches_from_evidence(all_evs)
 
-    # Filter evidence by batch_id if requested
     if batch_id:
         bid = str(batch_id).strip()
         if bid == "legacy":
@@ -1003,11 +1042,12 @@ def rag_debug(
     else:
         evs = all_evs
 
-    # Fetch relevant logs (newest-first) and pick best for batch
     candidate_messages = [
         "Pre-retrieval completed; evidence attached.",
         "Regenerate-with-retrieval executed; evidence attached.",
         "Regenerate-with-retrieval executed; no evidence found.",
+        "Pipeline step pre-retrieval completed; evidence attached.",
+        "Pipeline step pre-retrieval executed; no evidence found.",
     ]
 
     log_rows = (
@@ -1024,9 +1064,6 @@ def rag_debug(
 
     picked_log = _pick_retrieval_log_for_batch(log_rows, batch_id)
 
-    # retrieval_config:
-    # - default to run.input_payload._retrieval
-    # - if batch_id provided, try derive from picked_log.meta, else from evidence.meta.retrieval
     retrieval_cfg = None
     try:
         retrieval_cfg = (r.input_payload or {}).get("_retrieval")
@@ -1034,16 +1071,13 @@ def rag_debug(
         retrieval_cfg = None
 
     if batch_id:
-        # Prefer log.meta when available
         if picked_log and isinstance(picked_log.meta, dict) and picked_log.meta:
             retrieval_cfg = picked_log.meta
         else:
-            # Fall back to evidence meta.retrieval
             if evs:
-                rr = _batch_retrieval_from_evidence(evs[0])
-                if rr:
-                    # decorate with batch id & count
-                    retrieval_cfg = {**rr, "batch_id": batch_id, "evidence_count": len(evs)}
+                rr2 = _batch_retrieval_from_evidence(evs[0])
+                if rr2:
+                    retrieval_cfg = {**rr2, "batch_id": batch_id, "evidence_count": len(evs)}
 
     return {
         "ok": True,

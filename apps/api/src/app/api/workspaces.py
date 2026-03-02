@@ -9,6 +9,7 @@ from app.db.session import get_db
 from app.db.models import Workspace, WorkspaceMember, User
 from app.schemas.core import WorkspaceCreateIn, WorkspaceOut
 from app.schemas.workspaces import WorkspaceMemberInviteIn, WorkspaceMemberOut, WorkspaceRoleOut
+from app.schemas.workspaces import TemplateAdminOut, TemplateAdminUpdateIn
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -183,3 +184,22 @@ def remove_member(
     db.commit()
 
     return {"ok": True}
+
+@router.get("/{workspace_id}/template-admin", response_model=TemplateAdminOut)
+def get_template_admin(workspace_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    ws, _role = require_workspace_access(workspace_id, db, user)
+    return TemplateAdminOut(workspace_id=str(ws.id), template_admin_json=ws.template_admin_json or {})
+
+@router.put("/{workspace_id}/template-admin", response_model=TemplateAdminOut)
+def update_template_admin(
+    workspace_id: str,
+    payload: TemplateAdminUpdateIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    ws, _role = require_workspace_role_min(workspace_id, "admin", db, user)
+    ws.template_admin_json = payload.template_admin_json or {}
+    db.add(ws)
+    db.commit()
+    db.refresh(ws)
+    return TemplateAdminOut(workspace_id=str(ws.id), template_admin_json=ws.template_admin_json or {})
