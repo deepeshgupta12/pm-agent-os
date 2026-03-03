@@ -91,6 +91,7 @@ class ArtifactOut(BaseModel):
     logical_key: str
     version: int
     status: str
+    assigned_to_user_id: Optional[str] = None
 
 
 class ArtifactUpdateIn(BaseModel):
@@ -222,3 +223,25 @@ class ActionItemDecisionOut(BaseModel):
     decision: str
     comment: Optional[str] = None
     decided_at: datetime
+
+class ArtifactAssignIn(BaseModel):
+    assigned_to_user_id: Optional[str] = None  # uuid string or null
+
+
+class ArtifactCommentCreateIn(BaseModel):
+    body: str = Field(min_length=1, max_length=20000)
+
+
+class ArtifactCommentMentionOut(BaseModel):
+    mentioned_user_id: str
+    mentioned_email: str
+
+
+class ArtifactCommentOut(BaseModel):
+    id: str
+    artifact_id: str
+    author_user_id: str
+    author_email: str
+    body: str
+    created_at: datetime
+    mentions: List[ArtifactCommentMentionOut] = Field(default_factory=list)

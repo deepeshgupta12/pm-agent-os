@@ -188,6 +188,21 @@ class Artifact(Base):
 
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")  # draft|in_review|final
 
+    assigned_to_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    UUID(as_uuid=True),
+    ForeignKey("users.id", ondelete="SET NULL"),
+    nullable=True,
+    index=True,
+)
+
+    assigned_to_user: Mapped[Optional["User"]] = relationship(
+        foreign_keys=[assigned_to_user_id]
+    )
+
+    comments: Mapped[List["ArtifactComment"]] = relationship(
+        back_populates="artifact", cascade="all, delete-orphan"
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
@@ -577,3 +592,62 @@ class ActionItemDecision(Base):
     decision: Mapped[str] = mapped_column(String(16), nullable=False)  # approved|rejected
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+class ArtifactComment(Base):
+    __tablename__ = "artifact_comments"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    artifact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("artifacts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    author_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    artifact: Mapped["Artifact"] = relationship(back_populates="comments")
+    author: Mapped["User"] = relationship(foreign_keys=[author_user_id])
+
+    mentions: Mapped[List["ArtifactCommentMention"]] = relationship(
+        back_populates="comment", cascade="all, delete-orphan"
+    )
+
+
+class ArtifactCommentMention(Base):
+    __tablename__ = "artifact_comment_mentions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    comment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("artifact_comments.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    mentioned_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    mentioned_email: Mapped[str] = mapped_column(String(320), nullable=False, default="")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    comment: Mapped["ArtifactComment"] = relationship(back_populates="mentions")
+    mentioned_user: Mapped["User"] = relationship(foreign_keys=[mentioned_user_id])
