@@ -245,3 +245,61 @@ class ArtifactCommentOut(BaseModel):
     body: str
     created_at: datetime
     mentions: List[ArtifactCommentMentionOut] = Field(default_factory=list)
+
+# -------- V2 Step 4: Scheduling --------
+class ScheduleCreateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    kind: str = Field(default="agent_run", max_length=32)  # agent_run | pipeline_run
+    timezone: str = Field(default="UTC", max_length=64)
+
+    # Either cron or interval_json drives schedule logic
+    cron: Optional[str] = Field(default=None, max_length=120)
+    interval_json: Dict[str, Any] = Field(default_factory=dict)
+
+    payload_json: Dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+
+
+class ScheduleUpdateIn(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    timezone: Optional[str] = Field(default=None, max_length=64)
+    cron: Optional[str] = Field(default=None, max_length=120)
+    interval_json: Optional[Dict[str, Any]] = None
+    payload_json: Optional[Dict[str, Any]] = None
+    enabled: Optional[bool] = None
+
+
+class ScheduleOut(BaseModel):
+    id: str
+    workspace_id: str
+    created_by_user_id: Optional[str] = None
+
+    name: str
+    kind: str
+    timezone: str
+    cron: Optional[str] = None
+    interval_json: Dict[str, Any] = Field(default_factory=dict)
+    payload_json: Dict[str, Any] = Field(default_factory=dict)
+
+    enabled: bool
+    next_run_at: Optional[datetime] = None
+    last_run_at: Optional[datetime] = None
+    last_status: Optional[str] = None
+    last_error: Optional[str] = None
+
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScheduleRunOut(BaseModel):
+    id: str
+    schedule_id: str
+    status: str
+    started_at: datetime
+    finished_at: Optional[datetime] = None
+    error: Optional[str] = None
+
+    run_id: Optional[str] = None
+    pipeline_run_id: Optional[str] = None
+
+    meta: Dict[str, Any] = Field(default_factory=dict)

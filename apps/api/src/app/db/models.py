@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional, List
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, Integer, Float, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, Integer, Float, func, Boolean
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -85,6 +85,10 @@ class Workspace(Base):
     )
 
     approvals_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    schedules: Mapped[List["Schedule"]] = relationship(
+    back_populates="workspace", cascade="all, delete-orphan"
+    )
 
     connectors: Mapped[List["Connector"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
     ingestion_jobs: Mapped[List["IngestionJob"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
@@ -592,6 +596,96 @@ class ActionItemDecision(Base):
     decision: Mapped[str] = mapped_column(String(16), nullable=False)  # approved|rejected
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+class Schedule(Base):
+    __tablename__ = "schedules"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    created_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+
+    # agent_run | pipeline_run
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="agent_run")
+
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="UTC")
+
+    # Either cron OR interval_json drives next_run_at computation
+    cron: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+
+    # Example:
+    # {"type":"daily","at":"09:00"} OR {"type":"weekly","days":[1,3,5],"at":"10:30"}
+    interval_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    # Execution payload:
+    # If kind=agent_run -> {"workspace_id":..., "agent_id":..., "input_payload":..., "retrieval":...}
+    # If kind=pipeline_run -> {"workspace_id":..., "template_id":..., "input_payload":...}
+    payload_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="schedules")
+
+    runs: Mapped[List["ScheduleRun"]] = relationship(
+        back_populates="schedule",
+        cascade="all, delete-orphan",
+    )
+
+
+class ScheduleRun(Base):
+    __tablename__ = "schedule_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    schedule_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("schedules.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # running | success | failed
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
+
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Link to execution objects (we’ll wire these in Commit 2/3)
+    run_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    pipeline_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+
+    meta: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    schedule: Mapped["Schedule"] = relationship(back_populates="runs")
+    
 
 class ArtifactComment(Base):
     __tablename__ = "artifact_comments"
