@@ -298,6 +298,9 @@ export default function WorkspaceDetailPage() {
         <Button component={Link} to="/workspaces" variant="light">
           Back
         </Button>
+        <Button component={Link} to={`/workspaces/${wid}/actions`} variant="light">
+          Action Center
+        </Button>
       </Group>
 
       {ws ? (

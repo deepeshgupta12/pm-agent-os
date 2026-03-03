@@ -31,6 +31,24 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan"
     )
 
+    created_action_items: Mapped[List["ActionItem"]] = relationship(
+        back_populates="created_by_user",
+        cascade="all, delete-orphan",
+        foreign_keys="ActionItem.created_by_user_id",
+    )
+
+    assigned_action_items: Mapped[List["ActionItem"]] = relationship(
+        back_populates="assigned_to_user",
+        cascade="all, delete-orphan",
+        foreign_keys="ActionItem.assigned_to_user_id",
+    )
+
+    decided_action_items: Mapped[List["ActionItem"]] = relationship(
+        back_populates="decided_by_user",
+        cascade="all, delete-orphan",
+        foreign_keys="ActionItem.decided_by_user_id",
+    )
+
 
 class Workspace(Base):
     __tablename__ = "workspaces"
@@ -59,6 +77,10 @@ class Workspace(Base):
         back_populates="workspace", cascade="all, delete-orphan"
     )
     pipeline_runs: Mapped[List["PipelineRun"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+
+    action_items: Mapped[List["ActionItem"]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan"
     )
 
@@ -475,3 +497,57 @@ class PipelineStep(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     pipeline_run: Mapped["PipelineRun"] = relationship(back_populates="steps")
     run: Mapped[Optional["Run"]] = relationship(back_populates="pipeline_steps")
+
+class ActionItem(Base):
+    __tablename__ = "action_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    # Optional assignment (member/admin can assign)
+    assigned_to_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    # Optional decision actor (admin approves/rejects/cancels)
+    decided_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued", index=True)
+    title: Mapped[str] = mapped_column(String(240), nullable=False, default="")
+
+    # Stores action inputs (internal-only for V2)
+    payload_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    # Optional "what this action targets" — e.g., "artifact:{id}"
+    target_ref: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+
+    # decision metadata
+    decision_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="action_items")
+
+    created_by_user: Mapped["User"] = relationship(
+        back_populates="created_action_items", foreign_keys=[created_by_user_id]
+    )
+    assigned_to_user: Mapped[Optional["User"]] = relationship(
+        back_populates="assigned_action_items", foreign_keys=[assigned_to_user_id]
+    )
+    decided_by_user: Mapped[Optional["User"]] = relationship(
+        back_populates="decided_action_items", foreign_keys=[decided_by_user_id]
+    )

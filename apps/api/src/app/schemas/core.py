@@ -167,3 +167,41 @@ class ArtifactReviewOut(BaseModel):
     decided_by_user_id: Optional[str] = None
     decided_at: Optional[datetime] = None
     decision_comment: Optional[str] = None
+
+# -------- V2: Action Center --------
+class ActionItemCreateIn(BaseModel):
+    type: str = Field(min_length=2, max_length=64)
+    title: str = Field(min_length=1, max_length=240)
+    payload_json: Dict[str, Any] = Field(default_factory=dict)
+    target_ref: Optional[str] = Field(default=None, max_length=300)
+    assigned_to_user_id: Optional[str] = None  # uuid as string
+
+
+class ActionItemAssignIn(BaseModel):
+    assigned_to_user_id: Optional[str] = None  # uuid as string (null => unassign)
+
+
+class ActionItemDecisionIn(BaseModel):
+    decision: str = Field(pattern="^(approved|rejected|cancelled)$")
+    comment: Optional[str] = Field(default=None, max_length=5000)
+
+
+class ActionItemOut(BaseModel):
+    id: str
+    workspace_id: str
+    created_by_user_id: str
+    assigned_to_user_id: Optional[str] = None
+    decided_by_user_id: Optional[str] = None
+
+    type: str
+    status: str
+    title: str
+
+    payload_json: Dict[str, Any]
+    target_ref: Optional[str] = None
+
+    decision_comment: Optional[str] = None
+    decided_at: Optional[datetime] = None
+
+    created_at: datetime
+    updated_at: datetime
