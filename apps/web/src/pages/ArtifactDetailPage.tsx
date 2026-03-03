@@ -43,7 +43,7 @@ export default function ArtifactDetailPage() {
   const [newVerLoading, setNewVerLoading] = useState(false);
   const [copyMsg, setCopyMsg] = useState<string | null>(null);
 
-  // Request publish state
+  // Commit 2: request-publish state
   const [requestingPublish, setRequestingPublish] = useState(false);
   const [publishRequestMsg, setPublishRequestMsg] = useState<string | null>(null);
 
@@ -85,6 +85,7 @@ export default function ArtifactDetailPage() {
   }, [siblings]);
 
   async function loadRoleForArtifact(loaded: Artifact) {
+    // fetch run → workspace_id → my-role
     const runRes = await apiFetch<Run>(`/runs/${loaded.run_id}`, { method: "GET" });
     if (!runRes.ok) return;
 
@@ -109,7 +110,6 @@ export default function ArtifactDetailPage() {
   async function load() {
     setErr(null);
     setDiffText("");
-    // IMPORTANT: do NOT clear publishRequestMsg here — it was wiping your success banner.
 
     const res = await apiFetch<Artifact>(`/artifacts/${aid}`, { method: "GET" });
     if (!res.ok) {
@@ -126,6 +126,7 @@ export default function ArtifactDetailPage() {
     await loadRoleForArtifact(loaded);
     await loadReviews();
 
+    // Load artifacts for same run, then filter to same logical_key (versions)
     const sibRes = await apiFetch<Artifact[]>(`/runs/${loaded.run_id}/artifacts`, { method: "GET" });
     if (!sibRes.ok) {
       setSiblings([]);
@@ -189,7 +190,7 @@ export default function ArtifactDetailPage() {
     setStatus(res.data.status);
 
     window.history.replaceState({}, "", `/artifacts/${res.data.id}`);
-    await loadReviews();
+    await loadReviews(); // new artifact id => different review list
   }
 
   async function submitForReview() {
@@ -252,10 +253,10 @@ export default function ArtifactDetailPage() {
     }
 
     setDecisionComment("");
-    await load();
+    await load(); // artifact status becomes draft
   }
 
-  // Commit 2: approval-gated publish via Action Center
+  // approval-gated publish via Action Center
   async function requestPublish() {
     if (!canWrite) return;
 
@@ -275,12 +276,11 @@ export default function ArtifactDetailPage() {
       return;
     }
 
-    // Show banner immediately (and DO NOT wipe it on load())
     setPublishRequestMsg(
       `Publish requested. Action created: ${res.data.action_id}. Approve it in Action Center to finalize.`
     );
 
-    // Keep artifact status up to date (likely still in_review)
+    // Keep local UI consistent (artifact remains in_review)
     await load();
   }
 
@@ -506,7 +506,7 @@ export default function ArtifactDetailPage() {
 
                 <Text size="sm" c="dimmed">
                   Commit 2 note: publishing is now approval-gated via <b>Action Center</b>. Submit for review → request
-                  publish → approve action(s).
+                  publish → approve action.
                 </Text>
               </Stack>
             </Card>

@@ -24,13 +24,9 @@ const STATUS_OPTIONS = [
   { value: "cancelled", label: "cancelled" },
 ];
 
-function safeJsonParse(s: string): { ok: boolean; value: any; error?: string } {
-  try {
-    const v = s.trim() ? JSON.parse(s) : {};
-    return { ok: true, value: v };
-  } catch (e: any) {
-    return { ok: false, value: null, error: e?.message || "Invalid JSON" };
-  }
+function plural(n: number, one: string, many?: string) {
+  const m = many ?? `${one}s`;
+  return n === 1 ? one : m;
 }
 
 export default function ActionCenterPage() {
@@ -39,11 +35,10 @@ export default function ActionCenterPage() {
 
   const [myRole, setMyRole] = useState<WorkspaceRole | null>(null);
   const role = (myRole?.role || "").toLowerCase();
-  const canReview = role === "admin" || role === "member"; // reviewers can be admin/member (policy may still block per type)
+  const canWrite = role === "admin" || role === "member";
 
   const [items, setItems] = useState<ActionItem[]>([]);
   const [err, setErr] = useState<string | null>(null);
-  const [okMsg, setOkMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   // filters
@@ -68,8 +63,6 @@ export default function ActionCenterPage() {
   );
   const [creating, setCreating] = useState(false);
 
-  const [decidingId, setDecidingId] = useState<string | null>(null);
-
   async function loadRole() {
     if (!wid) return;
     const res = await apiFetch<WorkspaceRole>(`/workspaces/${wid}/my-role`, { method: "GET" });
@@ -86,7 +79,9 @@ export default function ActionCenterPage() {
     if (status) qs.set("status", status);
     if (type.trim()) qs.set("type", type.trim());
 
-    const res = await apiFetch<ActionItem[]>(`/workspaces/${wid}/actions?${qs.toString()}`, { method: "GET" });
+    const res = await apiFetch<ActionItem[]>(`/workspaces/${wid}/actions?${qs.toString()}`, {
+      method: "GET",
+    });
 
     setLoading(false);
 
@@ -100,15 +95,14 @@ export default function ActionCenterPage() {
   }
 
   async function createAction() {
-    if (!wid) return;
-    if (role === "viewer") return;
-
+    if (!wid || !canWrite) return;
     setErr(null);
-    setOkMsg(null);
 
-    const parsed = safeJsonParse(createPayloadJson);
-    if (!parsed.ok) {
-      setErr(`payload_json is invalid JSON: ${parsed.error}`);
+    let payload: any = {};
+    try {
+      payload = createPayloadJson.trim() ? JSON.parse(createPayloadJson) : {};
+    } catch {
+      setErr("payload_json is invalid JSON.");
       return;
     }
 
@@ -119,7 +113,7 @@ export default function ActionCenterPage() {
         type: createType.trim(),
         title: createTitle.trim(),
         target_ref: createTargetRef.trim() || null,
-        payload_json: parsed.value,
+        payload_json: payload,
       }),
     });
     setCreating(false);
@@ -129,35 +123,21 @@ export default function ActionCenterPage() {
       return;
     }
 
-    setOkMsg(`Action created: ${res.data.id}`);
     await loadItems();
   }
 
   async function decide(id: string, decision: "approved" | "rejected") {
-    if (!canReview) return;
+    if (!wid) return;
     setErr(null);
-    setOkMsg(null);
 
-    setDecidingId(id);
     const res = await apiFetch<ActionItem>(`/actions/${id}/decide`, {
       method: "POST",
       body: JSON.stringify({ decision, comment: null }),
     });
-    setDecidingId(null);
 
     if (!res.ok) {
       setErr(`Decision failed: ${res.status} ${res.error}`);
       return;
-    }
-
-    const a = res.data;
-    const req = (a as any).approvals_required ?? null;
-    const approved = (a as any).approvals_approved_count ?? null;
-
-    if (typeof req === "number" && typeof approved === "number") {
-      setOkMsg(`Vote recorded. approvals: ${approved}/${req}. status: ${a.status}`);
-    } else {
-      setOkMsg(`Vote recorded. status: ${a.status}`);
     }
 
     await loadItems();
@@ -179,6 +159,12 @@ export default function ActionCenterPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, type]);
 
+  const isReviewer = useMemo(() => {
+    // Reviewer eligibility is enforced by API; UI can still show buttons for member/admin,
+    // but action-level eligibility (role allow-list) is server-side.
+    return role === "admin" || role === "member";
+  }, [role]);
+
   return (
     <Stack gap="md">
       <Group justify="space-between">
@@ -188,24 +174,11 @@ export default function ActionCenterPage() {
         </Button>
       </Group>
 
-      {myRole ? (
-        <Group gap="sm">
-          <Badge variant="light">role: {myRole.role}</Badge>
-          <Badge variant="light" color={canReview ? "grape" : "gray"}>
-            {canReview ? "can review (member/admin)" : "read-only"}
-          </Badge>
-        </Group>
-      ) : null}
+      {myRole ? <Badge variant="light">role: {myRole.role}</Badge> : null}
 
       {err ? (
         <Card withBorder>
           <Text c="red">{err}</Text>
-        </Card>
-      ) : null}
-
-      {okMsg ? (
-        <Card withBorder>
-          <Text>{okMsg}</Text>
         </Card>
       ) : null}
 
@@ -219,7 +192,12 @@ export default function ActionCenterPage() {
           </Group>
 
           <Group gap="sm" align="flex-end">
-            <Select label="Status" data={STATUS_OPTIONS} value={status} onChange={(v) => setStatus(v || "")} />
+            <Select
+              label="Status"
+              data={STATUS_OPTIONS}
+              value={status}
+              onChange={(v) => setStatus(v || "")}
+            />
             <Select
               label="Type"
               data={typeOptions}
@@ -236,55 +214,44 @@ export default function ActionCenterPage() {
           ) : (
             <Stack gap="xs">
               {items.map((a) => {
-                const approvalsRequired = (a as any).approvals_required as number | undefined;
-                const approvedCount = (a as any).approvals_approved_count as number | undefined;
-                const rejectedCount = (a as any).approvals_rejected_count as number | undefined;
-                const myDecision = ((a as any).my_decision as string | null | undefined) ?? null;
+                const req = a.approvals_required ?? 1;
+                const ok = a.approvals_approved_count ?? 0;
+                const rej = a.approvals_rejected_count ?? 0;
+                const mine = a.my_decision ?? null;
 
-                const showVoteControls = canReview && a.status === "queued";
-                const alreadyVoted = !!myDecision;
-                const isBusy = decidingId === a.id;
+                const showDecide = a.status === "queued" && isReviewer;
+                const alreadyDecided = !!mine;
 
                 return (
                   <Card key={a.id} withBorder>
                     <Stack gap={6}>
                       <Group justify="space-between" align="flex-start">
-                        <Stack gap={2}>
-                          <Group gap="sm">
+                        <Stack gap={2} style={{ flex: 1 }}>
+                          <Group gap="sm" wrap="wrap">
                             <Badge>{a.status}</Badge>
                             <Badge variant="light">{a.type}</Badge>
                             {a.target_ref ? <Badge variant="outline">{a.target_ref}</Badge> : null}
 
-                            {typeof approvalsRequired === "number" ? (
-                              <Badge variant="light">
-                                approvals: {typeof approvedCount === "number" ? approvedCount : 0}/{approvalsRequired}
-                              </Badge>
-                            ) : null}
+                            <Badge variant="light">
+                              approvals: {ok}/{req}{" "}
+                              {rej > 0 ? `· ${rej} ${plural(rej, "reject")}` : ""}
+                            </Badge>
 
-                            {typeof rejectedCount === "number" ? (
-                              <Badge variant="light" color={rejectedCount > 0 ? "red" : "gray"}>
-                                rejected: {rejectedCount}
-                              </Badge>
-                            ) : null}
-
-                            {myDecision ? <Badge variant="outline">you: {myDecision}</Badge> : null}
+                            {mine ? <Badge variant="outline">my_decision: {mine}</Badge> : null}
                           </Group>
 
                           <Text fw={600}>{a.title}</Text>
-
                           <Text size="xs" c="dimmed">
                             {a.id}
                           </Text>
                         </Stack>
 
-                        {showVoteControls ? (
+                        {showDecide ? (
                           <Group>
                             <Button
                               size="xs"
                               onClick={() => decide(a.id, "approved")}
-                              disabled={alreadyVoted || isBusy}
-                              loading={isBusy}
-                              title={alreadyVoted ? "You already voted" : undefined}
+                              disabled={alreadyDecided}
                             >
                               Approve
                             </Button>
@@ -292,9 +259,7 @@ export default function ActionCenterPage() {
                               size="xs"
                               color="red"
                               onClick={() => decide(a.id, "rejected")}
-                              disabled={alreadyVoted || isBusy}
-                              loading={isBusy}
-                              title={alreadyVoted ? "You already voted" : undefined}
+                              disabled={alreadyDecided}
                             >
                               Reject
                             </Button>
@@ -308,7 +273,9 @@ export default function ActionCenterPage() {
                         {a.decided_by_user_id ? ` · decided_by: ${a.decided_by_user_id}` : ""}
                       </Text>
 
-                      {a.decision_comment ? <Text size="sm">decision_comment: {a.decision_comment}</Text> : null}
+                      {a.decision_comment ? (
+                        <Text size="sm">decision_comment: {a.decision_comment}</Text>
+                      ) : null}
                     </Stack>
                   </Card>
                 );
@@ -324,7 +291,7 @@ export default function ActionCenterPage() {
         <Stack gap="sm">
           <Text fw={700}>Create action item</Text>
           <Text size="sm" c="dimmed">
-            Internal-only actions. Approval requirements are controlled by workspace approvals policy.
+            V2 Step 2: approvals policy + multi-reviewer decisions (server enforced).
           </Text>
 
           <Group grow>
@@ -332,14 +299,14 @@ export default function ActionCenterPage() {
               label="type"
               value={createType}
               onChange={(e) => setCreateType(e.currentTarget.value)}
-              disabled={role === "viewer"}
+              disabled={!canWrite}
             />
             <TextInput
               label="target_ref (optional)"
               value={createTargetRef}
               onChange={(e) => setCreateTargetRef(e.currentTarget.value)}
               placeholder="artifact:UUID"
-              disabled={role === "viewer"}
+              disabled={!canWrite}
             />
           </Group>
 
@@ -347,7 +314,7 @@ export default function ActionCenterPage() {
             label="title"
             value={createTitle}
             onChange={(e) => setCreateTitle(e.currentTarget.value)}
-            disabled={role === "viewer"}
+            disabled={!canWrite}
           />
 
           <Textarea
@@ -356,14 +323,14 @@ export default function ActionCenterPage() {
             minRows={8}
             value={createPayloadJson}
             onChange={(e) => setCreatePayloadJson(e.currentTarget.value)}
-            disabled={role === "viewer"}
+            disabled={!canWrite}
           />
 
-          <Button onClick={createAction} loading={creating} disabled={role === "viewer"}>
+          <Button onClick={createAction} loading={creating} disabled={!canWrite}>
             Create
           </Button>
 
-          {role === "viewer" ? <Text size="sm" c="dimmed">Viewer role cannot create actions.</Text> : null}
+          {!canWrite ? <Text size="sm" c="dimmed">Viewer role cannot create actions.</Text> : null}
         </Stack>
       </Card>
     </Stack>
