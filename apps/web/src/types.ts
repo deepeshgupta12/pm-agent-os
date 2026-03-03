@@ -47,6 +47,7 @@ export type Artifact = {
   logical_key: string;
   version: number;
   status: string;
+  assigned_to_user_id?: string | null;
 };
 
 export type ArtifactDiffMeta = {
@@ -279,4 +280,84 @@ export type ActionItem = {
   approvals_approved_count?: number;
   approvals_rejected_count?: number;
   my_decision?: "approved" | "rejected" | null;
+};
+
+export type ArtifactCommentMention = {
+  mentioned_user_id: string;
+  mentioned_email: string;
+};
+
+export type ArtifactComment = {
+  id: string;
+  artifact_id: string;
+  author_user_id: string;
+  author_email: string;
+  body: string;
+  created_at: string; // ISO
+  mentions: ArtifactCommentMention[];
+};
+
+export type ArtifactAssignIn = {
+  assigned_to_user_id: string | null;
+};
+
+// -----------------------------
+// V2 Step 4: Schedules
+// -----------------------------
+
+export type ScheduleKind = "agent_run" | "pipeline_run";
+
+export type Schedule = {
+  id: string;
+  workspace_id: string;
+  created_by_user_id?: string | null;
+
+  name: string;
+  kind: ScheduleKind;
+
+  timezone: string;
+  cron?: string | null;
+  interval_json: Record<string, unknown>;
+  payload_json: Record<string, unknown>;
+
+  enabled: boolean;
+
+  next_run_at?: string | null; // ISO
+  last_run_at?: string | null; // ISO
+  last_status?: string | null;
+  last_error?: string | null;
+
+  created_at: string; // ISO
+  updated_at: string; // ISO
+};
+
+export type ScheduleRun = {
+  id: string;
+  schedule_id: string;
+  status: "running" | "success" | "failed";
+  started_at: string; // ISO
+  finished_at?: string | null; // ISO
+  error?: string | null;
+
+  run_id?: string | null;
+  pipeline_run_id?: string | null;
+
+  meta: Record<string, unknown>;
+};
+
+export type ScheduleRunNowResponse = {
+  ok: boolean;
+  schedule_id: string;
+  schedule_run: ScheduleRun;
+  run_id?: string | null;
+  pipeline_run_id?: string | null;
+};
+
+export type ScheduleRunDueResponse = {
+  ok: boolean;
+  workspace_id: string;
+  due_count: number;
+  executed_count: number;
+  schedule_runs: ScheduleRun[];
+  now: string; // ISO
 };

@@ -18,7 +18,16 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { apiFetch } from "../apiClient";
-import type { Artifact, ArtifactDiff, ArtifactReview, Run, WorkspaceRole } from "../types";
+import type {
+  Artifact,
+  ArtifactDiff,
+  ArtifactReview,
+  Run,
+  WorkspaceRole,
+  WorkspaceMember,
+  ArtifactComment,
+  ArtifactAssignIn,
+} from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL as string;
 
@@ -43,7 +52,7 @@ export default function ArtifactDetailPage() {
   const [newVerLoading, setNewVerLoading] = useState(false);
   const [copyMsg, setCopyMsg] = useState<string | null>(null);
 
-  // Commit 2: request-publish state
+  // V2 publish request
   const [requestingPublish, setRequestingPublish] = useState(false);
   const [publishRequestMsg, setPublishRequestMsg] = useState<string | null>(null);
 
@@ -52,6 +61,17 @@ export default function ArtifactDetailPage() {
   // Role (derived)
   const [myRole, setMyRole] = useState<WorkspaceRole | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
+
+  // Workspace members (for assignment)
+  const [members, setMembers] = useState<WorkspaceMember[]>([]);
+  const [membersLoading, setMembersLoading] = useState(false);
+  const [assigning, setAssigning] = useState(false);
+
+  // Comments
+  const [comments, setComments] = useState<ArtifactComment[]>([]);
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const [newComment, setNewComment] = useState("");
+  const [postingComment, setPostingComment] = useState(false);
 
   // Approvals (artifact_reviews v1 still present)
   const [reviews, setReviews] = useState<ArtifactReview[]>([]);
@@ -84,8 +104,21 @@ export default function ArtifactDetailPage() {
     }));
   }, [siblings]);
 
+  const memberOptions = useMemo(() => {
+    const opts = members.map((m) => ({
+      value: m.user_id,
+      label: `${m.email} (${m.role})`,
+    }));
+    return [{ value: "", label: "Unassigned" }, ...opts];
+  }, [members]);
+
+  const assigneeLabel = useMemo(() => {
+    if (!art?.assigned_to_user_id) return "Unassigned";
+    const m = members.find((x) => x.user_id === art.assigned_to_user_id);
+    return m ? `${m.email} (${m.role})` : art.assigned_to_user_id;
+  }, [art?.assigned_to_user_id, members]);
+
   async function loadRoleForArtifact(loaded: Artifact) {
-    // fetch run → workspace_id → my-role
     const runRes = await apiFetch<Run>(`/runs/${loaded.run_id}`, { method: "GET" });
     if (!runRes.ok) return;
 
@@ -107,9 +140,33 @@ export default function ArtifactDetailPage() {
     setReviews(rr.data || []);
   }
 
+  async function loadMembers(wid: string) {
+    setMembersLoading(true);
+    const res = await apiFetch<WorkspaceMember[]>(`/workspaces/${wid}/members`, { method: "GET" });
+    setMembersLoading(false);
+    if (!res.ok) {
+      setMembers([]);
+      return;
+    }
+    setMembers(res.data || []);
+  }
+
+  async function loadComments() {
+    if (!aid) return;
+    setCommentsLoading(true);
+    const res = await apiFetch<ArtifactComment[]>(`/artifacts/${aid}/comments`, { method: "GET" });
+    setCommentsLoading(false);
+    if (!res.ok) {
+      setComments([]);
+      return;
+    }
+    setComments(res.data || []);
+  }
+
   async function load() {
     setErr(null);
     setDiffText("");
+    setPublishRequestMsg(null);
 
     const res = await apiFetch<Artifact>(`/artifacts/${aid}`, { method: "GET" });
     if (!res.ok) {
@@ -126,21 +183,26 @@ export default function ArtifactDetailPage() {
     await loadRoleForArtifact(loaded);
     await loadReviews();
 
-    // Load artifacts for same run, then filter to same logical_key (versions)
+    // Load versions
     const sibRes = await apiFetch<Artifact[]>(`/runs/${loaded.run_id}/artifacts`, { method: "GET" });
     if (!sibRes.ok) {
       setSiblings([]);
       setOtherId(null);
-      return;
+    } else {
+      const sameKey = (sibRes.data || [])
+        .filter((x) => x.logical_key === loaded.logical_key)
+        .filter((x) => x.id !== loaded.id)
+        .sort((a, b) => (b.version ?? 0) - (a.version ?? 0));
+      setSiblings(sameKey);
+      setOtherId(sameKey.length > 0 ? sameKey[0].id : null);
     }
 
-    const sameKey = (sibRes.data || [])
-      .filter((x) => x.logical_key === loaded.logical_key)
-      .filter((x) => x.id !== loaded.id)
-      .sort((a, b) => (b.version ?? 0) - (a.version ?? 0));
-
-    setSiblings(sameKey);
-    setOtherId(sameKey.length > 0 ? sameKey[0].id : null);
+    // Members + comments need workspace id
+    const runRes = await apiFetch<Run>(`/runs/${loaded.run_id}`, { method: "GET" });
+    if (runRes.ok) {
+      await loadMembers(runRes.data.workspace_id);
+    }
+    await loadComments();
   }
 
   async function saveInPlace() {
@@ -190,7 +252,8 @@ export default function ArtifactDetailPage() {
     setStatus(res.data.status);
 
     window.history.replaceState({}, "", `/artifacts/${res.data.id}`);
-    await loadReviews(); // new artifact id => different review list
+    await loadReviews();
+    await loadComments();
   }
 
   async function submitForReview() {
@@ -253,10 +316,9 @@ export default function ArtifactDetailPage() {
     }
 
     setDecisionComment("");
-    await load(); // artifact status becomes draft
+    await load();
   }
 
-  // approval-gated publish via Action Center
   async function requestPublish() {
     if (!canWrite) return;
 
@@ -280,7 +342,6 @@ export default function ArtifactDetailPage() {
       `Publish requested. Action created: ${res.data.action_id}. Approve it in Action Center to finalize.`
     );
 
-    // Keep local UI consistent (artifact remains in_review)
     await load();
   }
 
@@ -307,6 +368,53 @@ export default function ArtifactDetailPage() {
     setContentMd(res.data.content_md);
     setStatus(res.data.status);
     await loadReviews();
+  }
+
+  async function assignArtifact(userIdOrEmpty: string | null) {
+    if (!canWrite || !art) return;
+
+    setAssigning(true);
+    setErr(null);
+
+    const body: ArtifactAssignIn = { assigned_to_user_id: userIdOrEmpty && userIdOrEmpty.trim() ? userIdOrEmpty : null };
+
+    const res = await apiFetch<Artifact>(`/artifacts/${aid}/assign`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+
+    setAssigning(false);
+
+    if (!res.ok) {
+      setErr(`Assign failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setArt(res.data);
+  }
+
+  async function postComment() {
+    if (!canWrite) return;
+    const body = newComment.trim();
+    if (!body) return;
+
+    setPostingComment(true);
+    setErr(null);
+
+    const res = await apiFetch<ArtifactComment>(`/artifacts/${aid}/comments`, {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    });
+
+    setPostingComment(false);
+
+    if (!res.ok) {
+      setErr(`Comment failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setNewComment("");
+    await loadComments();
   }
 
   async function copyMarkdown() {
@@ -362,7 +470,7 @@ export default function ArtifactDetailPage() {
   const viewerHint = useMemo(() => {
     if (!myRole) return null;
     if (!isViewer) return null;
-    return "You have viewer access. You can export and copy, but cannot edit, version, submit for review, or request publish.";
+    return "You have viewer access. You can export and copy, but cannot edit, version, submit for review, request publish, assign, or comment.";
   }, [myRole, isViewer]);
 
   const actionCenterHref = useMemo(() => {
@@ -425,6 +533,105 @@ export default function ArtifactDetailPage() {
               </Text>
             </Group>
 
+            {/* Assignment */}
+            <Card withBorder>
+              <Stack gap="xs">
+                <Group justify="space-between" align="flex-end">
+                  <Stack gap={2}>
+                    <Text fw={700}>Assignment</Text>
+                    <Text size="sm" c="dimmed">
+                      Current: {assigneeLabel}
+                    </Text>
+                  </Stack>
+
+                  <Select
+                    label="Assign to"
+                    data={memberOptions}
+                    value={art.assigned_to_user_id ?? ""}
+                    onChange={(v) => assignArtifact(v || "")}
+                    disabled={!canWrite || isFinal || membersLoading || assigning}
+                    searchable
+                    nothingFoundMessage="No members"
+                    style={{ minWidth: 320 }}
+                  />
+                </Group>
+
+                <Text size="xs" c="dimmed">
+                  Tip: members are loaded from Workspace → Members list.
+                </Text>
+              </Stack>
+            </Card>
+
+            {/* Comments */}
+            <Card withBorder>
+              <Stack gap="sm">
+                <Group justify="space-between" align="center">
+                  <Group gap="sm">
+                    <Text fw={700}>Comments</Text>
+                    <Badge variant="light">{comments.length}</Badge>
+                  </Group>
+                  <Button variant="light" onClick={loadComments} loading={commentsLoading}>
+                    Refresh
+                  </Button>
+                </Group>
+
+                {comments.length === 0 ? (
+                  <Text c="dimmed">No comments yet.</Text>
+                ) : (
+                  <Stack gap="xs">
+                    {comments.map((c) => (
+                      <Card key={c.id} withBorder>
+                        <Stack gap={6}>
+                          <Group justify="space-between" align="flex-start">
+                            <Stack gap={2}>
+                              <Text fw={600}>{c.author_email}</Text>
+                              <Text size="xs" c="dimmed">
+                                {c.created_at}
+                              </Text>
+                            </Stack>
+                            {c.mentions && c.mentions.length > 0 ? (
+                              <Group gap="xs">
+                                <Badge variant="light">mentions</Badge>
+                                {c.mentions.slice(0, 4).map((m) => (
+                                  <Badge key={`${c.id}-${m.mentioned_user_id}`} variant="outline">
+                                    @{m.mentioned_email}
+                                  </Badge>
+                                ))}
+                                {c.mentions.length > 4 ? (
+                                  <Badge variant="outline">+{c.mentions.length - 4}</Badge>
+                                ) : null}
+                              </Group>
+                            ) : null}
+                          </Group>
+
+                          <Text style={{ whiteSpace: "pre-wrap" }}>{c.body}</Text>
+                        </Stack>
+                      </Card>
+                    ))}
+                  </Stack>
+                )}
+
+                <Divider />
+
+                <Textarea
+                  label="Add a comment (supports @email mentions)"
+                  autosize
+                  minRows={3}
+                  value={newComment}
+                  onChange={(e) => setNewComment(e.currentTarget.value)}
+                  disabled={!canWrite || isFinal || postingComment}
+                />
+
+                <Group>
+                  <Button onClick={postComment} loading={postingComment} disabled={!canWrite || isFinal || !newComment.trim()}>
+                    Post comment
+                  </Button>
+                  {!canWrite ? <Text size="sm" c="dimmed">Viewer role cannot comment.</Text> : null}
+                </Group>
+              </Stack>
+            </Card>
+
+            {/* Approvals banner */}
             <Card withBorder>
               <Stack gap="xs">
                 <Group justify="space-between">
@@ -477,36 +684,8 @@ export default function ArtifactDetailPage() {
                   </Group>
                 ) : null}
 
-                {reviews.length > 0 ? (
-                  <Card withBorder>
-                    <Stack gap="xs">
-                      <Text fw={600}>Review history</Text>
-                      {reviews.map((r) => (
-                        <Card key={r.id} withBorder>
-                          <Stack gap={2}>
-                            <Group gap="sm">
-                              <Badge variant="light">{r.state}</Badge>
-                              <Text size="sm" c="dimmed">
-                                requested_at {r.requested_at} · requested_by {r.requested_by_user_id}
-                              </Text>
-                            </Group>
-                            {r.request_comment ? <Text size="sm">request: {r.request_comment}</Text> : null}
-                            {r.decided_at ? (
-                              <Text size="sm" c="dimmed">
-                                decided_at {r.decided_at} · decided_by {r.decided_by_user_id}
-                              </Text>
-                            ) : null}
-                            {r.decision_comment ? <Text size="sm">decision: {r.decision_comment}</Text> : null}
-                          </Stack>
-                        </Card>
-                      ))}
-                    </Stack>
-                  </Card>
-                ) : null}
-
                 <Text size="sm" c="dimmed">
-                  Commit 2 note: publishing is now approval-gated via <b>Action Center</b>. Submit for review → request
-                  publish → approve action.
+                  Publishing is approval-gated via <b>Action Center</b>. Submit for review → request publish → approve action.
                 </Text>
               </Stack>
             </Card>
@@ -574,6 +753,7 @@ export default function ArtifactDetailPage() {
 
             <Divider />
 
+            {/* Diff */}
             <Card withBorder>
               <Stack gap="sm">
                 <Group justify="space-between" align="flex-end">
@@ -640,7 +820,7 @@ export default function ArtifactDetailPage() {
 
             {isInReview ? (
               <Text size="sm" c="dimmed">
-                This artifact is in review and locked. Admin must approve/reject. Then request publish via Action Center.
+                This artifact is in review and locked for edits. You can still comment/assign.
               </Text>
             ) : null}
           </Stack>

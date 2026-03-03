@@ -12,6 +12,7 @@ import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Me from "./pages/Me";
 import ActionCenterPage from "./pages/ActionCenterPage";
+import SchedulesPage from "./pages/SchedulesPage";
 
 function TopNav() {
   const loc = useLocation();
@@ -60,6 +61,7 @@ export default function App() {
           <Route path="/workspaces" element={<WorkspacesPage />} />
           <Route path="/workspaces/:workspaceId" element={<WorkspaceDetailPage />} />
           <Route path="/workspaces/:workspaceId/actions" element={<ActionCenterPage />} />
+          <Route path="/workspaces/:workspaceId/schedules" element={<SchedulesPage />} />
 
           {/* Run Builder (V0 close) */}
           <Route path="/run-builder/:workspaceId" element={<RunBuilderPage />} />
