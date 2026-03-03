@@ -86,7 +86,15 @@ class Workspace(Base):
 
     approvals_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
+    # V3 governance (Policy Center + advanced RBAC)
+    policy_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    rbac_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
     schedules: Mapped[List["Schedule"]] = relationship(
+    back_populates="workspace", cascade="all, delete-orphan"
+    )
+
+    agent_bases: Mapped[List["AgentBase"]] = relationship(
     back_populates="workspace", cascade="all, delete-orphan"
     )
 
@@ -118,6 +126,71 @@ class WorkspaceMember(Base):
 
     workspace: Mapped["Workspace"] = relationship(back_populates="members")
     user: Mapped["User"] = relationship(back_populates="workspace_memberships")
+
+
+class AgentBase(Base):
+    __tablename__ = "agent_bases"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # stable key/slug within a workspace, e.g. "custom_prd_agent"
+    key: Mapped[str] = mapped_column(String(120), nullable=False)
+
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    created_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    # relationships
+    workspace: Mapped["Workspace"] = relationship(back_populates="agent_bases")
+    versions: Mapped[List["AgentVersion"]] = relationship(back_populates="agent_base", cascade="all, delete-orphan")
+
+
+class AgentVersion(Base):
+    __tablename__ = "agent_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    agent_base_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_bases.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="draft")  # draft|published|archived
+
+    definition_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    agent_base: Mapped["AgentBase"] = relationship(back_populates="versions")
+
 
 
 class AgentDefinition(Base):

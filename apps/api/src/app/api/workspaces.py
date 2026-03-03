@@ -11,6 +11,12 @@ from app.schemas.core import WorkspaceCreateIn, WorkspaceOut
 from app.schemas.workspaces import WorkspaceMemberInviteIn, WorkspaceMemberOut, WorkspaceRoleOut
 from app.schemas.workspaces import TemplateAdminOut, TemplateAdminUpdateIn
 from app.schemas.core import ApprovalsPolicyOut, ApprovalsPolicyUpdateIn
+from app.schemas.workspaces import (
+    WorkspacePolicyOut,
+    WorkspacePolicyUpdateIn,
+    WorkspaceRBACOut,
+    WorkspaceRBACUpdateIn,
+)
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -224,3 +230,47 @@ def update_approvals_policy(
     db.commit()
     db.refresh(ws)
     return ApprovalsPolicyOut(workspace_id=str(ws.id), approvals_json=ws.approvals_json or {})
+
+# -------------------------
+# V3 Governance: Policy + RBAC
+# -------------------------
+@router.get("/{workspace_id}/policy", response_model=WorkspacePolicyOut)
+def get_policy(workspace_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    ws, _role = require_workspace_access(workspace_id, db, user)  # viewer+ can read
+    return WorkspacePolicyOut(workspace_id=str(ws.id), policy_json=ws.policy_json or {})
+
+
+@router.put("/{workspace_id}/policy", response_model=WorkspacePolicyOut)
+def update_policy(
+    workspace_id: str,
+    payload: WorkspacePolicyUpdateIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    ws, _role = require_workspace_role_min(workspace_id, "admin", db, user)  # admin-only write
+    ws.policy_json = payload.policy_json or {}
+    db.add(ws)
+    db.commit()
+    db.refresh(ws)
+    return WorkspacePolicyOut(workspace_id=str(ws.id), policy_json=ws.policy_json or {})
+
+
+@router.get("/{workspace_id}/rbac", response_model=WorkspaceRBACOut)
+def get_rbac(workspace_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    ws, _role = require_workspace_access(workspace_id, db, user)  # viewer+ can read
+    return WorkspaceRBACOut(workspace_id=str(ws.id), rbac_json=ws.rbac_json or {})
+
+
+@router.put("/{workspace_id}/rbac", response_model=WorkspaceRBACOut)
+def update_rbac(
+    workspace_id: str,
+    payload: WorkspaceRBACUpdateIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    ws, _role = require_workspace_role_min(workspace_id, "admin", db, user)  # admin-only write
+    ws.rbac_json = payload.rbac_json or {}
+    db.add(ws)
+    db.commit()
+    db.refresh(ws)
+    return WorkspaceRBACOut(workspace_id=str(ws.id), rbac_json=ws.rbac_json or {})

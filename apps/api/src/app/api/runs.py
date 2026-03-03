@@ -20,6 +20,7 @@ from app.core.citations import (
     citation_enforcement_report,
     render_citation_compliance_md,
 )
+from app.core.governance import policy_assert_allowed_sources, policy_apply_pii_masking
 from app.core.retrieval_search import hybrid_retrieve
 from app.db.session import get_db
 from app.db.models import (
@@ -43,6 +44,16 @@ from app.schemas.core import (
 )
 
 router = APIRouter(tags=["runs"])
+
+
+def _enforce_policy_sources(ws: Workspace, requested: Optional[List[str]]) -> None:
+    """
+    Step 0.3.1: Convert policy ValueError into a clean HTTP 403 (never 500).
+    """
+    try:
+        policy_assert_allowed_sources(ws, requested)
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
 
 
 # -------------------------
@@ -330,7 +341,7 @@ def create_run(
         q = rcfg.query.strip()
         k = int(rcfg.k or 6)
         alpha = float(rcfg.alpha) if rcfg.alpha is not None else 0.65
-        source_types = [s.strip() for s in (rcfg.source_types or []) if s.strip()]
+        source_types = [s.strip().lower() for s in (rcfg.source_types or []) if s.strip()]
         timeframe = rcfg.timeframe or {}
 
         min_score = float(getattr(rcfg, "min_score", 0.15))
@@ -350,6 +361,9 @@ def create_run(
             "overfetch_k": overfetch_k,
             "rerank": rerank,
         }
+
+        # V3 policy enforcement (allowlist)
+        _enforce_policy_sources(ws, source_types or None)
 
         items = hybrid_retrieve(
             db,
@@ -398,7 +412,7 @@ def create_run(
                 kind="snippet",
                 source_name="retrieval",
                 source_ref=source_ref,
-                excerpt=str(it.get("snippet") or ""),
+                excerpt=policy_apply_pii_masking(ws, str(it.get("snippet") or "")),
                 meta=meta,
             )
             db.add(ev)
@@ -529,6 +543,7 @@ def regenerate_with_retrieval(
     if not r:
         raise HTTPException(status_code=404, detail="Run not found")
 
+    ws, _role = require_workspace_access(str(r.workspace_id), db, user)
     require_workspace_role_min(str(r.workspace_id), "member", db, user)
 
     latest = _latest_artifact_for_run(db, r.id)
@@ -546,7 +561,7 @@ def regenerate_with_retrieval(
     q = rcfg.query.strip()
     k = int(rcfg.k or 6)
     alpha = float(rcfg.alpha) if rcfg.alpha is not None else 0.65
-    source_types = [s.strip() for s in (rcfg.source_types or []) if s.strip()]
+    source_types = [s.strip().lower() for s in (rcfg.source_types or []) if s.strip()]
     timeframe = rcfg.timeframe or {}
 
     min_score = float(getattr(rcfg, "min_score", 0.15))
@@ -566,6 +581,9 @@ def regenerate_with_retrieval(
         "overfetch_k": overfetch_k,
         "rerank": rerank,
     }
+
+    # V3 policy enforcement (allowlist)
+    _enforce_policy_sources(ws, source_types or None)
 
     items = hybrid_retrieve(
         db,
@@ -606,7 +624,7 @@ def regenerate_with_retrieval(
             kind="snippet",
             source_name="retrieval",
             source_ref=source_ref,
-            excerpt=str(it.get("snippet") or ""),
+            excerpt=policy_apply_pii_masking(ws, str(it.get("snippet") or "")),
             meta=meta,
         )
         db.add(ev)
@@ -1087,7 +1105,11 @@ def rag_debug(
             {
                 "batch_id": b.get("batch_id"),
                 "batch_kind": b.get("batch_kind"),
-                "created_at": (b.get("created_at").isoformat().replace("+00:00", "Z") if isinstance(b.get("created_at"), datetime) else None),
+                "created_at": (
+                    b.get("created_at").isoformat().replace("+00:00", "Z")
+                    if isinstance(b.get("created_at"), datetime)
+                    else None
+                ),
                 "evidence_count": int(b.get("evidence_count") or 0),
                 "retrieval": b.get("retrieval") or {},
             }
