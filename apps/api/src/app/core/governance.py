@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from app.db.models import Workspace, User
@@ -89,7 +89,7 @@ def load_rbac(ws: Workspace) -> Dict[str, Any]:
 
 
 # -------------------------
-# Policy hooks (stubs to be enforced in later steps)
+# Policy hooks (enforced in Step 0.3 via callers)
 # -------------------------
 def policy_allowed_source_types(ws: Workspace) -> List[str]:
     pol = load_policy(ws)
@@ -105,15 +105,16 @@ def policy_assert_allowed_sources(
     requested_source_types: Optional[List[str]],
 ) -> None:
     """
-    Step 0.2: stub — does NOT raise yet unless policy explicitly defines allowlist.
-    Later: this becomes a hard enforcement.
+    Enforces workspace policy allowlist if defined.
+    - If allowlist empty => allow all.
+    - If request empty but allowlist exists => allow (means “use defaults”).
+    - If request has disallowed type => raise ValueError (callers convert to HTTPException 403).
     """
     allowlist = policy_allowed_source_types(ws)
     if not allowlist:
         return  # allow all
 
     req = [str(x).strip().lower() for x in (requested_source_types or []) if str(x).strip()]
-    # If request empty but allowlist exists, still allow (means “use defaults”)
     if not req:
         return
 
@@ -125,6 +126,7 @@ def policy_assert_allowed_sources(
 def policy_apply_pii_masking(ws: Workspace, text: str) -> str:
     """
     Placeholder. In Step 2/3 we’ll implement masking depending on privacy policy.
+    For Step 0.3: this is called at storage choke-points; currently no-op unless enabled.
     """
     pol = load_policy(ws)
     privacy = pol.get("privacy") or {}
@@ -161,6 +163,24 @@ def rbac_can_archive_agent(db: Session, ws: Workspace, user: User) -> bool:
     rb = load_rbac(ws)
     rule = rb.get("agent_builder") or {}
     allowed_roles = rule.get("can_archive_agent_roles") or ["admin"]
+
+    role = get_workspace_role(db, ws, user)
+    return bool(role and role.lower() in [str(r).lower() for r in allowed_roles])
+
+
+def rbac_can_create_connector(db: Session, ws: Workspace, user: User) -> bool:
+    rb = load_rbac(ws)
+    rule = rb.get("connectors") or {}
+    allowed_roles = rule.get("can_create_connector_roles") or ["admin"]
+
+    role = get_workspace_role(db, ws, user)
+    return bool(role and role.lower() in [str(r).lower() for r in allowed_roles])
+
+
+def rbac_can_trigger_connector_sync(db: Session, ws: Workspace, user: User) -> bool:
+    rb = load_rbac(ws)
+    rule = rb.get("connectors") or {}
+    allowed_roles = rule.get("can_trigger_sync_roles") or ["admin", "member"]
 
     role = get_workspace_role(db, ws, user)
     return bool(role and role.lower() in [str(r).lower() for r in allowed_roles])

@@ -15,8 +15,13 @@ from app.core.config import settings
 from app.core.embeddings import embed_texts
 from app.core.retrieval_search import hybrid_retrieve
 from app.db.session import get_db
-from app.db.models import User, RetrievalRequest, RetrievalRequestItem
+from app.db.models import User, RetrievalRequest, RetrievalRequestItem, Workspace
 from app.db.retrieval_models import Source, Document, Chunk, Embedding
+from app.core.governance import (
+    policy_assert_allowed_sources,
+    policy_apply_pii_masking,
+    policy_allowed_source_types,
+)
 from app.schemas.retrieval import (
     IngestResult,
     EmbedResult,
@@ -27,6 +32,16 @@ from app.schemas.retrieval import (
 )
 
 router = APIRouter(tags=["retrieval"])
+
+
+def _enforce_policy_sources(ws: Workspace, requested: Optional[List[str]]) -> None:
+    """
+    Step 0.3.1: Convert policy ValueError into a clean HTTP 403 (never 500).
+    """
+    try:
+        policy_assert_allowed_sources(ws, requested)
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
 
 
 # -------------------------
@@ -88,8 +103,8 @@ def _compute_timeframe(
     Returns (timeframe_json, start_ts, end_ts) in UTC.
 
     Supported:
-      - preset: 7d | 30d | 90d
-      - custom: start_date/end_date (YYYY-MM-DD)
+    - preset: 7d | 30d | 90d
+    - custom: start_date/end_date (YYYY-MM-DD)
     """
     now = datetime.now(timezone.utc)
 
@@ -140,11 +155,15 @@ def list_sources(
 ):
     ws, _role = require_workspace_access(workspace_id, db, user)
 
-    rows = (
-        db.execute(select(Source).where(Source.workspace_id == ws.id).order_by(Source.created_at.desc()))
-        .scalars()
-        .all()
-    )
+    # If allowlist exists, only show sources that are allowed (no error; just filtered)
+    allowlist = policy_allowed_source_types(ws)
+    q = select(Source).where(Source.workspace_id == ws.id)
+    if allowlist:
+        q = q.where(Source.type.in_(allowlist))
+    q = q.order_by(Source.created_at.desc())
+
+    rows = db.execute(q).scalars().all()
+
     return [
         SourceOut(
             id=str(s.id),
@@ -165,6 +184,9 @@ def create_or_get_docs_source(
     user: User = Depends(require_user),
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
+
+    # V3 policy enforcement: docs source must be allowed if allowlist exists
+    _enforce_policy_sources(ws, ["docs"])
 
     s = _get_or_create_source(db, ws.id, "docs", payload.name.strip() or "Docs")
     if payload.name.strip() and s.name != payload.name.strip():
@@ -193,6 +215,9 @@ def ingest_docs_text(
     user: User = Depends(require_user),
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
+
+    # V3 policy enforcement: manual docs ingest counts as source_type="docs"
+    _enforce_policy_sources(ws, ["docs"])
 
     src = _get_or_create_source(db, ws.id, "docs", "Docs")
 
@@ -244,10 +269,14 @@ def list_documents(
 ):
     ws, _role = require_workspace_access(workspace_id, db, user)
 
+    # V3 policy enforcement: source_type filter must be allowed
+    if source_type:
+        _enforce_policy_sources(ws, [source_type.strip().lower()])
+
     q = select(Document).where(Document.workspace_id == ws.id)
 
     if source_type:
-        q = q.join(Source, Source.id == Document.source_id).where(Source.type == source_type)
+        q = q.join(Source, Source.id == Document.source_id).where(Source.type == source_type.strip().lower())
 
     q = q.order_by(Document.created_at.desc())
     docs = db.execute(q).scalars().all()
@@ -268,7 +297,12 @@ def embed_document_chunks(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    require_workspace_role_min(str(doc.workspace_id), "member", db, user)
+    ws, _role = require_workspace_role_min(str(doc.workspace_id), "member", db, user)
+
+    # Enforce policy based on doc source type
+    src = db.get(Source, doc.source_id)
+    if src:
+        _enforce_policy_sources(ws, [str(src.type or "").strip().lower()])
 
     chunks = (
         db.execute(select(Chunk).where(Chunk.document_id == doc.id).order_by(Chunk.chunk_index.asc()))
@@ -287,9 +321,9 @@ def embed_document_chunks(
             UPDATE embeddings
             SET embedding_vec = (embedding::text)::vector
             WHERE model = :model
-              AND chunk_id = ANY(:chunk_ids)
-              AND embedding_vec IS NULL
-              AND embedding IS NOT NULL
+            AND chunk_id = ANY(:chunk_ids)
+            AND embedding_vec IS NULL
+            AND embedding IS NOT NULL
             """
         ),
         {"model": settings.EMBEDDINGS_MODEL, "chunk_ids": chunk_ids},
@@ -360,6 +394,10 @@ def retrieve(
     ws, _role = require_workspace_access(workspace_id, db, user)
 
     stypes = _parse_source_types(source_types)
+
+    # V3 policy enforcement: block disallowed source types
+    _enforce_policy_sources(ws, stypes or None)
+
     timeframe_json, start_ts, end_ts = _compute_timeframe(
         preset=timeframe_preset,
         start_date=start_date,
@@ -398,6 +436,7 @@ def retrieve(
     db.refresh(rr)
 
     for idx, it in enumerate(items, start=1):
+
         def _u(v: Any) -> Optional[uuid.UUID]:
             try:
                 return uuid.UUID(str(v)) if v else None
@@ -410,7 +449,7 @@ def retrieve(
             chunk_id=_u(it.get("chunk_id")),
             document_id=_u(it.get("document_id")),
             source_id=_u(it.get("source_id")),
-            snippet=str(it.get("snippet") or ""),
+            snippet=policy_apply_pii_masking(ws, str(it.get("snippet") or "")),
             meta=it.get("meta") or {},
             score_fts=float(it.get("score_fts") or 0.0),
             score_vec=float(it.get("score_vec") or 0.0),

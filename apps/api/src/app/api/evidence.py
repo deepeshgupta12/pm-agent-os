@@ -10,11 +10,22 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
 from app.core.retrieval_search import hybrid_retrieve
+from app.core.governance import policy_assert_allowed_sources, policy_apply_pii_masking
 from app.db.session import get_db
-from app.db.models import Run, Evidence, User, RunLog
+from app.db.models import Run, Evidence, User, RunLog, Workspace
 from app.schemas.core import EvidenceCreateIn, EvidenceOut
 
 router = APIRouter(tags=["evidence"])
+
+
+def _enforce_policy_sources(ws: Workspace, requested: Optional[List[str]]) -> None:
+    """
+    Step 0.3.1: Convert policy ValueError into a clean HTTP 403 (never 500).
+    """
+    try:
+        policy_assert_allowed_sources(ws, requested)
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
 
 
 class AutoEvidenceIn(BaseModel):
@@ -78,6 +89,13 @@ def _get_run_or_404(db: Session, run_id: str) -> Run:
     return run
 
 
+def _get_workspace_for_run(db: Session, run: Run) -> Workspace:
+    ws = db.get(Workspace, run.workspace_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return ws
+
+
 @router.post("/runs/{run_id}/evidence", response_model=EvidenceOut)
 def add_evidence(
     run_id: str,
@@ -86,6 +104,7 @@ def add_evidence(
     user: User = Depends(require_user),
 ):
     run = _get_run_or_404(db, run_id)
+    ws = _get_workspace_for_run(db, run)
 
     # member+ only
     require_workspace_role_min(str(run.workspace_id), "member", db, user)
@@ -95,7 +114,7 @@ def add_evidence(
         kind=payload.kind,
         source_name=payload.source_name,
         source_ref=payload.source_ref,
-        excerpt=payload.excerpt,
+        excerpt=policy_apply_pii_masking(ws, payload.excerpt or ""),
         meta=payload.meta,
     )
     db.add(ev)
@@ -147,9 +166,13 @@ def auto_add_evidence(
     user: User = Depends(require_user),
 ):
     run = _get_run_or_404(db, run_id)
+    ws = _get_workspace_for_run(db, run)
 
     # member+ only
     require_workspace_role_min(str(run.workspace_id), "member", db, user)
+
+    # Policy allowlist exists? This endpoint doesn't accept source_types, so we allow "defaults".
+    _enforce_policy_sources(ws, None)
 
     items = hybrid_retrieve(
         db,
@@ -178,7 +201,7 @@ def auto_add_evidence(
             kind="snippet",
             source_name="retrieval",
             source_ref=source_ref,
-            excerpt=it.get("snippet", ""),
+            excerpt=policy_apply_pii_masking(ws, it.get("snippet", "") or ""),
             meta=meta,
         )
         db.add(ev)
@@ -213,6 +236,7 @@ def attach_preview_as_evidence(
     user: User = Depends(require_user),
 ):
     run = _get_run_or_404(db, run_id)
+    ws = _get_workspace_for_run(db, run)
 
     # member+ only
     require_workspace_role_min(str(run.workspace_id), "member", db, user)
@@ -222,23 +246,24 @@ def attach_preview_as_evidence(
 
     batch_id = str(uuid.uuid4())
 
-    # Normalize retrieval payload for storage
     r = payload.retrieval
     retrieval_meta: Dict[str, Any] = {
         "enabled": True,
         "query": (r.query or "").strip(),
         "k": int(r.k),
         "alpha": float(r.alpha),
-        "source_types": [s.strip() for s in (r.source_types or []) if s and s.strip()],
+        "source_types": [s.strip().lower() for s in (r.source_types or []) if s and s.strip()],
         "timeframe": r.timeframe or {},
         "min_score": float(r.min_score),
         "overfetch_k": int(r.overfetch_k),
         "rerank": bool(r.rerank),
     }
 
+    # Policy enforcement for preview’s requested source types
+    _enforce_policy_sources(ws, retrieval_meta.get("source_types") or None)
+
     created: List[Evidence] = []
     for rank, it in enumerate(payload.items, start=1):
-        # We store source_ref consistent with other retrieval evidence
         source_ref = f"doc:{it.document_id}#chunk:{it.chunk_id}"
 
         meta = {
@@ -261,7 +286,7 @@ def attach_preview_as_evidence(
             kind="snippet",
             source_name="retrieval",
             source_ref=source_ref,
-            excerpt=it.snippet or "",
+            excerpt=policy_apply_pii_masking(ws, it.snippet or ""),
             meta=meta,
         )
         db.add(ev)
@@ -271,7 +296,6 @@ def attach_preview_as_evidence(
     for e in created:
         db.refresh(e)
 
-    # Audit log so it shows up in timeline/logs + batch index is discoverable
     db.add(
         RunLog(
             run_id=run.id,

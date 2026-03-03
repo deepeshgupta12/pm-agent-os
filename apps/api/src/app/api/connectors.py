@@ -13,8 +13,13 @@ from app.core.github_client import GitHubClient, GitHubAPIError
 from app.core.ingest_common import get_or_create_source, upsert_document, rebuild_chunks, embed_document
 from app.core.google_client import GoogleClient, GoogleAPIError
 from app.core.config import settings
+from app.core.governance import (
+    policy_assert_allowed_sources,
+    rbac_can_create_connector,
+    rbac_can_trigger_connector_sync,
+)
 from app.db.session import get_db
-from app.db.models import Connector, IngestionJob, User
+from app.db.models import Connector, IngestionJob, User, Workspace
 from app.db.retrieval_models import Document, Source, Chunk, Embedding
 from app.schemas.connectors import (
     ConnectorCreateIn,
@@ -30,6 +35,16 @@ router = APIRouter(tags=["connectors"])
 
 VALID_TYPES = {"docs", "jira", "github", "slack", "support", "analytics"}
 VALID_STATUSES = {"connected", "disconnected"}
+
+
+def _enforce_policy_sources(ws: Workspace, requested: Optional[List[str]]) -> None:
+    """
+    Step 0.3.1: Convert policy ValueError into a clean HTTP 403 (never 500).
+    """
+    try:
+        policy_assert_allowed_sources(ws, requested)
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
 
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
@@ -134,11 +149,18 @@ def create_connector(
 ):
     ws, _role = require_workspace_role_min(workspace_id, "admin", db, user)  # admin config
 
+    # RBAC enforcement (advanced)
+    if not rbac_can_create_connector(db, ws, user):
+        raise HTTPException(status_code=403, detail="Not allowed to create connectors in this workspace (RBAC).")
+
     ctype = payload.type.strip().lower()
     name = payload.name.strip()
 
     if ctype not in VALID_TYPES:
         raise HTTPException(status_code=400, detail="Invalid connector type")
+
+    # Policy enforcement: connector type maps to source_type
+    _enforce_policy_sources(ws, [ctype])
 
     # idempotent by (workspace_id, type, name)
     existing = db.execute(
@@ -182,7 +204,11 @@ def update_connector(
     if not c:
         raise HTTPException(status_code=404, detail="Connector not found")
 
-    require_workspace_role_min(str(c.workspace_id), "admin", db, user)
+    ws, _role = require_workspace_role_min(str(c.workspace_id), "admin", db, user)
+
+    # Policy: if changing status/config/name only, no source policy needed;
+    # but we still ensure the connector's type itself is allowed if allowlist exists.
+    _enforce_policy_sources(ws, [str(c.type or "").strip().lower()])
 
     if payload.name is not None:
         c.name = payload.name.strip()
@@ -211,6 +237,8 @@ def trigger_sync(
     """
     Keeps old semantics: stamps last_sync_at for basic health checks.
     member+ can trigger; admin configures.
+
+    Step 0.3: RBAC + policy enforcement added.
     """
     try:
         cid = uuid.UUID(connector_id)
@@ -221,7 +249,17 @@ def trigger_sync(
     if not c:
         raise HTTPException(status_code=404, detail="Connector not found")
 
-    require_workspace_role_min(str(c.workspace_id), "member", db, user)
+    ws = db.get(Workspace, c.workspace_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    require_workspace_role_min(str(ws.id), "member", db, user)
+
+    if not rbac_can_trigger_connector_sync(db, ws, user):
+        raise HTTPException(status_code=403, detail="Not allowed to trigger connector sync (RBAC).")
+
+    # Policy enforcement: connector type is the implied source type
+    _enforce_policy_sources(ws, [str(c.type or "").strip().lower()])
 
     c.last_sync_at = datetime.now(timezone.utc)
     c.last_error = None
@@ -272,6 +310,9 @@ def create_docs_ingestion_job(
     user: User = Depends(require_user),
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
+
+    # Policy enforcement
+    _enforce_policy_sources(ws, ["docs"])
 
     try:
         cid = uuid.UUID(connector_id)
@@ -350,11 +391,7 @@ def create_docs_ingestion_job(
                 source_created_at=None,
                 source_updated_at=None,
             )
-            if created:
-                stats["docs_created"] += 1
-            else:
-                stats["docs_updated"] += 1
-
+            stats["docs_created" if created else "docs_updated"] += 1
             stats["chunks_created"] += rebuild_chunks(db, document_id=doc.id, raw_text=doc.raw_text)
 
             if embed_after:
@@ -391,6 +428,9 @@ def create_github_ingestion_job(
     user: User = Depends(require_user),
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
+
+    # Policy enforcement
+    _enforce_policy_sources(ws, ["github"])
 
     try:
         cid = uuid.UUID(connector_id)
@@ -513,10 +553,7 @@ def create_github_ingestion_job(
                     source_updated_at=src_updated,
                 )
                 stats["documents_upserted"] += 1
-                if created:
-                    stats["releases_created"] += 1
-                else:
-                    stats["releases_updated"] += 1
+                stats["releases_created" if created else "releases_updated"] += 1
 
                 stats["chunks_created"] += rebuild_chunks(db, document_id=doc.id, raw_text=doc.raw_text)
                 if embed_after:
@@ -571,10 +608,7 @@ def create_github_ingestion_job(
                     source_updated_at=src_updated,
                 )
                 stats["documents_upserted"] += 1
-                if created:
-                    stats["prs_created"] += 1
-                else:
-                    stats["prs_updated"] += 1
+                stats["prs_created" if created else "prs_updated"] += 1
 
                 stats["chunks_created"] += rebuild_chunks(db, document_id=doc.id, raw_text=doc.raw_text)
                 if embed_after:
@@ -631,10 +665,7 @@ def create_github_ingestion_job(
                     source_updated_at=src_updated,
                 )
                 stats["documents_upserted"] += 1
-                if created:
-                    stats["issues_created"] += 1
-                else:
-                    stats["issues_updated"] += 1
+                stats["issues_created" if created else "issues_updated"] += 1
 
                 stats["chunks_created"] += rebuild_chunks(db, document_id=doc.id, raw_text=doc.raw_text)
                 if embed_after:
@@ -680,6 +711,9 @@ def create_google_docs_ingestion_job(
     user: User = Depends(require_user),
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
+
+    # Policy enforcement
+    _enforce_policy_sources(ws, ["docs"])
 
     try:
         cid = uuid.UUID(connector_id)
@@ -827,10 +861,7 @@ def create_google_docs_ingestion_job(
                     source_updated_at=src_updated,
                 )
                 stats["documents_upserted"] += 1
-                if created:
-                    stats["docs_created"] += 1
-                else:
-                    stats["docs_updated"] += 1
+                stats["docs_created" if created else "docs_updated"] += 1
 
                 stats["chunks_created"] += rebuild_chunks(db, document_id=doc.id, raw_text=doc.raw_text)
 
@@ -888,13 +919,12 @@ def embeddings_run_once(
     """
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
+    if source_type:
+        _enforce_policy_sources(ws, [source_type.strip().lower()])
+
     lim = int(limit_docs)
     max_chunks = int(max_total_chunks)
 
-    # Identify candidate docs with at least 1 chunk lacking an embedding for current model.
-    # We keep it simple and safe: scan docs by recency and test existence of missing embeddings.
-    #
-    # Missing condition: there exists a chunk for doc where no embedding row exists for that chunk+model.
     base_q = (
         select(Document)
         .where(Document.workspace_id == ws.id)
@@ -918,20 +948,18 @@ def embeddings_run_once(
     for d in docs:
         considered += 1
 
-        # Count missing chunks for this doc in a single query:
-        # chunks where NOT EXISTS embeddings(model, chunk_id)
         missing_count = db.execute(
             sql_text(
                 """
                 SELECT count(*)
                 FROM chunks c
                 WHERE c.document_id = :doc_id
-                  AND NOT EXISTS (
+                AND NOT EXISTS (
                     SELECT 1
                     FROM embeddings e
                     WHERE e.chunk_id = c.id
-                      AND e.model = :model
-                  )
+                    AND e.model = :model
+                )
                 """
             ),
             {"doc_id": str(d.id), "model": model},
@@ -953,7 +981,6 @@ def embeddings_run_once(
             }
         )
 
-    # Dry-run only reports
     if dry_run:
         return {
             "ok": True,
@@ -968,7 +995,6 @@ def embeddings_run_once(
             "note": "No embeddings were created because dry_run=true.",
         }
 
-    # Actually embed, respecting max_total_chunks
     if not settings.OPENAI_API_KEY:
         raise HTTPException(status_code=400, detail="OPENAI_API_KEY missing; cannot embed (or use dry_run=true).")
 
@@ -977,8 +1003,6 @@ def embeddings_run_once(
             break
 
         doc_id = uuid.UUID(cd["document_id"])
-
-        # embed_document only embeds missing chunks, returns embedded count
         before = embedded_chunks_total
         newly = embed_document(db, document_id=doc_id)
         embedded_chunks_total += int(newly or 0)
@@ -986,11 +1010,9 @@ def embeddings_run_once(
         if newly > 0:
             embedded_docs += 1
 
-        # Stop if cap reached
         if embedded_chunks_total >= max_chunks:
             break
 
-        # Safety: if doc embeds an absurd amount, still obey cap
         if embedded_chunks_total - before > max_chunks:
             embedded_chunks_total = max_chunks
             break
