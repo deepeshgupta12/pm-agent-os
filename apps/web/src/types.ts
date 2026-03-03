@@ -253,3 +253,24 @@ export type TemplateAdmin = {
   workspace_id: string;
   template_admin_json: Record<string, unknown>;
 };
+
+export type ActionItem = {
+  id: string;
+  workspace_id: string;
+  created_by_user_id: string;
+  assigned_to_user_id?: string | null;
+  decided_by_user_id?: string | null;
+
+  type: string;
+  status: "queued" | "approved" | "rejected" | "cancelled";
+  title: string;
+
+  payload_json: Record<string, unknown>;
+  target_ref?: string | null;
+
+  decision_comment?: string | null;
+  decided_at?: string | null;
+
+  created_at: string;
+  updated_at: string;
+};
