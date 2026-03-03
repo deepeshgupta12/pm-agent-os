@@ -11,12 +11,7 @@ from zoneinfo import ZoneInfo
 
 from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
 from app.db.session import get_db
-from app.db.models import (
-    User,
-    Workspace,
-    Schedule,
-    ScheduleRun,
-)
+from app.db.models import User, Workspace, Schedule, ScheduleRun
 
 # Reuse existing "create run" behavior (sync execution)
 from app.api.runs import create_run as create_run_route
@@ -58,13 +53,39 @@ def _as_zone(tz_name: str) -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
-# -------------------------
-# FIX: make weekday convention explicit + UI-safe
-# -------------------------
-# We store weekdays as Python's weekday(): Monday=0 .. Sunday=6.
-# This is ISO-ish and matches datetime.weekday().
-# UI must NOT display "0=Sun"; it should map 0->Mon, ..., 6->Sun.
-WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+def _coerce_weekdays_to_mon0(vals: List[int]) -> List[int]:
+    """
+    Canonical stored form: Mon=0 .. Sun=6.
+
+    Accepts inputs in any of these forms:
+    A) Mon=0..Sun=6  (canonical)
+    B) Sun=0..Sat=6  (legacy UI)
+       -> convert with: 0->6, else x-1
+    C) Mon=1..Sun=7  (legacy UI)
+       -> convert with: x-1
+    """
+    if not vals:
+        return []
+
+    uniq = sorted(set(vals))
+
+    # C) Mon=1..Sun=7 (no 0s, all 1..7)
+    if 0 not in uniq and min(uniq) >= 1 and max(uniq) <= 7:
+        mapped = [x - 1 for x in uniq if 1 <= x <= 7]
+        return sorted(set([x for x in mapped if 0 <= x <= 6]))
+
+    # B) Sun=0..Sat=6 (has 0, all <=6)
+    if 0 in uniq and min(uniq) >= 0 and max(uniq) <= 6:
+        mapped: List[int] = []
+        for x in uniq:
+            if x == 0:
+                mapped.append(6)      # Sun -> 6
+            else:
+                mapped.append(x - 1)  # Mon(1)->0, Tue(2)->1, ...
+        return sorted(set([x for x in mapped if 0 <= x <= 6]))
+
+    # A) assume canonical already; keep only 0..6
+    return sorted(set([x for x in uniq if 0 <= x <= 6]))
 
 
 def _normalize_interval_json(interval_json: Dict[str, Any]) -> Dict[str, Any]:
@@ -72,16 +93,16 @@ def _normalize_interval_json(interval_json: Dict[str, Any]) -> Dict[str, Any]:
     Supported shapes:
 
     Daily:
-    {
-      "mode": "daily",
-      "at": "HH:MM"
-    }
+    { "mode": "daily", "at": "HH:MM" }
 
     Weekly:
     {
       "mode": "weekly",
       "at": "HH:MM",
-      "weekdays": [0..6]   # Monday=0 .. Sunday=6 (matches datetime.weekday)
+      "weekdays": [0..6]  # canonical: Mon=0 .. Sun=6
+      # NOTE: we also accept legacy aliases:
+      # - "days": [...]
+      # - weekday conventions Sun=0..Sat=6, or Mon=1..Sun=7
     }
 
     Defaults:
@@ -106,36 +127,33 @@ def _normalize_interval_json(interval_json: Dict[str, Any]) -> Dict[str, Any]:
         hh, mm = 9, 0
     at_norm = f"{hh:02d}:{mm:02d}"
 
-    weekdays = ij.get("weekdays")
-    if not isinstance(weekdays, list):
-        weekdays = []
-    wd_norm: List[int] = []
-    for w in weekdays:
+    # Accept both keys: weekdays (canonical) OR days (legacy UI)
+    raw_weekdays = ij.get("weekdays")
+    if raw_weekdays is None:
+        raw_weekdays = ij.get("days")
+
+    if not isinstance(raw_weekdays, list):
+        raw_weekdays = []
+
+    parsed: List[int] = []
+    for w in raw_weekdays:
         try:
-            x = int(w)
-            if 0 <= x <= 6:
-                wd_norm.append(x)
+            parsed.append(int(w))
         except Exception:
             continue
-    wd_norm = sorted(list(set(wd_norm)))
+
+    wd_norm = _coerce_weekdays_to_mon0(parsed)
 
     out: Dict[str, Any] = {"mode": mode, "at": at_norm}
     if mode == "weekly":
-        out["weekdays"] = wd_norm or [0]  # default Monday
+        out["weekdays"] = wd_norm or [0]  # default Monday (Mon=0)
     return out
 
 
-def _compute_next_run_at(
-    *,
-    now_utc: datetime,
-    tz_name: str,
-    interval_json: Dict[str, Any],
-) -> datetime:
+def _compute_next_run_at(*, now_utc: datetime, tz_name: str, interval_json: Dict[str, Any]) -> datetime:
     """
     Returns next run timestamp in UTC.
     Schedules are computed in schedule.timezone.
-
-    Weekly convention: weekdays are Monday=0 .. Sunday=6 (datetime.weekday()).
     """
     tz = _as_zone(tz_name)
     now_local = now_utc.astimezone(tz)
@@ -154,13 +172,9 @@ def _compute_next_run_at(
             candidate = local_dt(now_local + timedelta(days=1), hh, mm)
         return candidate.astimezone(timezone.utc)
 
-    # weekly
+    # weekly (Mon=0..Sun=6)
     weekdays: List[int] = list(ij.get("weekdays") or [0])
-    # python weekday: Monday=0..Sunday=6 matches our convention
-    today_wd = int(now_local.weekday())
-    _ = today_wd  # keep for readability / future debug
 
-    # try today then next 6 days
     for delta_days in range(0, 7):
         d = now_local + timedelta(days=delta_days)
         if int(d.weekday()) not in weekdays:
@@ -169,7 +183,6 @@ def _compute_next_run_at(
         if candidate > now_local:
             return candidate.astimezone(timezone.utc)
 
-    # fallback: next week same time (safe)
     d2 = now_local + timedelta(days=7)
     candidate2 = local_dt(d2, hh, mm)
     return candidate2.astimezone(timezone.utc)
@@ -249,8 +262,7 @@ def create_schedule(
 
     tz_name = (payload.timezone or "UTC").strip() or "UTC"
     interval_json = payload.interval_json or {}
-    norm_ij = _normalize_interval_json(interval_json)
-    next_run_at = _compute_next_run_at(now_utc=_utcnow(), tz_name=tz_name, interval_json=norm_ij)
+    next_run_at = _compute_next_run_at(now_utc=_utcnow(), tz_name=tz_name, interval_json=interval_json)
 
     s = Schedule(
         workspace_id=ws.id,
@@ -259,7 +271,7 @@ def create_schedule(
         kind=kind,
         timezone=tz_name,
         cron=(payload.cron.strip() if payload.cron else None),
-        interval_json=norm_ij,
+        interval_json=_normalize_interval_json(interval_json),
         payload_json=payload.payload_json or {},
         enabled=bool(payload.enabled),
         next_run_at=next_run_at if payload.enabled else None,
@@ -301,7 +313,6 @@ def update_schedule(
         raise HTTPException(status_code=404, detail="Schedule not found")
 
     ws, _role = require_workspace_role_min(str(s.workspace_id), "member", db, user)
-    _ = ws  # explicit, not used beyond RBAC
 
     if payload.name is not None:
         s.name = payload.name.strip()
@@ -321,13 +332,8 @@ def update_schedule(
     if payload.payload_json is not None:
         s.payload_json = payload.payload_json or {}
 
-    # recompute next_run_at whenever schedule is enabled
     if s.enabled:
-        s.next_run_at = _compute_next_run_at(
-            now_utc=_utcnow(),
-            tz_name=s.timezone,
-            interval_json=s.interval_json or {},
-        )
+        s.next_run_at = _compute_next_run_at(now_utc=_utcnow(), tz_name=s.timezone, interval_json=s.interval_json or {})
     else:
         s.next_run_at = None
 
@@ -389,10 +395,6 @@ def _execute_schedule_sync(
     s: Schedule,
     reason: str,
 ) -> Tuple[ScheduleRun, Optional[str], Optional[str]]:
-    """
-    Returns (schedule_run, run_id, pipeline_run_id) as strings.
-    Executes immediately (sync) inside API call.
-    """
     sr = ScheduleRun(
         schedule_id=s.id,
         status="running",
@@ -425,9 +427,7 @@ def _execute_schedule_sync(
             if retrieval is not None and not isinstance(retrieval, dict):
                 raise Exception("schedule.payload_json.retrieval must be an object or null")
 
-            rcfg = None
-            if isinstance(retrieval, dict):
-                rcfg = retrieval
+            rcfg = retrieval if isinstance(retrieval, dict) else None
 
             run_out = create_run_route(
                 workspace_id=str(ws.id),
@@ -469,16 +469,11 @@ def _execute_schedule_sync(
         sr.finished_at = _utcnow()
         db.add(sr)
 
-        # update schedule bookkeeping + next_run_at
         s.last_run_at = sr.finished_at
         s.last_status = sr.status
         s.last_error = None
         if s.enabled:
-            s.next_run_at = _compute_next_run_at(
-                now_utc=_utcnow(),
-                tz_name=s.timezone,
-                interval_json=s.interval_json or {},
-            )
+            s.next_run_at = _compute_next_run_at(now_utc=_utcnow(), tz_name=s.timezone, interval_json=s.interval_json or {})
         db.add(s)
 
         db.commit()
@@ -495,11 +490,7 @@ def _execute_schedule_sync(
         s.last_status = "failed"
         s.last_error = str(e)
         if s.enabled:
-            s.next_run_at = _compute_next_run_at(
-                now_utc=_utcnow(),
-                tz_name=s.timezone,
-                interval_json=s.interval_json or {},
-            )
+            s.next_run_at = _compute_next_run_at(now_utc=_utcnow(), tz_name=s.timezone, interval_json=s.interval_json or {})
         db.add(s)
 
         db.commit()
@@ -538,11 +529,6 @@ def run_due_schedules(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    """
-    Executes enabled schedules where next_run_at <= now (sync).
-    Intended for "daily monitoring" / "weekly pack" manual trigger in V0.
-    In V1/V2 we can wire this to a cron/worker.
-    """
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
     now = _utcnow()
