@@ -13,7 +13,7 @@ from app.api.evidence import router as evidence_router
 from app.api.agents import router as agents_router
 from app.api.export import router as export_router
 from app.api.connectors import router as connectors_router
-
+from app.api.agents_v2 import router as agents_v2_router
 from app.api.retrieval import router as retrieval_router
 from app.api.integrations_github import router as github_router
 from app.api.action_center import router as action_center_router
@@ -44,3 +44,4 @@ app.include_router(github_router)
 app.include_router(action_center_router)
 app.include_router(pipelines_router)
 app.include_router(schedules_router)
+app.include_router(agents_v2_router)

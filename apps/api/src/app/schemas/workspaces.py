@@ -1,5 +1,6 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional
+
+from typing import Any, Dict
 from pydantic import BaseModel, Field
 
 
@@ -26,3 +27,24 @@ class TemplateAdminOut(BaseModel):
 
 class TemplateAdminUpdateIn(BaseModel):
     template_admin_json: Dict[str, Any] = Field(default_factory=dict)
+
+
+# -------------------------
+# V3 Governance: Policy + RBAC
+# -------------------------
+class WorkspacePolicyOut(BaseModel):
+    workspace_id: str
+    policy_json: Dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspacePolicyUpdateIn(BaseModel):
+    policy_json: Dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceRBACOut(BaseModel):
+    workspace_id: str
+    rbac_json: Dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceRBACUpdateIn(BaseModel):
+    rbac_json: Dict[str, Any] = Field(default_factory=dict)
