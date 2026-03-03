@@ -28,21 +28,29 @@ def upgrade() -> None:
             postgresql.UUID(as_uuid=True),
             sa.ForeignKey("workspaces.id", ondelete="CASCADE"),
             nullable=False,
-            index=True,
         ),
         sa.Column(
             "created_by_user_id",
             postgresql.UUID(as_uuid=True),
             sa.ForeignKey("users.id", ondelete="SET NULL"),
             nullable=True,
-            index=True,
         ),
         sa.Column("name", sa.String(length=200), nullable=False),
         sa.Column("kind", sa.String(length=32), nullable=False),  # agent_run | pipeline_run
         sa.Column("timezone", sa.String(length=64), nullable=False, server_default="UTC"),
         sa.Column("cron", sa.String(length=120), nullable=True),
-        sa.Column("interval_json", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'{}'::jsonb")),
-        sa.Column("payload_json", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'{}'::jsonb")),
+        sa.Column(
+            "interval_json",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
+        ),
+        sa.Column(
+            "payload_json",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
+        ),
         sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.Column("next_run_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_run_at", sa.DateTime(timezone=True), nullable=True),
@@ -52,7 +60,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now(), onupdate=sa.func.now()),
     )
 
-    op.create_index("ix_schedules_workspace_id", "schedules", ["workspace_id"])
+    # indexes (make them safe)
     op.create_index("ix_schedules_enabled_next_run_at", "schedules", ["enabled", "next_run_at"])
 
     op.create_table(
@@ -63,15 +71,19 @@ def upgrade() -> None:
             postgresql.UUID(as_uuid=True),
             sa.ForeignKey("schedules.id", ondelete="CASCADE"),
             nullable=False,
-            index=True,
         ),
         sa.Column("status", sa.String(length=32), nullable=False, server_default="running"),  # running|success|failed
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("error", sa.Text(), nullable=True),
-        sa.Column("run_id", postgresql.UUID(as_uuid=True), nullable=True, index=True),
-        sa.Column("pipeline_run_id", postgresql.UUID(as_uuid=True), nullable=True, index=True),
-        sa.Column("meta", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'{}'::jsonb")),
+        sa.Column("run_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("pipeline_run_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column(
+            "meta",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
+        ),
     )
 
     op.create_index("ix_schedule_runs_schedule_id", "schedule_runs", ["schedule_id"])
@@ -84,5 +96,4 @@ def downgrade() -> None:
     op.drop_table("schedule_runs")
 
     op.drop_index("ix_schedules_enabled_next_run_at", table_name="schedules")
-    op.drop_index("ix_schedules_workspace_id", table_name="schedules")
     op.drop_table("schedules")
