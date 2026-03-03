@@ -18,6 +18,7 @@ from app.api.retrieval import router as retrieval_router
 from app.api.integrations_github import router as github_router
 from app.api.action_center import router as action_center_router
 from app.api.pipelines import router as pipelines_router
+from app.api.schedules import router as schedules_router
 
 app = FastAPI(title="PM Agent OS API", version="0.0.1")
 
@@ -42,3 +43,4 @@ app.include_router(retrieval_router)
 app.include_router(github_router)
 app.include_router(action_center_router)
 app.include_router(pipelines_router)
+app.include_router(schedules_router)
