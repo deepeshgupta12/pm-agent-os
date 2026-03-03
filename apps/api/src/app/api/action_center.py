@@ -8,15 +8,23 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_user, require_workspace_access, require_workspace_role_min, get_workspace_role
+from app.api.deps import (
+    require_user,
+    require_workspace_access,
+    require_workspace_role_min,
+    get_workspace_role,
+)
+from app.core.actions_executor import execute_action_if_applicable
 from app.db.session import get_db
-from app.db.models import ActionItem, Workspace, User, ActionItemDecision, Artifact, Run
+from app.db.models import ActionItem, Workspace, User, ActionItemDecision
 
 from app.schemas.core import (
     ActionItemCreateIn,
     ActionItemAssignIn,
     ActionItemDecisionIn,
+    ActionItemCancelIn,
     ActionItemOut,
+    ActionItemDecisionOut,
 )
 
 router = APIRouter(tags=["action_center"])
@@ -30,13 +38,25 @@ VALID_STATUSES = {"queued", "approved", "rejected", "cancelled"}
 DEFAULT_POLICY: Dict[str, Any] = {
     # per action type: required approvals + allowed roles
     "rules": {
-        # example types
-        "decision_log_create": {"approvals_required": 1, "reviewer_roles": ["admin"]},
-        "artifact_publish": {"approvals_required": 1, "reviewer_roles": ["admin"]},
+        # default examples
+        "decision_log_create": {
+            "approvals_required": 1,
+            "reviewer_roles": ["admin"],
+            "creator_roles": ["member", "admin"],
+        },
+        "artifact_publish": {
+            "approvals_required": 1,
+            "reviewer_roles": ["admin"],
+            "creator_roles": ["member", "admin"],
+        },
     }
 }
 
 ROLE_ORDER = {"viewer": 1, "member": 2, "admin": 3}
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _parse_uuid(id_str: str, *, label: str) -> uuid.UUID:
@@ -52,7 +72,6 @@ def _load_policy(ws: Workspace) -> Dict[str, Any]:
     if not isinstance(pol, dict):
         pol = {}
     base = dict(DEFAULT_POLICY)
-    # merge
     rules = dict(base.get("rules") or {})
     if isinstance(pol.get("rules"), dict):
         rules.update(pol["rules"])
@@ -64,15 +83,42 @@ def _policy_for_action(ws: Workspace, action_type: str) -> Dict[str, Any]:
     pol = _load_policy(ws)
     rules = pol.get("rules") or {}
     rule = rules.get(action_type) or {}
-    # normalize
+    if not isinstance(rule, dict):
+        rule = {}
+
     approvals_required = int(rule.get("approvals_required") or 1)
+
     reviewer_roles = rule.get("reviewer_roles") or ["admin"]
+    creator_roles = rule.get("creator_roles") or ["member", "admin"]
+
     reviewer_user_ids = rule.get("reviewer_user_ids") or []  # optional allow-list
+
+    # normalize
+    reviewer_roles_norm = [str(r).lower() for r in reviewer_roles]
+    creator_roles_norm = [str(r).lower() for r in creator_roles]
+
+    allow_users = [str(x) for x in reviewer_user_ids if str(x).strip()]
+
+    # If explicit allow-list exists, we treat it as "required reviewers".
+    # Snapshot approvals_required = len(allow_users) (min 1).
+    if allow_users:
+        approvals_required = max(1, len(allow_users))
+
     return {
-        "approvals_required": approvals_required,
-        "reviewer_roles": [str(r).lower() for r in reviewer_roles],
-        "reviewer_user_ids": [str(x) for x in reviewer_user_ids],
+        "approvals_required": max(1, approvals_required),
+        "reviewer_roles": reviewer_roles_norm,
+        "creator_roles": creator_roles_norm,
+        "reviewer_user_ids": allow_users,
     }
+
+
+def _is_creator_allowed(ws: Workspace, user: User, db: Session, rule: Dict[str, Any]) -> bool:
+    role = get_workspace_role(db, ws, user)
+    if not role:
+        return False
+    role = role.lower()
+    allowed_roles: List[str] = rule.get("creator_roles") or ["member", "admin"]
+    return role in allowed_roles
 
 
 def _is_reviewer_allowed(ws: Workspace, user: User, db: Session, rule: Dict[str, Any]) -> bool:
@@ -81,7 +127,6 @@ def _is_reviewer_allowed(ws: Workspace, user: User, db: Session, rule: Dict[str,
         return False
     role = role.lower()
 
-    # explicit allow-list wins (if provided)
     allow_users: List[str] = rule.get("reviewer_user_ids") or []
     if allow_users:
         return str(user.id) in allow_users
@@ -123,10 +168,6 @@ def _my_decision(db: Session, action_id: uuid.UUID, user_id: uuid.UUID) -> Optio
 
 
 def _recompute_status(a: ActionItem, approved: int, rejected: int) -> str:
-    # V2 rule:
-    # - any reject => rejected
-    # - approvals >= required => approved
-    # - else queued
     if a.status == "cancelled":
         return "cancelled"
     if rejected > 0:
@@ -160,6 +201,20 @@ def _to_out(a: ActionItem, *, db: Session, user: User) -> ActionItemOut:
         approvals_rejected_count=rejected,
         my_decision=mine,
     )
+
+
+def _decisions_to_out(rows: List[ActionItemDecision]) -> List[ActionItemDecisionOut]:
+    out: List[ActionItemDecisionOut] = []
+    for d in rows:
+        out.append(
+            ActionItemDecisionOut(
+                reviewer_user_id=str(d.reviewer_user_id),
+                decision=d.decision,
+                comment=d.comment,
+                decided_at=d.decided_at,
+            )
+        )
+    return out
 
 
 # ---------------------------
@@ -205,6 +260,14 @@ def create_action(
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
+    action_type = payload.type.strip()
+
+    rule = _policy_for_action(ws, action_type)
+
+    # creator permission enforcement
+    if not _is_creator_allowed(ws, user, db, rule):
+        raise HTTPException(status_code=403, detail="Not allowed to create this action type")
+
     assigned_id = None
     if payload.assigned_to_user_id:
         try:
@@ -212,7 +275,6 @@ def create_action(
         except Exception:
             raise HTTPException(status_code=400, detail="assigned_to_user_id must be a UUID")
 
-    rule = _policy_for_action(ws, payload.type.strip())
     approvals_required = int(rule.get("approvals_required") or 1)
 
     a = ActionItem(
@@ -220,7 +282,7 @@ def create_action(
         created_by_user_id=user.id,
         assigned_to_user_id=assigned_id,
         decided_by_user_id=None,
-        type=payload.type.strip(),
+        type=action_type,
         status="queued",
         title=payload.title.strip(),
         payload_json=payload.payload_json or {},
@@ -248,6 +310,31 @@ def get_action(
 
     require_workspace_access(str(a.workspace_id), db, user)
     return _to_out(a, db=db, user=user)
+
+
+@router.get("/actions/{action_id}/decisions", response_model=list[ActionItemDecisionOut])
+def list_action_decisions(
+    action_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    aid = _parse_uuid(action_id, label="Action item")
+    a = db.get(ActionItem, aid)
+    if not a:
+        raise HTTPException(status_code=404, detail="Action item not found")
+
+    require_workspace_access(str(a.workspace_id), db, user)
+
+    rows = (
+        db.execute(
+            select(ActionItemDecision)
+            .where(ActionItemDecision.action_id == a.id)
+            .order_by(ActionItemDecision.decided_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+    return _decisions_to_out(rows)
 
 
 @router.patch("/actions/{action_id}/assign", response_model=ActionItemOut)
@@ -278,6 +365,41 @@ def assign_action(
     return _to_out(a, db=db, user=user)
 
 
+@router.post("/actions/{action_id}/cancel", response_model=ActionItemOut)
+def cancel_action(
+    action_id: str,
+    payload: ActionItemCancelIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    aid = _parse_uuid(action_id, label="Action item")
+    a = db.get(ActionItem, aid)
+    if not a:
+        raise HTTPException(status_code=404, detail="Action item not found")
+
+    ws, role = require_workspace_access(str(a.workspace_id), db, user)
+
+    # Only queued actions can be cancelled
+    if a.status != "queued":
+        raise HTTPException(status_code=409, detail="Only queued actions can be cancelled")
+
+    # Cancel permissions: admin OR creator
+    is_admin = (role or "").lower() == "admin"
+    is_creator = a.created_by_user_id == user.id
+    if not (is_admin or is_creator):
+        raise HTTPException(status_code=403, detail="Not allowed to cancel this action")
+
+    a.status = "cancelled"
+    a.decided_by_user_id = user.id
+    a.decision_comment = payload.comment
+    a.decided_at = _utcnow()
+
+    db.add(a)
+    db.commit()
+    db.refresh(a)
+    return _to_out(a, db=db, user=user)
+
+
 @router.post("/actions/{action_id}/decide", response_model=ActionItemOut)
 def decide_action(
     action_id: str,
@@ -293,7 +415,6 @@ def decide_action(
     ws, _ = require_workspace_access(str(a.workspace_id), db, user)
     rule = _policy_for_action(ws, a.type)
 
-    # only queued can be decided
     if a.status != "queued":
         raise HTTPException(status_code=409, detail="Action item is already decided")
 
@@ -320,7 +441,7 @@ def decide_action(
         reviewer_user_id=user.id,
         decision=decision,
         comment=payload.comment,
-        decided_at=datetime.now(timezone.utc),
+        decided_at=_utcnow(),
     )
     db.add(d)
     db.commit()
@@ -333,9 +454,26 @@ def decide_action(
         if new_status in {"approved", "rejected"}:
             a.decided_by_user_id = user.id
             a.decision_comment = payload.comment
-            a.decided_at = datetime.now(timezone.utc)
+            a.decided_at = _utcnow()
         db.add(a)
         db.commit()
         db.refresh(a)
+
+        # If approved, run executor (A: create NEW Run+Artifact)
+        if new_status == "approved":
+            try:
+                execute_action_if_applicable(db=db, ws=ws, user=user, action=a)
+                db.refresh(a)
+            except Exception as e:
+                # Keep action approved, but store error in payload for audit
+                pj = a.payload_json or {}
+                if not isinstance(pj, dict):
+                    pj = {}
+                pj["executor_error"] = str(e)
+                pj["executor_error_at"] = _utcnow().isoformat()
+                a.payload_json = pj
+                db.add(a)
+                db.commit()
+                db.refresh(a)
 
     return _to_out(a, db=db, user=user)
