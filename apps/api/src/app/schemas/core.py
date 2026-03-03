@@ -183,7 +183,11 @@ class ActionItemAssignIn(BaseModel):
 
 
 class ActionItemDecisionIn(BaseModel):
-    decision: str = Field(pattern="^(approved|rejected|cancelled)$")
+    decision: str = Field(pattern="^(approved|rejected)$")
+    comment: Optional[str] = Field(default=None, max_length=5000)
+
+
+class ActionItemCancelIn(BaseModel):
     comment: Optional[str] = Field(default=None, max_length=5000)
 
 

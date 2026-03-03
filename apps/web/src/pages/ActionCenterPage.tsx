@@ -12,9 +12,10 @@ import {
   Textarea,
   Title,
   Divider,
+  Code,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
-import type { ActionItem, WorkspaceRole } from "../types";
+import type { ActionItem, ActionItemDecision, WorkspaceRole } from "../types";
 
 const STATUS_OPTIONS = [
   { value: "", label: "All statuses" },
@@ -29,6 +30,14 @@ function plural(n: number, one: string, many?: string) {
   return n === 1 ? one : m;
 }
 
+function stableJsonStringify(v: any): string {
+  try {
+    return JSON.stringify(v ?? {}, null, 2);
+  } catch {
+    return "{}";
+  }
+}
+
 export default function ActionCenterPage() {
   const { workspaceId } = useParams();
   const wid = workspaceId || "";
@@ -36,9 +45,11 @@ export default function ActionCenterPage() {
   const [myRole, setMyRole] = useState<WorkspaceRole | null>(null);
   const role = (myRole?.role || "").toLowerCase();
   const canWrite = role === "admin" || role === "member";
+  const isAdmin = role === "admin";
 
   const [items, setItems] = useState<ActionItem[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   // filters
@@ -47,7 +58,7 @@ export default function ActionCenterPage() {
 
   // create form
   const [createType, setCreateType] = useState("decision_log_create");
-  const [createTitle, setCreateTitle] = useState("Create decision log for onboarding trade-offs");
+  const [createTitle, setCreateTitle] = useState("Decision log: onboarding trade-offs");
   const [createTargetRef, setCreateTargetRef] = useState("");
   const [createPayloadJson, setCreatePayloadJson] = useState<string>(
     JSON.stringify(
@@ -56,12 +67,17 @@ export default function ActionCenterPage() {
         context: "We need to decide between speed vs completeness",
         options: ["Option A", "Option B"],
         recommendation: "Option A",
+        constraints: "No regression in activation",
       },
       null,
       2
     )
   );
   const [creating, setCreating] = useState(false);
+
+  // decisions drawer (per action)
+  const [decisionsByAction, setDecisionsByAction] = useState<Record<string, ActionItemDecision[]>>({});
+  const [decisionsLoading, setDecisionsLoading] = useState<Record<string, boolean>>({});
 
   async function loadRole() {
     if (!wid) return;
@@ -73,6 +89,7 @@ export default function ActionCenterPage() {
   async function loadItems() {
     if (!wid) return;
     setErr(null);
+    setInfo(null);
     setLoading(true);
 
     const qs = new URLSearchParams();
@@ -97,6 +114,7 @@ export default function ActionCenterPage() {
   async function createAction() {
     if (!wid || !canWrite) return;
     setErr(null);
+    setInfo(null);
 
     let payload: any = {};
     try {
@@ -123,12 +141,14 @@ export default function ActionCenterPage() {
       return;
     }
 
+    setInfo(`Created action: ${res.data.id}`);
     await loadItems();
   }
 
   async function decide(id: string, decision: "approved" | "rejected") {
     if (!wid) return;
     setErr(null);
+    setInfo(null);
 
     const res = await apiFetch<ActionItem>(`/actions/${id}/decide`, {
       method: "POST",
@@ -140,7 +160,43 @@ export default function ActionCenterPage() {
       return;
     }
 
+    setInfo(`Decision recorded: ${decision}`);
     await loadItems();
+  }
+
+  async function cancel(id: string) {
+    if (!wid) return;
+    setErr(null);
+    setInfo(null);
+
+    const res = await apiFetch<ActionItem>(`/actions/${id}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ comment: "Cancelled from Action Center UI" }),
+    });
+
+    if (!res.ok) {
+      setErr(`Cancel failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setInfo(`Cancelled: ${id}`);
+    await loadItems();
+  }
+
+  async function loadDecisions(actionId: string) {
+    setErr(null);
+    setInfo(null);
+
+    setDecisionsLoading((m) => ({ ...m, [actionId]: true }));
+    const res = await apiFetch<ActionItemDecision[]>(`/actions/${actionId}/decisions`, { method: "GET" });
+    setDecisionsLoading((m) => ({ ...m, [actionId]: false }));
+
+    if (!res.ok) {
+      setErr(`Load decisions failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setDecisionsByAction((m) => ({ ...m, [actionId]: res.data || [] }));
   }
 
   const typeOptions = useMemo(() => {
@@ -160,8 +216,7 @@ export default function ActionCenterPage() {
   }, [status, type]);
 
   const isReviewer = useMemo(() => {
-    // Reviewer eligibility is enforced by API; UI can still show buttons for member/admin,
-    // but action-level eligibility (role allow-list) is server-side.
+    // Server is source of truth; UI shows buttons for member/admin only.
     return role === "admin" || role === "member";
   }, [role]);
 
@@ -182,6 +237,12 @@ export default function ActionCenterPage() {
         </Card>
       ) : null}
 
+      {info ? (
+        <Card withBorder>
+          <Text>{info}</Text>
+        </Card>
+      ) : null}
+
       <Card withBorder>
         <Stack gap="sm">
           <Group justify="space-between">
@@ -192,12 +253,7 @@ export default function ActionCenterPage() {
           </Group>
 
           <Group gap="sm" align="flex-end">
-            <Select
-              label="Status"
-              data={STATUS_OPTIONS}
-              value={status}
-              onChange={(v) => setStatus(v || "")}
-            />
+            <Select label="Status" data={STATUS_OPTIONS} value={status} onChange={(v) => setStatus(v || "")} />
             <Select
               label="Type"
               data={typeOptions}
@@ -222,6 +278,9 @@ export default function ActionCenterPage() {
                 const showDecide = a.status === "queued" && isReviewer;
                 const alreadyDecided = !!mine;
 
+                const decisions = decisionsByAction[a.id] || [];
+                const loadingDec = !!decisionsLoading[a.id];
+
                 return (
                   <Card key={a.id} withBorder>
                     <Stack gap={6}>
@@ -233,8 +292,7 @@ export default function ActionCenterPage() {
                             {a.target_ref ? <Badge variant="outline">{a.target_ref}</Badge> : null}
 
                             <Badge variant="light">
-                              approvals: {ok}/{req}{" "}
-                              {rej > 0 ? `· ${rej} ${plural(rej, "reject")}` : ""}
+                              approvals: {ok}/{req} {rej > 0 ? `· ${rej} ${plural(rej, "reject")}` : ""}
                             </Badge>
 
                             {mine ? <Badge variant="outline">my_decision: {mine}</Badge> : null}
@@ -248,23 +306,37 @@ export default function ActionCenterPage() {
 
                         {showDecide ? (
                           <Group>
-                            <Button
-                              size="xs"
-                              onClick={() => decide(a.id, "approved")}
-                              disabled={alreadyDecided}
-                            >
+                            <Button size="xs" onClick={() => decide(a.id, "approved")} disabled={alreadyDecided}>
                               Approve
                             </Button>
-                            <Button
-                              size="xs"
-                              color="red"
-                              onClick={() => decide(a.id, "rejected")}
-                              disabled={alreadyDecided}
-                            >
+                            <Button size="xs" color="red" onClick={() => decide(a.id, "rejected")} disabled={alreadyDecided}>
                               Reject
                             </Button>
+                            <Button
+                              size="xs"
+                              variant="light"
+                              color="red"
+                              onClick={() => cancel(a.id)}
+                              disabled={!isAdmin}
+                            >
+                              Cancel
+                            </Button>
                           </Group>
-                        ) : null}
+                        ) : (
+                          <Group>
+                            {a.status === "queued" ? (
+                              <Button
+                                size="xs"
+                                variant="light"
+                                color="red"
+                                onClick={() => cancel(a.id)}
+                                disabled={!isAdmin}
+                              >
+                                Cancel
+                              </Button>
+                            ) : null}
+                          </Group>
+                        )}
                       </Group>
 
                       <Text size="sm" c="dimmed">
@@ -273,8 +345,43 @@ export default function ActionCenterPage() {
                         {a.decided_by_user_id ? ` · decided_by: ${a.decided_by_user_id}` : ""}
                       </Text>
 
-                      {a.decision_comment ? (
-                        <Text size="sm">decision_comment: {a.decision_comment}</Text>
+                      {a.decision_comment ? <Text size="sm">decision_comment: {a.decision_comment}</Text> : null}
+
+                      <Group justify="space-between">
+                        <Button
+                          size="xs"
+                          variant="light"
+                          onClick={() => loadDecisions(a.id)}
+                          loading={loadingDec}
+                        >
+                          View decisions
+                        </Button>
+
+                        <Text size="xs" c="dimmed">
+                          payload_json keys:{" "}
+                          <Code>{Object.keys(a.payload_json || {}).join(", ") || "-"}</Code>
+                        </Text>
+                      </Group>
+
+                      {decisions.length > 0 ? (
+                        <Card withBorder>
+                          <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+                            {stableJsonStringify(decisions)}
+                          </pre>
+                        </Card>
+                      ) : null}
+
+                      {/* show output pointers if executor ran */}
+                      {a.payload_json && (a.payload_json as any).created_run_id ? (
+                        <Text size="sm">
+                          created_run_id: <Code>{String((a.payload_json as any).created_run_id)}</Code>{" "}
+                          {(a.payload_json as any).created_artifact_id ? (
+                            <>
+                              · created_artifact_id:{" "}
+                              <Code>{String((a.payload_json as any).created_artifact_id)}</Code>
+                            </>
+                          ) : null}
+                        </Text>
                       ) : null}
                     </Stack>
                   </Card>
@@ -291,7 +398,7 @@ export default function ActionCenterPage() {
         <Stack gap="sm">
           <Text fw={700}>Create action item</Text>
           <Text size="sm" c="dimmed">
-            V2 Step 2: approvals policy + multi-reviewer decisions (server enforced).
+            V2: policy-enforced creators + multi-reviewer decisions + executor on approval (decision_log_create).
           </Text>
 
           <Group grow>
@@ -310,12 +417,7 @@ export default function ActionCenterPage() {
             />
           </Group>
 
-          <TextInput
-            label="title"
-            value={createTitle}
-            onChange={(e) => setCreateTitle(e.currentTarget.value)}
-            disabled={!canWrite}
-          />
+          <TextInput label="title" value={createTitle} onChange={(e) => setCreateTitle(e.currentTarget.value)} disabled={!canWrite} />
 
           <Textarea
             label="payload_json"

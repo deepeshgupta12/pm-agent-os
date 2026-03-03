@@ -282,6 +282,13 @@ export type ActionItem = {
   my_decision?: "approved" | "rejected" | null;
 };
 
+export type ActionItemDecision = {
+  reviewer_user_id: string;
+  decision: "approved" | "rejected";
+  comment?: string | null;
+  decided_at: string; // ISO
+};
+
 export type ArtifactCommentMention = {
   mentioned_user_id: string;
   mentioned_email: string;
