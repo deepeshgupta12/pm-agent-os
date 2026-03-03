@@ -47,6 +47,7 @@ export type Artifact = {
   logical_key: string;
   version: number;
   status: string;
+  assigned_to_user_id?: string | null;
 };
 
 export type ArtifactDiffMeta = {
@@ -279,4 +280,23 @@ export type ActionItem = {
   approvals_approved_count?: number;
   approvals_rejected_count?: number;
   my_decision?: "approved" | "rejected" | null;
+};
+
+export type ArtifactCommentMention = {
+  mentioned_user_id: string;
+  mentioned_email: string;
+};
+
+export type ArtifactComment = {
+  id: string;
+  artifact_id: string;
+  author_user_id: string;
+  author_email: string;
+  body: string;
+  created_at: string; // ISO
+  mentions: ArtifactCommentMention[];
+};
+
+export type ArtifactAssignIn = {
+  assigned_to_user_id: string | null;
 };
