@@ -273,4 +273,10 @@ export type ActionItem = {
 
   created_at: string;
   updated_at: string;
+
+  // V2 approvals metadata (from API)
+  approvals_required?: number;
+  approvals_approved_count?: number;
+  approvals_rejected_count?: number;
+  my_decision?: "approved" | "rejected" | null;
 };

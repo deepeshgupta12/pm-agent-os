@@ -84,6 +84,8 @@ class Workspace(Base):
         back_populates="workspace", cascade="all, delete-orphan"
     )
 
+    approvals_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
     connectors: Mapped[List["Connector"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
     ingestion_jobs: Mapped[List["IngestionJob"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
     retrieval_requests: Mapped[List["RetrievalRequest"]] = relationship(
@@ -542,6 +544,8 @@ class ActionItem(Base):
 
     workspace: Mapped["Workspace"] = relationship(back_populates="action_items")
 
+    approvals_required: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
     created_by_user: Mapped["User"] = relationship(
         back_populates="created_action_items", foreign_keys=[created_by_user_id]
     )
@@ -551,3 +555,25 @@ class ActionItem(Base):
     decided_by_user: Mapped[Optional["User"]] = relationship(
         back_populates="decided_action_items", foreign_keys=[decided_by_user_id]
     )
+
+class ActionItemDecision(Base):
+    __tablename__ = "action_item_decisions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    action_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("action_items.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    reviewer_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)  # approved|rejected
+    comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

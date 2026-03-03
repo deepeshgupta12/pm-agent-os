@@ -24,13 +24,17 @@ const STATUS_OPTIONS = [
   { value: "cancelled", label: "cancelled" },
 ];
 
+function plural(n: number, one: string, many?: string) {
+  const m = many ?? `${one}s`;
+  return n === 1 ? one : m;
+}
+
 export default function ActionCenterPage() {
   const { workspaceId } = useParams();
   const wid = workspaceId || "";
 
   const [myRole, setMyRole] = useState<WorkspaceRole | null>(null);
   const role = (myRole?.role || "").toLowerCase();
-  const isAdmin = role === "admin";
   const canWrite = role === "admin" || role === "member";
 
   const [items, setItems] = useState<ActionItem[]>([]);
@@ -75,7 +79,9 @@ export default function ActionCenterPage() {
     if (status) qs.set("status", status);
     if (type.trim()) qs.set("type", type.trim());
 
-    const res = await apiFetch<ActionItem[]>(`/workspaces/${wid}/actions?${qs.toString()}`, { method: "GET" });
+    const res = await apiFetch<ActionItem[]>(`/workspaces/${wid}/actions?${qs.toString()}`, {
+      method: "GET",
+    });
 
     setLoading(false);
 
@@ -120,8 +126,8 @@ export default function ActionCenterPage() {
     await loadItems();
   }
 
-  async function decide(id: string, decision: "approved" | "rejected" | "cancelled") {
-    if (!isAdmin) return;
+  async function decide(id: string, decision: "approved" | "rejected") {
+    if (!wid) return;
     setErr(null);
 
     const res = await apiFetch<ActionItem>(`/actions/${id}/decide`, {
@@ -153,6 +159,12 @@ export default function ActionCenterPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, type]);
 
+  const isReviewer = useMemo(() => {
+    // Reviewer eligibility is enforced by API; UI can still show buttons for member/admin,
+    // but action-level eligibility (role allow-list) is server-side.
+    return role === "admin" || role === "member";
+  }, [role]);
+
   return (
     <Stack gap="md">
       <Group justify="space-between">
@@ -180,7 +192,12 @@ export default function ActionCenterPage() {
           </Group>
 
           <Group gap="sm" align="flex-end">
-            <Select label="Status" data={STATUS_OPTIONS} value={status} onChange={(v) => setStatus(v || "")} />
+            <Select
+              label="Status"
+              data={STATUS_OPTIONS}
+              value={status}
+              onChange={(v) => setStatus(v || "")}
+            />
             <Select
               label="Type"
               data={typeOptions}
@@ -196,47 +213,73 @@ export default function ActionCenterPage() {
             <Text c="dimmed">No action items.</Text>
           ) : (
             <Stack gap="xs">
-              {items.map((a) => (
-                <Card key={a.id} withBorder>
-                  <Stack gap={6}>
-                    <Group justify="space-between" align="flex-start">
-                      <Stack gap={2}>
-                        <Group gap="sm">
-                          <Badge>{a.status}</Badge>
-                          <Badge variant="light">{a.type}</Badge>
-                          {a.target_ref ? <Badge variant="outline">{a.target_ref}</Badge> : null}
-                        </Group>
-                        <Text fw={600}>{a.title}</Text>
-                        <Text size="xs" c="dimmed">
-                          {a.id}
-                        </Text>
-                      </Stack>
+              {items.map((a) => {
+                const req = a.approvals_required ?? 1;
+                const ok = a.approvals_approved_count ?? 0;
+                const rej = a.approvals_rejected_count ?? 0;
+                const mine = a.my_decision ?? null;
 
-                      {isAdmin && a.status === "queued" ? (
-                        <Group>
-                          <Button size="xs" onClick={() => decide(a.id, "approved")}>
-                            Approve
-                          </Button>
-                          <Button size="xs" color="red" onClick={() => decide(a.id, "rejected")}>
-                            Reject
-                          </Button>
-                          <Button size="xs" variant="light" onClick={() => decide(a.id, "cancelled")}>
-                            Cancel
-                          </Button>
-                        </Group>
+                const showDecide = a.status === "queued" && isReviewer;
+                const alreadyDecided = !!mine;
+
+                return (
+                  <Card key={a.id} withBorder>
+                    <Stack gap={6}>
+                      <Group justify="space-between" align="flex-start">
+                        <Stack gap={2} style={{ flex: 1 }}>
+                          <Group gap="sm" wrap="wrap">
+                            <Badge>{a.status}</Badge>
+                            <Badge variant="light">{a.type}</Badge>
+                            {a.target_ref ? <Badge variant="outline">{a.target_ref}</Badge> : null}
+
+                            <Badge variant="light">
+                              approvals: {ok}/{req}{" "}
+                              {rej > 0 ? `· ${rej} ${plural(rej, "reject")}` : ""}
+                            </Badge>
+
+                            {mine ? <Badge variant="outline">my_decision: {mine}</Badge> : null}
+                          </Group>
+
+                          <Text fw={600}>{a.title}</Text>
+                          <Text size="xs" c="dimmed">
+                            {a.id}
+                          </Text>
+                        </Stack>
+
+                        {showDecide ? (
+                          <Group>
+                            <Button
+                              size="xs"
+                              onClick={() => decide(a.id, "approved")}
+                              disabled={alreadyDecided}
+                            >
+                              Approve
+                            </Button>
+                            <Button
+                              size="xs"
+                              color="red"
+                              onClick={() => decide(a.id, "rejected")}
+                              disabled={alreadyDecided}
+                            >
+                              Reject
+                            </Button>
+                          </Group>
+                        ) : null}
+                      </Group>
+
+                      <Text size="sm" c="dimmed">
+                        created_by: {a.created_by_user_id}
+                        {a.assigned_to_user_id ? ` · assigned_to: ${a.assigned_to_user_id}` : ""}
+                        {a.decided_by_user_id ? ` · decided_by: ${a.decided_by_user_id}` : ""}
+                      </Text>
+
+                      {a.decision_comment ? (
+                        <Text size="sm">decision_comment: {a.decision_comment}</Text>
                       ) : null}
-                    </Group>
-
-                    <Text size="sm" c="dimmed">
-                      created_by: {a.created_by_user_id}
-                      {a.assigned_to_user_id ? ` · assigned_to: ${a.assigned_to_user_id}` : ""}
-                      {a.decided_by_user_id ? ` · decided_by: ${a.decided_by_user_id}` : ""}
-                    </Text>
-
-                    {a.decision_comment ? <Text size="sm">decision_comment: {a.decision_comment}</Text> : null}
-                  </Stack>
-                </Card>
-              ))}
+                    </Stack>
+                  </Card>
+                );
+              })}
             </Stack>
           )}
         </Stack>
@@ -248,7 +291,7 @@ export default function ActionCenterPage() {
         <Stack gap="sm">
           <Text fw={700}>Create action item</Text>
           <Text size="sm" c="dimmed">
-            V2 Step 1: internal-only actions (no external integrations).
+            V2 Step 2: approvals policy + multi-reviewer decisions (server enforced).
           </Text>
 
           <Group grow>
