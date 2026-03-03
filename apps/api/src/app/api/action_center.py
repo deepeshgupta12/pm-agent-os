@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional, List, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
+from app.api.deps import require_user, require_workspace_access, require_workspace_role_min, get_workspace_role
 from app.db.session import get_db
-from app.db.models import ActionItem, Workspace, User
+from app.db.models import ActionItem, Workspace, User, ActionItemDecision, Artifact, Run
 
 from app.schemas.core import (
     ActionItemCreateIn,
@@ -23,7 +23,123 @@ router = APIRouter(tags=["action_center"])
 
 VALID_STATUSES = {"queued", "approved", "rejected", "cancelled"}
 
-def _to_out(a: ActionItem) -> ActionItemOut:
+# ---------------------------
+# Policy helpers
+# ---------------------------
+
+DEFAULT_POLICY: Dict[str, Any] = {
+    # per action type: required approvals + allowed roles
+    "rules": {
+        # example types
+        "decision_log_create": {"approvals_required": 1, "reviewer_roles": ["admin"]},
+        "artifact_publish": {"approvals_required": 1, "reviewer_roles": ["admin"]},
+    }
+}
+
+ROLE_ORDER = {"viewer": 1, "member": 2, "admin": 3}
+
+
+def _parse_uuid(id_str: str, *, label: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(id_str)
+    except Exception:
+        raise HTTPException(status_code=404, detail=f"{label} not found")
+
+
+def _load_policy(ws: Workspace) -> Dict[str, Any]:
+    # workspace.approvals_json overrides defaults; merge shallow
+    pol = (ws.approvals_json or {}) if hasattr(ws, "approvals_json") else {}
+    if not isinstance(pol, dict):
+        pol = {}
+    base = dict(DEFAULT_POLICY)
+    # merge
+    rules = dict(base.get("rules") or {})
+    if isinstance(pol.get("rules"), dict):
+        rules.update(pol["rules"])
+    base["rules"] = rules
+    return base
+
+
+def _policy_for_action(ws: Workspace, action_type: str) -> Dict[str, Any]:
+    pol = _load_policy(ws)
+    rules = pol.get("rules") or {}
+    rule = rules.get(action_type) or {}
+    # normalize
+    approvals_required = int(rule.get("approvals_required") or 1)
+    reviewer_roles = rule.get("reviewer_roles") or ["admin"]
+    reviewer_user_ids = rule.get("reviewer_user_ids") or []  # optional allow-list
+    return {
+        "approvals_required": approvals_required,
+        "reviewer_roles": [str(r).lower() for r in reviewer_roles],
+        "reviewer_user_ids": [str(x) for x in reviewer_user_ids],
+    }
+
+
+def _is_reviewer_allowed(ws: Workspace, user: User, db: Session, rule: Dict[str, Any]) -> bool:
+    role = get_workspace_role(db, ws, user)
+    if not role:
+        return False
+    role = role.lower()
+
+    # explicit allow-list wins (if provided)
+    allow_users: List[str] = rule.get("reviewer_user_ids") or []
+    if allow_users:
+        return str(user.id) in allow_users
+
+    allowed_roles: List[str] = rule.get("reviewer_roles") or ["admin"]
+    return role in allowed_roles
+
+
+def _decision_counts(db: Session, action_id: uuid.UUID) -> Tuple[int, int]:
+    approved = (
+        db.execute(
+            select(func.count(ActionItemDecision.id)).where(
+                ActionItemDecision.action_id == action_id,
+                ActionItemDecision.decision == "approved",
+            )
+        ).scalar_one()
+        or 0
+    )
+    rejected = (
+        db.execute(
+            select(func.count(ActionItemDecision.id)).where(
+                ActionItemDecision.action_id == action_id,
+                ActionItemDecision.decision == "rejected",
+            )
+        ).scalar_one()
+        or 0
+    )
+    return int(approved), int(rejected)
+
+
+def _my_decision(db: Session, action_id: uuid.UUID, user_id: uuid.UUID) -> Optional[str]:
+    row = db.execute(
+        select(ActionItemDecision.decision).where(
+            ActionItemDecision.action_id == action_id,
+            ActionItemDecision.reviewer_user_id == user_id,
+        )
+    ).scalar_one_or_none()
+    return str(row) if row else None
+
+
+def _recompute_status(a: ActionItem, approved: int, rejected: int) -> str:
+    # V2 rule:
+    # - any reject => rejected
+    # - approvals >= required => approved
+    # - else queued
+    if a.status == "cancelled":
+        return "cancelled"
+    if rejected > 0:
+        return "rejected"
+    if approved >= int(getattr(a, "approvals_required", 1) or 1):
+        return "approved"
+    return "queued"
+
+
+def _to_out(a: ActionItem, *, db: Session, user: User) -> ActionItemOut:
+    approved, rejected = _decision_counts(db, a.id)
+    mine = _my_decision(db, a.id, user.id)
+
     return ActionItemOut(
         id=str(a.id),
         workspace_id=str(a.workspace_id),
@@ -39,13 +155,16 @@ def _to_out(a: ActionItem) -> ActionItemOut:
         decided_at=a.decided_at,
         created_at=a.created_at,
         updated_at=a.updated_at,
+        approvals_required=int(getattr(a, "approvals_required", 1) or 1),
+        approvals_approved_count=approved,
+        approvals_rejected_count=rejected,
+        my_decision=mine,
     )
 
-def _parse_uuid(id_str: str, *, label: str) -> uuid.UUID:
-    try:
-        return uuid.UUID(id_str)
-    except Exception:
-        raise HTTPException(status_code=404, detail=f"{label} not found")
+
+# ---------------------------
+# Routes
+# ---------------------------
 
 @router.get("/workspaces/{workspace_id}/actions", response_model=list[ActionItemOut])
 def list_actions(
@@ -74,7 +193,8 @@ def list_actions(
 
     q = q.order_by(ActionItem.created_at.desc())
     items = db.execute(q).scalars().all()
-    return [_to_out(x) for x in items]
+    return [_to_out(x, db=db, user=user) for x in items]
+
 
 @router.post("/workspaces/{workspace_id}/actions", response_model=ActionItemOut)
 def create_action(
@@ -92,6 +212,9 @@ def create_action(
         except Exception:
             raise HTTPException(status_code=400, detail="assigned_to_user_id must be a UUID")
 
+    rule = _policy_for_action(ws, payload.type.strip())
+    approvals_required = int(rule.get("approvals_required") or 1)
+
     a = ActionItem(
         workspace_id=ws.id,
         created_by_user_id=user.id,
@@ -104,11 +227,13 @@ def create_action(
         target_ref=(payload.target_ref.strip() if payload.target_ref else None),
         decision_comment=None,
         decided_at=None,
+        approvals_required=approvals_required,
     )
     db.add(a)
     db.commit()
     db.refresh(a)
-    return _to_out(a)
+    return _to_out(a, db=db, user=user)
+
 
 @router.get("/actions/{action_id}", response_model=ActionItemOut)
 def get_action(
@@ -121,9 +246,9 @@ def get_action(
     if not a:
         raise HTTPException(status_code=404, detail="Action item not found")
 
-    # viewer+ ok if can access workspace
     require_workspace_access(str(a.workspace_id), db, user)
-    return _to_out(a)
+    return _to_out(a, db=db, user=user)
+
 
 @router.patch("/actions/{action_id}/assign", response_model=ActionItemOut)
 def assign_action(
@@ -150,7 +275,8 @@ def assign_action(
     db.add(a)
     db.commit()
     db.refresh(a)
-    return _to_out(a)
+    return _to_out(a, db=db, user=user)
+
 
 @router.post("/actions/{action_id}/decide", response_model=ActionItemOut)
 def decide_action(
@@ -164,22 +290,52 @@ def decide_action(
     if not a:
         raise HTTPException(status_code=404, detail="Action item not found")
 
-    # For Step 1: admin-only decisions
-    require_workspace_role_min(str(a.workspace_id), "admin", db, user)
+    ws, _ = require_workspace_access(str(a.workspace_id), db, user)
+    rule = _policy_for_action(ws, a.type)
 
-    if a.status not in {"queued"}:
+    # only queued can be decided
+    if a.status != "queued":
         raise HTTPException(status_code=409, detail="Action item is already decided")
 
+    # reviewer eligibility
+    if not _is_reviewer_allowed(ws, user, db, rule):
+        raise HTTPException(status_code=403, detail="Not allowed to review this action type")
+
     decision = payload.decision.strip().lower()
-    if decision not in {"approved", "rejected", "cancelled"}:
-        raise HTTPException(status_code=400, detail="Invalid decision")
+    if decision not in {"approved", "rejected"}:
+        raise HTTPException(status_code=400, detail="Invalid decision (must be approved|rejected)")
 
-    a.status = decision
-    a.decided_by_user_id = user.id
-    a.decision_comment = payload.comment
-    a.decided_at = datetime.now(timezone.utc)
+    # one decision per reviewer
+    existing = db.execute(
+        select(ActionItemDecision).where(
+            ActionItemDecision.action_id == a.id,
+            ActionItemDecision.reviewer_user_id == user.id,
+        )
+    ).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail="You have already decided on this action")
 
-    db.add(a)
+    d = ActionItemDecision(
+        action_id=a.id,
+        reviewer_user_id=user.id,
+        decision=decision,
+        comment=payload.comment,
+        decided_at=datetime.now(timezone.utc),
+    )
+    db.add(d)
     db.commit()
-    db.refresh(a)
-    return _to_out(a)
+
+    approved, rejected = _decision_counts(db, a.id)
+    new_status = _recompute_status(a, approved, rejected)
+
+    if new_status != a.status:
+        a.status = new_status
+        if new_status in {"approved", "rejected"}:
+            a.decided_by_user_id = user.id
+            a.decision_comment = payload.comment
+            a.decided_at = datetime.now(timezone.utc)
+        db.add(a)
+        db.commit()
+        db.refresh(a)
+
+    return _to_out(a, db=db, user=user)

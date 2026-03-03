@@ -13,6 +13,7 @@ import {
   Divider,
   Badge,
   Select,
+  Anchor,
 } from "@mantine/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -20,6 +21,13 @@ import { apiFetch } from "../apiClient";
 import type { Artifact, ArtifactDiff, ArtifactReview, Run, WorkspaceRole } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL as string;
+
+type PublishRequestResponse = {
+  ok: boolean;
+  action_id: string;
+  workspace_id: string;
+  status: string;
+};
 
 export default function ArtifactDetailPage() {
   const { artifactId } = useParams();
@@ -34,13 +42,18 @@ export default function ArtifactDetailPage() {
   const [saving, setSaving] = useState(false);
   const [newVerLoading, setNewVerLoading] = useState(false);
   const [copyMsg, setCopyMsg] = useState<string | null>(null);
-  const [publishing, setPublishing] = useState(false);
+
+  // Request publish state
+  const [requestingPublish, setRequestingPublish] = useState(false);
+  const [publishRequestMsg, setPublishRequestMsg] = useState<string | null>(null);
+
   const [unpublishing, setUnpublishing] = useState(false);
 
   // Role (derived)
   const [myRole, setMyRole] = useState<WorkspaceRole | null>(null);
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
 
-  // Approvals
+  // Approvals (artifact_reviews v1 still present)
   const [reviews, setReviews] = useState<ArtifactReview[]>([]);
   const [submitComment, setSubmitComment] = useState("");
   const [decisionComment, setDecisionComment] = useState("");
@@ -72,11 +85,12 @@ export default function ArtifactDetailPage() {
   }, [siblings]);
 
   async function loadRoleForArtifact(loaded: Artifact) {
-    // fetch run → workspace_id → my-role
     const runRes = await apiFetch<Run>(`/runs/${loaded.run_id}`, { method: "GET" });
     if (!runRes.ok) return;
 
     const wid = runRes.data.workspace_id;
+    setWorkspaceId(wid);
+
     const roleRes = await apiFetch<WorkspaceRole>(`/workspaces/${wid}/my-role`, { method: "GET" });
     if (!roleRes.ok) return;
 
@@ -95,6 +109,7 @@ export default function ArtifactDetailPage() {
   async function load() {
     setErr(null);
     setDiffText("");
+    // IMPORTANT: do NOT clear publishRequestMsg here — it was wiping your success banner.
 
     const res = await apiFetch<Artifact>(`/artifacts/${aid}`, { method: "GET" });
     if (!res.ok) {
@@ -111,7 +126,6 @@ export default function ArtifactDetailPage() {
     await loadRoleForArtifact(loaded);
     await loadReviews();
 
-    // Load artifacts for same run, then filter to same logical_key (versions)
     const sibRes = await apiFetch<Artifact[]>(`/runs/${loaded.run_id}/artifacts`, { method: "GET" });
     if (!sibRes.ok) {
       setSiblings([]);
@@ -175,7 +189,7 @@ export default function ArtifactDetailPage() {
     setStatus(res.data.status);
 
     window.history.replaceState({}, "", `/artifacts/${res.data.id}`);
-    await loadReviews(); // new artifact id => different review list
+    await loadReviews();
   }
 
   async function submitForReview() {
@@ -238,32 +252,36 @@ export default function ArtifactDetailPage() {
     }
 
     setDecisionComment("");
-    await load(); // artifact status becomes draft
+    await load();
   }
 
-  async function publish() {
+  // Commit 2: approval-gated publish via Action Center
+  async function requestPublish() {
     if (!canWrite) return;
 
-    setPublishing(true);
+    setRequestingPublish(true);
     setErr(null);
+    setPublishRequestMsg(null);
 
-    const res = await apiFetch<Artifact>(`/artifacts/${aid}/publish`, {
+    const res = await apiFetch<PublishRequestResponse>(`/artifacts/${aid}/request-publish`, {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ title: null, comment: null }),
     });
 
-    setPublishing(false);
+    setRequestingPublish(false);
 
     if (!res.ok) {
-      setErr(`Publish failed: ${res.status} ${res.error}`);
+      setErr(`Request publish failed: ${res.status} ${res.error}`);
       return;
     }
 
-    setArt(res.data);
-    setTitle(res.data.title);
-    setContentMd(res.data.content_md);
-    setStatus(res.data.status);
-    await loadReviews();
+    // Show banner immediately (and DO NOT wipe it on load())
+    setPublishRequestMsg(
+      `Publish requested. Action created: ${res.data.action_id}. Approve it in Action Center to finalize.`
+    );
+
+    // Keep artifact status up to date (likely still in_review)
+    await load();
   }
 
   async function unpublish() {
@@ -334,19 +352,23 @@ export default function ArtifactDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aid]);
 
-  const publishDisabledReason = useMemo(() => {
+  const requestPublishDisabledReason = useMemo(() => {
     if (!canWrite) return "Read-only role";
     if (isFinal) return "Already published (final)";
     if (!isInReview) return "Submit for review first";
-    if (latestReviewState !== "approved") return "Needs admin approval";
     return null;
-  }, [canWrite, isFinal, isInReview, latestReviewState]);
+  }, [canWrite, isFinal, isInReview]);
 
   const viewerHint = useMemo(() => {
     if (!myRole) return null;
     if (!isViewer) return null;
-    return "You have viewer access. You can export and copy, but cannot edit, version, submit for review, or publish.";
+    return "You have viewer access. You can export and copy, but cannot edit, version, submit for review, or request publish.";
   }, [myRole, isViewer]);
+
+  const actionCenterHref = useMemo(() => {
+    if (!workspaceId) return null;
+    return `/workspaces/${workspaceId}/actions`;
+  }, [workspaceId]);
 
   return (
     <Stack gap="md">
@@ -369,6 +391,23 @@ export default function ArtifactDetailPage() {
         </Card>
       )}
 
+      {publishRequestMsg ? (
+        <Card withBorder>
+          <Stack gap={6}>
+            <Text>{publishRequestMsg}</Text>
+            {actionCenterHref ? (
+              <Text size="sm" c="dimmed">
+                Go to{" "}
+                <Anchor component={Link} to={actionCenterHref}>
+                  Action Center
+                </Anchor>{" "}
+                to approve.
+              </Text>
+            ) : null}
+          </Stack>
+        </Card>
+      ) : null}
+
       {art ? (
         <Card withBorder>
           <Stack gap="sm">
@@ -386,11 +425,10 @@ export default function ArtifactDetailPage() {
               </Text>
             </Group>
 
-            {/* Approvals banner */}
             <Card withBorder>
               <Stack gap="xs">
                 <Group justify="space-between">
-                  <Text fw={700}>Approvals</Text>
+                  <Text fw={700}>Approvals (Artifact Review)</Text>
                   <Badge variant="light">{isFinal ? "final" : isInReview ? "in_review" : "draft"}</Badge>
                 </Group>
 
@@ -435,10 +473,10 @@ export default function ArtifactDetailPage() {
                     <Button color="red" onClick={reject} loading={rejectLoading} disabled={!isAdmin}>
                       Reject
                     </Button>
+                    <Badge variant="light">state: {latestReviewState || "none"}</Badge>
                   </Group>
                 ) : null}
 
-                {/* Review history */}
                 {reviews.length > 0 ? (
                   <Card withBorder>
                     <Stack gap="xs">
@@ -465,6 +503,11 @@ export default function ArtifactDetailPage() {
                     </Stack>
                   </Card>
                 ) : null}
+
+                <Text size="sm" c="dimmed">
+                  Commit 2 note: publishing is now approval-gated via <b>Action Center</b>. Submit for review → request
+                  publish → approve action(s).
+                </Text>
               </Stack>
             </Card>
 
@@ -503,12 +546,12 @@ export default function ArtifactDetailPage() {
               {!isFinal ? (
                 <Button
                   color="green"
-                  onClick={publish}
-                  loading={publishing}
-                  disabled={!!publishDisabledReason}
-                  title={publishDisabledReason ?? undefined}
+                  onClick={requestPublish}
+                  loading={requestingPublish}
+                  disabled={!!requestPublishDisabledReason}
+                  title={requestPublishDisabledReason ?? undefined}
                 >
-                  Publish (final)
+                  Request publish (Action Center)
                 </Button>
               ) : (
                 <Button color="yellow" onClick={unpublish} loading={unpublishing} disabled={!canWrite}>
@@ -516,9 +559,9 @@ export default function ArtifactDetailPage() {
                 </Button>
               )}
 
-              {publishDisabledReason ? (
+              {requestPublishDisabledReason ? (
                 <Text size="sm" c="dimmed">
-                  Publish blocked: {publishDisabledReason}
+                  Publish blocked: {requestPublishDisabledReason}
                 </Text>
               ) : null}
 
@@ -531,7 +574,6 @@ export default function ArtifactDetailPage() {
 
             <Divider />
 
-            {/* V0: Basic Diff */}
             <Card withBorder>
               <Stack gap="sm">
                 <Group justify="space-between" align="flex-end">
@@ -560,9 +602,7 @@ export default function ArtifactDetailPage() {
                   </Card>
                 ) : (
                   <Text size="sm" c="dimmed">
-                    {siblings.length === 0
-                      ? "Create another version to enable diff."
-                      : "Pick a version and click “Show Diff”."}
+                    {siblings.length === 0 ? "Create another version to enable diff." : "Pick a version and click “Show Diff”."}
                   </Text>
                 )}
               </Stack>
@@ -600,7 +640,7 @@ export default function ArtifactDetailPage() {
 
             {isInReview ? (
               <Text size="sm" c="dimmed">
-                This artifact is in review and locked. Admin must approve/reject.
+                This artifact is in review and locked. Admin must approve/reject. Then request publish via Action Center.
               </Text>
             ) : null}
           </Stack>

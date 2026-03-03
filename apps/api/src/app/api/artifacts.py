@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 import difflib
-from typing import Optional
+import uuid
+from typing import Optional, Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
 from app.db.session import get_db
-from app.db.models import Run, Artifact, ArtifactReview, RunLog, User
+from app.db.models import (
+    Run,
+    Artifact,
+    ArtifactReview,
+    RunLog,
+    User,
+    Workspace,
+    ActionItem,
+)
 from app.schemas.core import (
     ArtifactCreateIn,
     ArtifactOut,
@@ -26,6 +35,9 @@ router = APIRouter(tags=["artifacts"])
 ALLOWED_STATUSES = {"draft", "in_review", "final"}
 REVIEW_STATES = {"requested", "approved", "rejected"}
 
+# ----------------------------
+# Helpers
+# ----------------------------
 
 def _ensure_run_read_access(db: Session, run: Run, user: User) -> None:
     require_workspace_access(str(run.workspace_id), db, user)
@@ -99,6 +111,62 @@ def _log_run_event(db: Session, run_id: str, level: str, message: str, meta: dic
         db.rollback()
 
 
+def _latest_review_state(db: Session, artifact_id: uuid.UUID) -> Optional[str]:
+    r = (
+        db.execute(
+            select(ArtifactReview)
+            .where(ArtifactReview.artifact_id == artifact_id)
+            .order_by(ArtifactReview.requested_at.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+    return r.state if r else None
+
+
+def _get_publish_policy_required_approvals(ws: Workspace) -> int:
+    """
+    Reads workspace.approvals_json shape:
+    {
+      "rules": {
+        "artifact_publish": { "approvals_required": 2, ... }
+      }
+    }
+    Defaults to 1 if absent/invalid.
+    """
+    try:
+        pol = ws.approvals_json or {}
+        if not isinstance(pol, dict):
+            return 1
+        rules = pol.get("rules") or {}
+        if not isinstance(rules, dict):
+            return 1
+        rule = rules.get("artifact_publish") or {}
+        if not isinstance(rule, dict):
+            return 1
+        n = int(rule.get("approvals_required") or 1)
+        return max(1, n)
+    except Exception:
+        return 1
+
+
+def _publish_is_approval_gated(ws: Workspace) -> bool:
+    """
+    If workspace has an explicit rule for artifact_publish, treat it as gated.
+    """
+    try:
+        pol = ws.approvals_json or {}
+        if not isinstance(pol, dict):
+            return False
+        rules = pol.get("rules") or {}
+        if not isinstance(rules, dict):
+            return False
+        return "artifact_publish" in rules
+    except Exception:
+        return False
+
+
 # ---- Diff schema (V0 basic) ----
 class ArtifactDiffMeta(BaseModel):
     id: str
@@ -116,6 +184,19 @@ class ArtifactDiffOut(BaseModel):
     unified_diff: str
 
 
+# ---- Commit 2: Request publish (creates ActionItem) ----
+class ArtifactRequestPublishIn(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=240)
+    comment: Optional[str] = Field(default=None, max_length=5000)
+
+
+class ArtifactPublishActionOut(BaseModel):
+    ok: bool = True
+    action_id: str
+    workspace_id: str
+    status: str
+
+
 @router.post("/runs/{run_id}/artifacts", response_model=ArtifactOut)
 def create_artifact(
     run_id: str,
@@ -131,7 +212,10 @@ def create_artifact(
     _ensure_run_write_access(db, run, user)
 
     max_ver = db.execute(
-        select(func.max(Artifact.version)).where(Artifact.run_id == run.id, Artifact.logical_key == payload.logical_key)
+        select(func.max(Artifact.version)).where(
+            Artifact.run_id == run.id,
+            Artifact.logical_key == payload.logical_key,
+        )
     ).scalar_one_or_none()
     next_ver = int(max_ver or 0) + 1
 
@@ -168,6 +252,7 @@ def list_artifacts(run_id: str, db: Session = Depends(get_db), user: User = Depe
         .all()
     )
     return [_to_out(a) for a in arts]
+
 
 @router.get("/runs/{run_id}/artifacts/latest", response_model=ArtifactOut)
 def get_latest_artifact_for_run(
@@ -295,7 +380,13 @@ def new_artifact_version(
     db.commit()
     db.refresh(new_art)
 
-    _log_run_event(db, str(run.id), "info", "Artifact version created", {"artifact_id": str(new_art.id), "version": new_art.version})
+    _log_run_event(
+        db,
+        str(run.id),
+        "info",
+        "Artifact version created",
+        {"artifact_id": str(new_art.id), "version": new_art.version},
+    )
 
     return _to_out(new_art)
 
@@ -320,7 +411,7 @@ def unpublish_artifact(artifact_id: str, db: Session = Depends(get_db), user: Us
 
 
 # -------------------------
-# Approvals v1 (Option B): auditable artifact_reviews
+# Approvals v1 (auditable artifact_reviews)
 # -------------------------
 @router.get("/artifacts/{artifact_id}/reviews", response_model=list[ArtifactReviewOut])
 def list_artifact_reviews(
@@ -386,7 +477,13 @@ def submit_artifact_for_review(
     db.commit()
     db.refresh(review)
 
-    _log_run_event(db, str(run.id), "info", "Artifact submitted for review", {"artifact_id": str(art.id), "review_id": str(review.id)})
+    _log_run_event(
+        db,
+        str(run.id),
+        "info",
+        "Artifact submitted for review",
+        {"artifact_id": str(art.id), "review_id": str(review.id)},
+    )
 
     return _review_to_out(review)
 
@@ -480,27 +577,96 @@ def reject_artifact(
     return _review_to_out(req)
 
 
-def _latest_review_state(db: Session, artifact_id: uuid.UUID) -> Optional[str]:
-    r = (
-        db.execute(
-            select(ArtifactReview)
-            .where(ArtifactReview.artifact_id == artifact_id)
-            .order_by(ArtifactReview.requested_at.desc())
-            .limit(1)
-        )
-        .scalars()
-        .first()
+# -------------------------
+# Commit 2: Request publish -> creates ActionItem("artifact_publish")
+# -------------------------
+@router.post("/artifacts/{artifact_id}/request-publish", response_model=ArtifactPublishActionOut)
+def request_publish_artifact(
+    artifact_id: str,
+    payload: ArtifactRequestPublishIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    art = db.get(Artifact, artifact_id)
+    if not art:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    run = _ensure_artifact_write_access(db, art, user)  # member+ only
+
+    ws = db.get(Workspace, run.workspace_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    # must be in_review before publish request
+    if art.status != "in_review":
+        raise HTTPException(status_code=409, detail="Submit for review first (artifact must be in_review).")
+
+    # if already final, no need
+    if art.status == "final":
+        raise HTTPException(status_code=409, detail="Artifact is already final")
+
+    approvals_required = _get_publish_policy_required_approvals(ws)
+
+    title = payload.title.strip() if payload.title else f"Publish artifact: {art.title}"
+    a = ActionItem(
+        workspace_id=ws.id,
+        created_by_user_id=user.id,
+        assigned_to_user_id=None,
+        decided_by_user_id=None,
+        type="artifact_publish",
+        status="queued",
+        title=title,
+        payload_json={
+            "artifact_id": str(art.id),
+            "run_id": str(run.id),
+            "logical_key": art.logical_key,
+            "version": int(art.version),
+            "comment": (payload.comment or None),
+        },
+        target_ref=f"artifact:{art.id}",
+        decision_comment=None,
+        decided_at=None,
+        approvals_required=int(approvals_required or 1),
     )
-    return r.state if r else None
+    db.add(a)
+    db.commit()
+    db.refresh(a)
+
+    _log_run_event(
+        db,
+        str(run.id),
+        "info",
+        "Publish requested (action created)",
+        {"artifact_id": str(art.id), "action_id": str(a.id), "approvals_required": a.approvals_required},
+    )
+
+    return ArtifactPublishActionOut(ok=True, action_id=str(a.id), workspace_id=str(ws.id), status=a.status)
 
 
+# -------------------------
+# Legacy: Direct publish endpoint
+# -------------------------
 @router.post("/artifacts/{artifact_id}/publish", response_model=ArtifactOut)
 def publish_artifact(artifact_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    """
+    V1 legacy publish. In V2 Commit 2 we gate publish via Action Center.
+
+    Rule:
+    - If workspace has approvals policy for artifact_publish, direct publish is blocked.
+    - Otherwise, legacy behavior remains.
+    """
     art = db.get(Artifact, artifact_id)
     if not art:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
     run = _ensure_artifact_write_access(db, art, user)
+
+    ws = db.get(Workspace, run.workspace_id)
+    if ws and _publish_is_approval_gated(ws):
+        raise HTTPException(
+            status_code=409,
+            detail="Publish is approval-gated. Use /artifacts/{id}/request-publish and approve via Action Center.",
+        )
 
     # must be latest version for this logical_key
     max_ver = db.execute(
@@ -541,7 +707,7 @@ def diff_artifacts(
     Basic unified diff between two artifact markdown bodies.
 
     RBAC:
-      - viewer+ can read/diff
+    - viewer+ can read/diff
     """
     a = db.get(Artifact, artifact_id)
     if not a:

@@ -192,16 +192,33 @@ class ActionItemOut(BaseModel):
     created_by_user_id: str
     assigned_to_user_id: Optional[str] = None
     decided_by_user_id: Optional[str] = None
-
     type: str
     status: str
     title: str
-
     payload_json: Dict[str, Any]
     target_ref: Optional[str] = None
-
     decision_comment: Optional[str] = None
     decided_at: Optional[datetime] = None
-
     created_at: datetime
     updated_at: datetime
+
+    # v2 approvals
+    approvals_required: int = 1
+    approvals_approved_count: int = 0
+    approvals_rejected_count: int = 0
+    my_decision: Optional[str] = None  # approved|rejected|null
+
+class ApprovalsPolicyOut(BaseModel):
+    workspace_id: str
+    approvals_json: Dict[str, Any]
+
+
+class ApprovalsPolicyUpdateIn(BaseModel):
+    approvals_json: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ActionItemDecisionOut(BaseModel):
+    reviewer_user_id: str
+    decision: str
+    comment: Optional[str] = None
+    decided_at: datetime

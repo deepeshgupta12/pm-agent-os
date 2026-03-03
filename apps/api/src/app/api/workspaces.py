@@ -10,6 +10,7 @@ from app.db.models import Workspace, WorkspaceMember, User
 from app.schemas.core import WorkspaceCreateIn, WorkspaceOut
 from app.schemas.workspaces import WorkspaceMemberInviteIn, WorkspaceMemberOut, WorkspaceRoleOut
 from app.schemas.workspaces import TemplateAdminOut, TemplateAdminUpdateIn
+from app.schemas.core import ApprovalsPolicyOut, ApprovalsPolicyUpdateIn
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -203,3 +204,23 @@ def update_template_admin(
     db.commit()
     db.refresh(ws)
     return TemplateAdminOut(workspace_id=str(ws.id), template_admin_json=ws.template_admin_json or {})
+
+@router.get("/{workspace_id}/approvals-policy", response_model=ApprovalsPolicyOut)
+def get_approvals_policy(workspace_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    ws, _role = require_workspace_access(workspace_id, db, user)
+    return ApprovalsPolicyOut(workspace_id=str(ws.id), approvals_json=ws.approvals_json or {})
+
+
+@router.put("/{workspace_id}/approvals-policy", response_model=ApprovalsPolicyOut)
+def update_approvals_policy(
+    workspace_id: str,
+    payload: ApprovalsPolicyUpdateIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    ws, _role = require_workspace_role_min(workspace_id, "admin", db, user)
+    ws.approvals_json = payload.approvals_json or {}
+    db.add(ws)
+    db.commit()
+    db.refresh(ws)
+    return ApprovalsPolicyOut(workspace_id=str(ws.id), approvals_json=ws.approvals_json or {})
