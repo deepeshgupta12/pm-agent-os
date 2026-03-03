@@ -10,6 +10,7 @@ import {
   Title,
   Divider,
   Select,
+  MultiSelect,
   TextInput,
   Textarea,
   Switch,
@@ -668,16 +669,15 @@ export default function SchedulesPage() {
           </Group>
 
           {createMode === "weekly" ? (
-            <Select
-              label="days (0=Sun ... 6=Sat)"
-              data={weekdayOptions}
-              value={createDays}
-              onChange={(v) => setCreateDays((v as any) || [])}
-              multiple
-              searchable
-              disabled={!canWrite}
+            <MultiSelect
+                label="days (0=Sun ... 6=Sat)"
+                data={weekdayOptions}
+                value={createDays}
+                onChange={setCreateDays}
+                searchable
+                disabled={!canWrite}
             />
-          ) : null}
+            ) : null}
 
           <Switch
             checked={createEnabled}
