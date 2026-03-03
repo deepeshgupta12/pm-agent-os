@@ -22,9 +22,7 @@ from app.db.models import (
 from app.api.runs import create_run as create_run_route
 from app.api.pipelines import start_pipeline_run as start_pipeline_run_route
 
-from app.schemas.core import (
-    RunCreateIn,
-)
+from app.schemas.core import RunCreateIn
 from app.schemas.schedules import (
     ScheduleCreateIn,
     ScheduleUpdateIn,
@@ -57,8 +55,16 @@ def _as_zone(tz_name: str) -> ZoneInfo:
     try:
         return ZoneInfo(tz_name)
     except Exception:
-        # fallback
         return ZoneInfo("UTC")
+
+
+# -------------------------
+# FIX: make weekday convention explicit + UI-safe
+# -------------------------
+# We store weekdays as Python's weekday(): Monday=0 .. Sunday=6.
+# This is ISO-ish and matches datetime.weekday().
+# UI must NOT display "0=Sun"; it should map 0->Mon, ..., 6->Sun.
+WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
 def _normalize_interval_json(interval_json: Dict[str, Any]) -> Dict[str, Any]:
@@ -75,7 +81,7 @@ def _normalize_interval_json(interval_json: Dict[str, Any]) -> Dict[str, Any]:
     {
       "mode": "weekly",
       "at": "HH:MM",
-      "weekdays": [0..6]   # Monday=0 .. Sunday=6
+      "weekdays": [0..6]   # Monday=0 .. Sunday=6 (matches datetime.weekday)
     }
 
     Defaults:
@@ -113,7 +119,7 @@ def _normalize_interval_json(interval_json: Dict[str, Any]) -> Dict[str, Any]:
             continue
     wd_norm = sorted(list(set(wd_norm)))
 
-    out = {"mode": mode, "at": at_norm}
+    out: Dict[str, Any] = {"mode": mode, "at": at_norm}
     if mode == "weekly":
         out["weekdays"] = wd_norm or [0]  # default Monday
     return out
@@ -128,6 +134,8 @@ def _compute_next_run_at(
     """
     Returns next run timestamp in UTC.
     Schedules are computed in schedule.timezone.
+
+    Weekly convention: weekdays are Monday=0 .. Sunday=6 (datetime.weekday()).
     """
     tz = _as_zone(tz_name)
     now_local = now_utc.astimezone(tz)
@@ -150,6 +158,7 @@ def _compute_next_run_at(
     weekdays: List[int] = list(ij.get("weekdays") or [0])
     # python weekday: Monday=0..Sunday=6 matches our convention
     today_wd = int(now_local.weekday())
+    _ = today_wd  # keep for readability / future debug
 
     # try today then next 6 days
     for delta_days in range(0, 7):
@@ -160,7 +169,7 @@ def _compute_next_run_at(
         if candidate > now_local:
             return candidate.astimezone(timezone.utc)
 
-    # fallback: 7 days later on first weekday
+    # fallback: next week same time (safe)
     d2 = now_local + timedelta(days=7)
     candidate2 = local_dt(d2, hh, mm)
     return candidate2.astimezone(timezone.utc)
@@ -240,7 +249,8 @@ def create_schedule(
 
     tz_name = (payload.timezone or "UTC").strip() or "UTC"
     interval_json = payload.interval_json or {}
-    next_run_at = _compute_next_run_at(now_utc=_utcnow(), tz_name=tz_name, interval_json=interval_json)
+    norm_ij = _normalize_interval_json(interval_json)
+    next_run_at = _compute_next_run_at(now_utc=_utcnow(), tz_name=tz_name, interval_json=norm_ij)
 
     s = Schedule(
         workspace_id=ws.id,
@@ -249,7 +259,7 @@ def create_schedule(
         kind=kind,
         timezone=tz_name,
         cron=(payload.cron.strip() if payload.cron else None),
-        interval_json=_normalize_interval_json(interval_json),
+        interval_json=norm_ij,
         payload_json=payload.payload_json or {},
         enabled=bool(payload.enabled),
         next_run_at=next_run_at if payload.enabled else None,
@@ -291,6 +301,7 @@ def update_schedule(
         raise HTTPException(status_code=404, detail="Schedule not found")
 
     ws, _role = require_workspace_role_min(str(s.workspace_id), "member", db, user)
+    _ = ws  # explicit, not used beyond RBAC
 
     if payload.name is not None:
         s.name = payload.name.strip()
@@ -312,7 +323,11 @@ def update_schedule(
 
     # recompute next_run_at whenever schedule is enabled
     if s.enabled:
-        s.next_run_at = _compute_next_run_at(now_utc=_utcnow(), tz_name=s.timezone, interval_json=s.interval_json or {})
+        s.next_run_at = _compute_next_run_at(
+            now_utc=_utcnow(),
+            tz_name=s.timezone,
+            interval_json=s.interval_json or {},
+        )
     else:
         s.next_run_at = None
 
@@ -397,12 +412,6 @@ def _execute_schedule_sync(
 
     try:
         if (s.kind or "").lower() == "agent_run":
-            # Expected payload_json:
-            # {
-            #   "agent_id": "prd",
-            #   "input_payload": {...},
-            #   "retrieval": {...} | null
-            # }
             pj = s.payload_json or {}
             agent_id = str(pj.get("agent_id") or "").strip()
             if not agent_id:
@@ -418,10 +427,8 @@ def _execute_schedule_sync(
 
             rcfg = None
             if isinstance(retrieval, dict):
-                # RunCreateIn expects `retrieval` shaped like RetrievalConfigIn
                 rcfg = retrieval
 
-            # Use the existing route (sync create, generates artifact etc.)
             run_out = create_run_route(
                 workspace_id=str(ws.id),
                 payload=RunCreateIn(agent_id=agent_id, input_payload=input_payload, retrieval=rcfg),  # type: ignore[arg-type]
@@ -434,11 +441,6 @@ def _execute_schedule_sync(
             sr.status = "success"
 
         elif (s.kind or "").lower() == "pipeline_run":
-            # Expected payload_json:
-            # {
-            #   "template_id": "<uuid>",
-            #   "input_payload": {...}
-            # }
             pj = s.payload_json or {}
             template_id = str(pj.get("template_id") or "").strip()
             if not template_id:
@@ -448,7 +450,6 @@ def _execute_schedule_sync(
             if not isinstance(input_payload, dict):
                 raise Exception("schedule.payload_json.input_payload must be an object")
 
-            # pipelines.start_pipeline_run expects PipelineRunCreateIn (in app.schemas.pipelines)
             from app.schemas.pipelines import PipelineRunCreateIn
 
             pr_out = start_pipeline_run_route(
@@ -473,7 +474,11 @@ def _execute_schedule_sync(
         s.last_status = sr.status
         s.last_error = None
         if s.enabled:
-            s.next_run_at = _compute_next_run_at(now_utc=_utcnow(), tz_name=s.timezone, interval_json=s.interval_json or {})
+            s.next_run_at = _compute_next_run_at(
+                now_utc=_utcnow(),
+                tz_name=s.timezone,
+                interval_json=s.interval_json or {},
+            )
         db.add(s)
 
         db.commit()
@@ -490,8 +495,11 @@ def _execute_schedule_sync(
         s.last_status = "failed"
         s.last_error = str(e)
         if s.enabled:
-            # still compute next run (we don’t want permanent dead schedules)
-            s.next_run_at = _compute_next_run_at(now_utc=_utcnow(), tz_name=s.timezone, interval_json=s.interval_json or {})
+            s.next_run_at = _compute_next_run_at(
+                now_utc=_utcnow(),
+                tz_name=s.timezone,
+                interval_json=s.interval_json or {},
+            )
         db.add(s)
 
         db.commit()
