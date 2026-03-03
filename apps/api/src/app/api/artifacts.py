@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
+import re
+from app.db.models import WorkspaceMember, ArtifactComment, ArtifactCommentMention
+from app.schemas.core import ArtifactAssignIn, ArtifactCommentCreateIn, ArtifactCommentOut, ArtifactCommentMentionOut
 from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
 from app.db.session import get_db
 from app.db.models import (
@@ -85,6 +88,7 @@ def _to_out(a: Artifact) -> ArtifactOut:
         logical_key=a.logical_key,
         version=a.version,
         status=a.status,
+        assigned_to_user_id=str(a.assigned_to_user_id) if getattr(a, "assigned_to_user_id", None) else None,
     )
 
 
@@ -165,6 +169,29 @@ def _publish_is_approval_gated(ws: Workspace) -> bool:
         return "artifact_publish" in rules
     except Exception:
         return False
+
+MENTION_EMAIL_RE = re.compile(r"@([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})")
+
+def _workspace_id_for_artifact(db: Session, art: Artifact) -> str:
+    run = db.get(Run, art.run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return str(run.workspace_id)
+
+def _is_user_in_workspace(db: Session, workspace_id: uuid.UUID, user_id: uuid.UUID) -> bool:
+    # owner implicit membership OR workspace_members row
+    ws = db.get(Workspace, workspace_id)
+    if not ws:
+        return False
+    if ws.owner_user_id == user_id:
+        return True
+    row = db.execute(
+        select(WorkspaceMember.id).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+    return row is not None
 
 
 # ---- Diff schema (V0 basic) ----
@@ -578,7 +605,7 @@ def reject_artifact(
 
 
 # -------------------------
-# Commit 2: Request publish -> creates ActionItem("artifact_publish")
+# Request publish -> creates ActionItem("artifact_publish")
 # -------------------------
 @router.post("/artifacts/{artifact_id}/request-publish", response_model=ArtifactPublishActionOut)
 def request_publish_artifact(
@@ -641,6 +668,197 @@ def request_publish_artifact(
     )
 
     return ArtifactPublishActionOut(ok=True, action_id=str(a.id), workspace_id=str(ws.id), status=a.status)
+
+# -------------------------
+# List comments, create comment (mentions), assign artifact
+# -------------------------
+@router.get("/artifacts/{artifact_id}/comments", response_model=list[ArtifactCommentOut])
+def list_artifact_comments(
+    artifact_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    art = db.get(Artifact, artifact_id)
+    if not art:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    run = _ensure_artifact_read_access(db, art, user)
+    ws = db.get(Workspace, run.workspace_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    rows = (
+        db.execute(
+            select(ArtifactComment)
+            .where(ArtifactComment.artifact_id == art.id)
+            .order_by(ArtifactComment.created_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+
+    out: list[ArtifactCommentOut] = []
+    for c in rows:
+        author = db.get(User, c.author_user_id)
+        mention_rows = (
+            db.execute(
+                select(ArtifactCommentMention).where(ArtifactCommentMention.comment_id == c.id)
+            )
+            .scalars()
+            .all()
+        )
+        mentions = [
+            ArtifactCommentMentionOut(
+                mentioned_user_id=str(m.mentioned_user_id),
+                mentioned_email=m.mentioned_email,
+            )
+            for m in mention_rows
+        ]
+        out.append(
+            ArtifactCommentOut(
+                id=str(c.id),
+                artifact_id=str(c.artifact_id),
+                author_user_id=str(c.author_user_id),
+                author_email=(author.email if author else ""),
+                body=c.body,
+                created_at=c.created_at,
+                mentions=mentions,
+            )
+        )
+    return out
+
+
+@router.post("/artifacts/{artifact_id}/comments", response_model=ArtifactCommentOut)
+def create_artifact_comment(
+    artifact_id: str,
+    payload: ArtifactCommentCreateIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    art = db.get(Artifact, artifact_id)
+    if not art:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    # member+ only
+    run = _ensure_artifact_write_access(db, art, user)
+    ws = db.get(Workspace, run.workspace_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    body = payload.body.strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="Comment body cannot be empty")
+
+    c = ArtifactComment(
+        artifact_id=art.id,
+        author_user_id=user.id,
+        body=body,
+    )
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+
+    # Mentions: only store mentions that map to existing users in this workspace
+    found_emails = sorted(set([m.group(1).strip().lower() for m in MENTION_EMAIL_RE.finditer(body)]))
+    mention_out: list[ArtifactCommentMentionOut] = []
+
+    if found_emails:
+        # Find users by email
+        users = (
+            db.execute(select(User).where(User.email.in_(found_emails)))
+            .scalars()
+            .all()
+        )
+        by_email = {u.email.lower(): u for u in users}
+
+        for email in found_emails:
+            u = by_email.get(email)
+            if not u:
+                continue
+            # must be in workspace
+            if not _is_user_in_workspace(db, ws.id, u.id):
+                continue
+
+            m = ArtifactCommentMention(
+                comment_id=c.id,
+                mentioned_user_id=u.id,
+                mentioned_email=email,
+            )
+            db.add(m)
+            mention_out.append(
+                ArtifactCommentMentionOut(
+                    mentioned_user_id=str(u.id),
+                    mentioned_email=email,
+                )
+            )
+
+        db.commit()
+
+    _log_run_event(
+        db,
+        str(run.id),
+        "info",
+        "Artifact comment added",
+        {"artifact_id": str(art.id), "comment_id": str(c.id), "mentions": found_emails},
+    )
+
+    return ArtifactCommentOut(
+        id=str(c.id),
+        artifact_id=str(c.artifact_id),
+        author_user_id=str(c.author_user_id),
+        author_email=user.email,
+        body=c.body,
+        created_at=c.created_at,
+        mentions=mention_out,
+    )
+
+
+@router.patch("/artifacts/{artifact_id}/assign", response_model=ArtifactOut)
+def assign_artifact(
+    artifact_id: str,
+    payload: ArtifactAssignIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    art = db.get(Artifact, artifact_id)
+    if not art:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    # member+ only
+    run = _ensure_artifact_write_access(db, art, user)
+    ws = db.get(Workspace, run.workspace_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    # no assignment change allowed when final/in_review? (we’ll allow assignment in_review; block only final)
+    if art.status == "final":
+        raise HTTPException(status_code=409, detail="Artifact is final; cannot change assignment")
+
+    assigned_uuid: Optional[uuid.UUID] = None
+    if payload.assigned_to_user_id:
+        try:
+            assigned_uuid = uuid.UUID(payload.assigned_to_user_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="assigned_to_user_id must be a UUID")
+
+        # must be a user in this workspace (or owner)
+        if not _is_user_in_workspace(db, ws.id, assigned_uuid):
+            raise HTTPException(status_code=400, detail="User is not a member of this workspace")
+
+    art.assigned_to_user_id = assigned_uuid
+    db.add(art)
+    db.commit()
+    db.refresh(art)
+
+    _log_run_event(
+        db,
+        str(run.id),
+        "info",
+        "Artifact assigned",
+        {"artifact_id": str(art.id), "assigned_to_user_id": str(assigned_uuid) if assigned_uuid else None},
+    )
+
+    return _to_out(art)
 
 
 # -------------------------
