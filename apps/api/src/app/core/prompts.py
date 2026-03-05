@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from app.core.generator import AGENT_TO_DEFAULT_ARTIFACT_TYPE
 
@@ -208,4 +208,97 @@ def _structure_for_artifact_type(artifact_type: str) -> str:
 # Assumptions
 # Open Questions
 # Next Actions
+""".strip()
+
+
+# -------------------------
+# NEW (Commit 2): Custom agent prompt builder
+# -------------------------
+def _prompt_blocks(definition_json: Dict[str, Any]) -> List[Dict[str, str]]:
+    pb = definition_json.get("prompt_blocks") or []
+    if not isinstance(pb, list):
+        return []
+    out: List[Dict[str, str]] = []
+    for x in pb:
+        if not isinstance(x, dict):
+            continue
+        kind = str(x.get("kind") or "").strip().lower()
+        text = str(x.get("text") or "").strip()
+        if not kind or not text:
+            continue
+        out.append({"kind": kind, "text": text})
+    return out
+
+
+def build_user_prompt_custom(
+    *,
+    definition_json: Dict[str, Any],
+    input_payload: Dict[str, Any],
+    evidence_text: str,
+    artifact_type: str,
+    citations_block: str = "",
+) -> str:
+    goal = _s(input_payload.get("goal"))
+    context = _s(input_payload.get("context"))
+    constraints = _s(input_payload.get("constraints"))
+
+    blocks = _prompt_blocks(definition_json)
+
+    guardrails: List[str] = []
+    for b in blocks:
+        if b["kind"] in ("system", "guardrail", "instruction"):
+            guardrails.append(f"- ({b['kind']}) {b['text']}")
+
+    guardrail_block = ""
+    if guardrails:
+        guardrail_block = "Guardrails / Instructions:\n" + "\n".join(guardrails)
+
+    structure = _structure_for_artifact_type(artifact_type)
+
+    evidence_block = ""
+    if evidence_text.strip():
+        evidence_block = f"""
+Known Evidence (ONLY use what is provided; do not invent anything):
+{evidence_text}
+""".strip()
+
+    citation_rules = ""
+    if citations_block.strip():
+        citation_rules = f"""
+You MUST ground claims in the Evidence Pack below.
+
+Citation rules:
+- Any factual claim, decision, requirement, or number MUST include at least one inline citation like [1] or [2].
+- Do NOT invent sources. Only cite from the Evidence Pack IDs.
+- If evidence is insufficient for a claim, write it under "## Unknowns / Assumptions" instead of guessing.
+
+Evidence Pack (cite as [n]):
+{citations_block}
+""".strip()
+
+    return f"""
+You must produce a **{artifact_type}** draft.
+
+User goal:
+{goal or "(not provided)"}
+
+Context:
+{context or "(not provided)"}
+
+Constraints:
+{constraints or "(not provided)"}
+
+{guardrail_block}
+
+{evidence_block}
+
+{citation_rules}
+
+Required structure (use these headings in order):
+{structure}
+
+Additional rules:
+- Be explicit about Unknowns / Assumptions.
+- End with Open Questions and Next Actions.
+- Output only Markdown.
 """.strip()
