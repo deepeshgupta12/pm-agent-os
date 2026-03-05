@@ -2,17 +2,16 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
-from app.core.governance import rbac_can_create_agent_base, rbac_can_publish_agent
+from app.api.deps import require_user, require_workspace_access, require_workspace_role_min, get_workspace_role
+from app.core.governance import audit_rbac_check, load_rbac
 from app.db.session import get_db
 from app.db.models import User, Workspace, AgentBase, AgentVersion
-
 from app.schemas.agents_v2 import (
     AgentBaseCreateIn,
     AgentBaseOut,
@@ -53,13 +52,6 @@ def _ver_out(v: AgentVersion) -> AgentVersionOut:
     )
 
 
-def _get_ws_or_404(db: Session, workspace_id: str) -> Workspace:
-    ws = db.get(Workspace, workspace_id)
-    if not ws:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-    return ws
-
-
 def _get_base_or_404(db: Session, base_id: str) -> AgentBase:
     try:
         bid = uuid.UUID(base_id)
@@ -82,6 +74,84 @@ def _get_version_or_404(db: Session, version_id: str) -> AgentVersion:
     if not v:
         raise HTTPException(status_code=404, detail="Agent version not found")
     return v
+
+
+def _rbac_allowed_roles(ws: Workspace, path: Tuple[str, str], default: List[str]) -> List[str]:
+    """
+    Reads effective RBAC roles from Workspace.rbac_json merged with defaults.
+    path example: ("agent_builder", "can_create_agent_base_roles")
+    """
+    eff = load_rbac(ws)
+    cur: Any = eff
+    for p in path:
+        if not isinstance(cur, dict):
+            cur = None
+            break
+        cur = cur.get(p)
+
+    if not isinstance(cur, list) or not cur:
+        cur = default
+
+    out: List[str] = []
+    for x in cur:
+        s = str(x).strip().lower()
+        if s:
+            out.append(s)
+
+    # stable de-dupe
+    seen = set()
+    uniq: List[str] = []
+    for s in out:
+        if s in seen:
+            continue
+        seen.add(s)
+        uniq.append(s)
+    return uniq
+
+
+def _enforce_rbac_with_audit(
+    db: Session,
+    *,
+    ws: Workspace,
+    user: User,
+    action: str,
+    allowed_roles: List[str],
+) -> None:
+    """
+    Step 0.4 requirement:
+    - hard-enforce RBAC
+    - always audit allow/deny to governance_events
+    """
+    role = get_workspace_role(db, ws, user)
+    role_l = (role or "").strip().lower()
+
+    allowed = [str(r).strip().lower() for r in (allowed_roles or []) if str(r).strip()]
+    ok = bool(role_l and role_l in allowed)
+
+    if ok:
+        audit_rbac_check(
+            db,
+            ws=ws,
+            user=user,
+            action=action,
+            role=role,
+            allowed_roles=allowed_roles,
+            decision="allow",
+            reason="ok",
+        )
+        return
+
+    audit_rbac_check(
+        db,
+        ws=ws,
+        user=user,
+        action=action,
+        role=role,
+        allowed_roles=allowed_roles,
+        decision="deny",
+        reason="Not allowed by RBAC.",
+    )
+    raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
 
 # -------------------------
@@ -113,16 +183,21 @@ def create_agent_base(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    ws, _role = require_workspace_role_min(workspace_id, "member", db, user)  # member+ baseline
-    # V3 advanced RBAC check (policy-driven)
-    if not rbac_can_create_agent_base(db, ws, user):
-        raise HTTPException(status_code=403, detail="Not allowed to create agent bases in this workspace")
+    ws, _role = require_workspace_role_min(workspace_id, "member", db, user)  # baseline
+
+    allowed_roles = _rbac_allowed_roles(ws, ("agent_builder", "can_create_agent_base_roles"), ["admin", "member"])
+    _enforce_rbac_with_audit(
+        db,
+        ws=ws,
+        user=user,
+        action="rbac.agent_builder.create_agent_base",
+        allowed_roles=allowed_roles,
+    )
 
     key = payload.key.strip()
     name = payload.name.strip()
     desc = (payload.description or "").strip()
 
-    # enforce workspace unique key
     existing = db.execute(
         select(AgentBase).where(AgentBase.workspace_id == ws.id, AgentBase.key == key)
     ).scalar_one_or_none()
@@ -182,7 +257,7 @@ def create_agent_version(
     if str(b.workspace_id) != str(ws.id):
         raise HTTPException(status_code=404, detail="Agent base not found")
 
-    # Determine next version number (monotonic per base)
+    # Version creation is allowed for member+ (no advanced RBAC gate yet)
     max_ver = (
         db.execute(select(func.max(AgentVersion.version)).where(AgentVersion.agent_base_id == b.id))
         .scalar_one_or_none()
@@ -218,21 +293,18 @@ def publish_agent_version(
     if str(b.workspace_id) != str(ws.id):
         raise HTTPException(status_code=404, detail="Agent version not found")
 
-    # Advanced RBAC
-    if not rbac_can_publish_agent(db, ws, user):
-        raise HTTPException(status_code=403, detail="Not allowed to publish agent versions in this workspace")
+    allowed_roles = _rbac_allowed_roles(ws, ("agent_builder", "can_publish_agent_roles"), ["admin"])
+    _enforce_rbac_with_audit(
+        db,
+        ws=ws,
+        user=user,
+        action="rbac.agent_builder.publish_agent",
+        allowed_roles=allowed_roles,
+    )
 
-    # Must be draft to publish
     if v.status != "draft":
         raise HTTPException(status_code=409, detail="Only draft versions can be published")
 
-    # publish: set this version -> published, archive any other published version(s) for same base
-    db.execute(
-        select(AgentVersion)
-        .where(AgentVersion.agent_base_id == b.id, AgentVersion.status == "published")
-    )
-
-    # archive existing published versions
     existing_published = (
         db.execute(
             select(AgentVersion).where(

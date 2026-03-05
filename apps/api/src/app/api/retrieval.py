@@ -43,7 +43,6 @@ def _enforce_policy_sources(db: Session, ws: Workspace, user: User, requested: O
 
     try:
         policy_assert_allowed_sources(ws, requested)
-        # log allow (deterministic)
         audit_policy_check(
             db,
             ws=ws,
@@ -55,7 +54,6 @@ def _enforce_policy_sources(db: Session, ws: Workspace, user: User, requested: O
             reason="ok",
         )
     except ValueError as e:
-        # log deny
         audit_policy_check(
             db,
             ws=ws,
@@ -292,7 +290,6 @@ def list_documents(
 ):
     ws, _role = require_workspace_access(workspace_id, db, user)
 
-    # V3 policy enforcement: source_type filter must be allowed
     if source_type:
         _enforce_policy_sources(db, ws, user, [source_type.strip().lower()], "policy.allowlist.documents.list")
 
@@ -325,7 +322,7 @@ def embed_document_chunks(
     # Enforce policy based on doc source type
     src = db.get(Source, doc.source_id)
     if src:
-       _enforce_policy_sources(db, ws, user, "policy.allowlist.embeddings.embed_document")
+        _enforce_policy_sources(db, ws, user, [str(src.type or "").strip().lower()], "policy.allowlist.embeddings.embed_document")
 
     chunks = (
         db.execute(select(Chunk).where(Chunk.document_id == doc.id).order_by(Chunk.chunk_index.asc()))
@@ -337,7 +334,6 @@ def embed_document_chunks(
 
     chunk_ids = [c.id for c in chunks]
 
-    # Backfill embedding_vec if needed
     db.execute(
         sql_text(
             """
@@ -395,7 +391,7 @@ def embed_document_chunks(
 
 
 # -------------------------
-# Retrieval (viewer+): timeframe + source filtering IN hybrid search
+# Retrieval (viewer+)
 # -------------------------
 @router.get("/workspaces/{workspace_id}/retrieve", response_model=RetrieveResponse)
 def retrieve(
@@ -407,7 +403,6 @@ def retrieve(
     timeframe_preset: Optional[str] = Query(default=None, description="7d|30d|90d"),
     start_date: Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     end_date: Optional[str] = Query(default=None, description="YYYY-MM-DD"),
-    # V2.1 knobs
     min_score: float = Query(default=0.15, ge=0.0, le=1.0),
     overfetch_k: int = Query(default=3, ge=1, le=10),
     rerank: bool = Query(default=False),
@@ -417,7 +412,6 @@ def retrieve(
     ws, _role = require_workspace_access(workspace_id, db, user)
 
     stypes = _parse_source_types(source_types)
-
     _enforce_policy_sources(db, ws, user, stypes or None, "policy.allowlist.retrieval.retrieve")
 
     timeframe_json, start_ts, end_ts = _compute_timeframe(
@@ -440,7 +434,6 @@ def retrieve(
         rerank=rerank,
     )
 
-    # ---- traceability: store retrieval request + items
     tf = timeframe_json or {}
     tf["knobs"] = {"min_score": float(min_score), "overfetch_k": int(overfetch_k), "rerank": bool(rerank)}
 
