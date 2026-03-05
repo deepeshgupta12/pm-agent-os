@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
+from app.api.deps import require_user, require_workspace_access
 from app.core.config import settings
 from app.core.governance import (
     policy_allowed_source_types,
     policy_assert_allowed_sources,
     policy_apply_pii_masking,
     audit_policy_check,
+    rbac_assert,
+    rbac_allowed_run_roles,
 )
 from app.core.retrieval_search import hybrid_retrieve
 from app.core.evidence_format import format_evidence_for_prompt
@@ -197,7 +199,19 @@ def run_custom_agent(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
+    ws, _role = require_workspace_access(workspace_id, db, user)
+
+    # Commit 5: RBAC enforcement (who can run)
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.agent_builder.run",
+            allowed_roles=rbac_allowed_run_roles(ws),
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
     # base + published version
     try:
@@ -275,6 +289,7 @@ def run_custom_agent(
     retrieval_meta: Dict[str, Any] = {
         "enabled": bool(r_enabled),
         "query": r_query,
+        "q": r_query,  # compatibility alias (Commit 5)
         "k": int(r_k),
         "alpha": float(r_alpha),
         "source_types": r_source_types,

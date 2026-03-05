@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_user, require_workspace_access, require_workspace_role_min, get_workspace_role
-from app.core.governance import audit_rbac_check, audit_policy_check, load_rbac, policy_allowed_source_types, policy_assert_allowed_sources
+from app.core.governance import (
+    audit_rbac_check,
+    load_rbac,
+    enforce_policy_for_definition,
+)
 from app.db.session import get_db
 from app.db.models import User, Workspace, AgentBase, AgentVersion, AgentDefinition
 from app.schemas.agents_v2 import (
@@ -153,65 +157,6 @@ def _enforce_rbac_with_audit(
     raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
 
-def _extract_source_types(definition_json: Dict[str, Any]) -> List[str]:
-    """
-    We standardize to: definition_json.retrieval.source_types = list[str]
-    """
-    r = definition_json.get("retrieval") or {}
-    if not isinstance(r, dict):
-        return []
-    st = r.get("source_types") or []
-    if not isinstance(st, list):
-        return []
-    out = []
-    for x in st:
-        s = str(x).strip().lower()
-        if s:
-            out.append(s)
-    # stable dedupe
-    seen = set()
-    uniq = []
-    for s in out:
-        if s in seen:
-            continue
-        seen.add(s)
-        uniq.append(s)
-    return uniq
-
-
-def _audit_policy_check(
-    db: Session,
-    *,
-    ws: Workspace,
-    user: User,
-    action: str,
-    requested_source_types: List[str],
-    decision: str,
-    reason: str,
-) -> None:
-    allowlist = policy_allowed_source_types(ws)
-    audit_policy_check(
-        db,
-        ws=ws,
-        user=user,
-        action=action,
-        requested_source_types=requested_source_types,
-        allowlist=allowlist,
-        decision=decision,
-        reason=reason,
-    )
-
-
-def _enforce_policy_sources_for_definition(db: Session, ws: Workspace, user: User, definition_json: Dict[str, Any], action: str) -> None:
-    stypes = _extract_source_types(definition_json)
-    try:
-        policy_assert_allowed_sources(ws, stypes or None)
-        _audit_policy_check(db, ws=ws, user=user, action=action, requested_source_types=stypes, decision="allow", reason="ok")
-    except ValueError as e:
-        _audit_policy_check(db, ws=ws, user=user, action=action, requested_source_types=stypes, decision="deny", reason=str(e))
-        raise HTTPException(status_code=403, detail=str(e))
-
-
 def _custom_agent_id(base_id: uuid.UUID) -> str:
     return f"custom:{str(base_id)}"
 
@@ -259,7 +204,6 @@ def _derive_output_artifacts(definition_json: Dict[str, Any]) -> List[str]:
 def _upsert_agent_definition_for_published(
     db: Session,
     *,
-    ws: Workspace,
     base: AgentBase,
     published_version: AgentVersion,
 ) -> None:
@@ -459,14 +403,17 @@ def create_agent_version(
     if str(b.workspace_id) != str(ws.id):
         raise HTTPException(status_code=404, detail="Agent base not found")
 
-    # Policy enforcement on draft definition (save)
-    _enforce_policy_sources_for_definition(
-        db,
-        ws,
-        user,
-        payload.definition_json or {},
-        "policy.allowlist.agent_builder.save_definition",
-    )
+    # Commit 5: standardized policy enforcement on draft definition (save)
+    try:
+        enforce_policy_for_definition(
+            db,
+            ws=ws,
+            user=user,
+            definition_json=payload.definition_json or {},
+            action="policy.allowlist.agent_builder.save_definition",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
 
     max_ver = (
         db.execute(select(func.max(AgentVersion.version)).where(AgentVersion.agent_base_id == b.id))
@@ -517,7 +464,19 @@ def update_agent_version(
         dj = payload.get("definition_json") or {}
         if not isinstance(dj, dict):
             raise HTTPException(status_code=400, detail="definition_json must be an object")
-        _enforce_policy_sources_for_definition(db, ws, user, dj, "policy.allowlist.agent_builder.save_definition")
+
+        # Commit 5: standardized policy enforcement on save
+        try:
+            enforce_policy_for_definition(
+                db,
+                ws=ws,
+                user=user,
+                definition_json=dj,
+                action="policy.allowlist.agent_builder.save_definition",
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+
         v.definition_json = dj
 
     db.add(v)
@@ -551,14 +510,17 @@ def publish_agent_version(
         allowed_roles=allowed_roles,
     )
 
-    # Policy enforcement on publish definition too
-    _enforce_policy_sources_for_definition(
-        db,
-        ws,
-        user,
-        v.definition_json or {},
-        "policy.allowlist.agent_builder.publish_definition",
-    )
+    # Commit 5: standardized policy enforcement on publish definition
+    try:
+        enforce_policy_for_definition(
+            db,
+            ws=ws,
+            user=user,
+            definition_json=v.definition_json or {},
+            action="policy.allowlist.agent_builder.publish_definition",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
 
     if v.status != "draft":
         raise HTTPException(status_code=409, detail="Only draft versions can be published")
@@ -582,8 +544,8 @@ def publish_agent_version(
     db.commit()
     db.refresh(v)
 
-    # Commit 2: Upsert AgentDefinition so runs can reference custom agent_id safely
-    _upsert_agent_definition_for_published(db, ws=ws, base=b, published_version=v)
+    # Upsert AgentDefinition so runs can reference custom agent_id safely
+    _upsert_agent_definition_for_published(db, base=b, published_version=v)
 
     return AgentPublishOut(
         ok=True,

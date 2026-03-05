@@ -32,6 +32,10 @@ class AgentBuilderMetaOut(BaseModel):
     # Output templates supported by the app
     artifact_types: List[str] = Field(default_factory=list)
 
+    # NEW (Commit 5): effective governance snapshot for UI
+    policy_effective: Dict[str, Any] = Field(default_factory=dict)
+    rbac_effective: Dict[str, Any] = Field(default_factory=dict)
+
 
 class CustomAgentPublishedOut(BaseModel):
     agent_base_id: str

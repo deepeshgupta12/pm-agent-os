@@ -32,6 +32,10 @@ _DEFAULT_RBAC: Dict[str, Any] = {
         "can_create_agent_base_roles": ["admin", "member"],
         "can_publish_agent_roles": ["admin"],
         "can_archive_agent_roles": ["admin"],
+        # NEW (Commit 5): runtime / visibility permissions
+        "can_preview_agent_roles": ["admin", "member"],
+        "can_view_published_agent_roles": ["admin", "member", "viewer"],
+        "can_run_agent_roles": ["admin", "member"],
     },
     "connectors": {
         "can_create_connector_roles": ["admin"],
@@ -71,7 +75,7 @@ def load_rbac(ws: Workspace) -> Dict[str, Any]:
 
 def effective_governance_payload(ws: Workspace) -> Dict[str, Any]:
     """
-    Used by app.api.governance.
+    Used by app.api.governance and Agent Builder meta.
     Deterministic, UI-friendly representation of effective governance.
     """
     return {
@@ -301,8 +305,51 @@ def _is_role_allowed(role: Optional[str], allowed_roles: List[str]) -> bool:
     return r in [a.strip().lower() for a in (allowed_roles or [])]
 
 
+def rbac_assert(
+    db: Session,
+    *,
+    ws: Workspace,
+    user: Optional[User],
+    action: str,
+    allowed_roles: List[str],
+) -> None:
+    """
+    Commit 5: single RBAC enforcement helper with auditing.
+    - Resolves role deterministically
+    - Audits allow/deny
+    - Raises ValueError if denied (caller converts to HTTP 403)
+    """
+    role = _get_user_workspace_role(db, ws, user)
+    ok = _is_role_allowed(role, allowed_roles)
+
+    if ok:
+        audit_rbac_check(
+            db,
+            ws=ws,
+            user=user,
+            action=action,
+            role=role,
+            allowed_roles=allowed_roles,
+            decision="allow",
+            reason="ok",
+        )
+        return
+
+    audit_rbac_check(
+        db,
+        ws=ws,
+        user=user,
+        action=action,
+        role=role,
+        allowed_roles=allowed_roles,
+        decision="deny",
+        reason="Not allowed by RBAC.",
+    )
+    raise ValueError("Not allowed by RBAC.")
+
+
 # -------------------------
-# RBAC public helpers (imported by other modules)
+# RBAC public helpers (existing + new)
 # -------------------------
 def rbac_can_create_connector(db: Session, ws: Workspace, user: Optional[User]) -> bool:
     role = _get_user_workspace_role(db, ws, user)
@@ -332,3 +379,90 @@ def rbac_can_archive_agent(db: Session, ws: Workspace, user: Optional[User]) -> 
     role = _get_user_workspace_role(db, ws, user)
     allowed = _rbac_allowed_roles(ws, ("agent_builder", "can_archive_agent_roles"), ["admin"])
     return _is_role_allowed(role, allowed)
+
+
+# NEW (Commit 5): agent-builder runtime permissions
+def rbac_allowed_preview_roles(ws: Workspace) -> List[str]:
+    return _rbac_allowed_roles(ws, ("agent_builder", "can_preview_agent_roles"), ["admin", "member"])
+
+
+def rbac_allowed_view_published_roles(ws: Workspace) -> List[str]:
+    return _rbac_allowed_roles(ws, ("agent_builder", "can_view_published_agent_roles"), ["admin", "member", "viewer"])
+
+
+def rbac_allowed_run_roles(ws: Workspace) -> List[str]:
+    return _rbac_allowed_roles(ws, ("agent_builder", "can_run_agent_roles"), ["admin", "member"])
+
+
+# -------------------------
+# Commit 5: Policy enforcement helper for definitions
+# -------------------------
+def extract_definition_source_types(definition_json: Dict[str, Any]) -> List[str]:
+    """
+    Canonical extraction: definition_json.retrieval.source_types => list[str]
+    Stable de-dupe + normalization.
+    """
+    r = definition_json.get("retrieval") or {}
+    if not isinstance(r, dict):
+        return []
+    st = r.get("source_types") or []
+    if not isinstance(st, list):
+        return []
+
+    out: List[str] = []
+    for x in st:
+        s = str(x).strip().lower()
+        if s:
+            out.append(s)
+
+    seen = set()
+    uniq: List[str] = []
+    for s in out:
+        if s in seen:
+            continue
+        seen.add(s)
+        uniq.append(s)
+    return uniq
+
+
+def enforce_policy_for_definition(
+    db: Session,
+    *,
+    ws: Workspace,
+    user: Optional[User],
+    definition_json: Dict[str, Any],
+    action: str,
+) -> None:
+    """
+    Commit 5: single policy enforcement path for agents_v2 save/publish.
+    - Enforces allowlist (if configured)
+    - Audits allow/deny
+    - Raises ValueError when disallowed
+    """
+    requested = extract_definition_source_types(definition_json)
+    allowlist = policy_allowed_source_types(ws)
+    try:
+        policy_assert_allowed_sources(ws, requested or None)
+        audit_policy_check(
+            db,
+            ws=ws,
+            user=user,
+            action=action,
+            requested_source_types=requested,
+            allowlist=allowlist,
+            decision="allow",
+            reason="ok",
+        )
+        return
+    except ValueError as e:
+        audit_policy_check(
+            db,
+            ws=ws,
+            user=user,
+            action=action,
+            requested_source_types=requested,
+            allowlist=allowlist,
+            decision="deny",
+            reason=str(e),
+        )
+        raise

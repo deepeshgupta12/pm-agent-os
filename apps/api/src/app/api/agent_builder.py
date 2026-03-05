@@ -7,13 +7,17 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
+from app.api.deps import require_user, require_workspace_access
 from app.core.config import settings
 from app.core.generator import AGENT_TO_DEFAULT_ARTIFACT_TYPE
 from app.core.governance import (
     policy_allowed_source_types,
     policy_assert_allowed_sources,
     audit_policy_check,
+    effective_governance_payload,
+    rbac_assert,
+    rbac_allowed_preview_roles,
+    rbac_allowed_view_published_roles,
 )
 from app.core.prompts import build_system_prompt, build_user_prompt_custom
 from app.db.session import get_db
@@ -92,7 +96,16 @@ def _merge_retrieval_defaults(defn: Dict[str, Any], override: Optional[Retrieval
     return out
 
 
-def _audit_policy(db: Session, *, ws: Workspace, user: User, action: str, requested: List[str], decision: str, reason: str) -> None:
+def _audit_policy(
+    db: Session,
+    *,
+    ws: Workspace,
+    user: User,
+    action: str,
+    requested: List[str],
+    decision: str,
+    reason: str,
+) -> None:
     allowlist = policy_allowed_source_types(ws)
     audit_policy_check(
         db,
@@ -129,12 +142,16 @@ def agent_builder_meta(
     # Artifact types = union of known defaults; UI can show these templates.
     artifact_types = sorted({v for v in (AGENT_TO_DEFAULT_ARTIFACT_TYPE or {}).values() if str(v).strip()})
 
+    gov = effective_governance_payload(ws)
+
     return AgentBuilderMetaOut(
         workspace_id=str(ws.id),
         allowed_source_types=allowed_source_types,
         timeframe_presets=list(_TIMEFRAME_PRESETS),
         retrieval_knobs=dict(_RETRIEVAL_KNOBS),
         artifact_types=artifact_types,
+        policy_effective=gov.get("policy_effective") or {},
+        rbac_effective=gov.get("rbac_effective") or {},
     )
 
 
@@ -146,6 +163,18 @@ def get_published_custom_agent(
     user: User = Depends(require_user),
 ):
     ws, _role = require_workspace_access(workspace_id, db, user)
+
+    # Commit 5: RBAC enforcement (who can view published)
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.agent_builder.view_published",
+            allowed_roles=rbac_allowed_view_published_roles(ws),
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
     try:
         bid = uuid.UUID(base_id)
@@ -174,7 +203,19 @@ def preview_custom_agent(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
+    ws, _role = require_workspace_access(workspace_id, db, user)
+
+    # Commit 5: RBAC enforcement (who can preview)
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.agent_builder.preview",
+            allowed_roles=rbac_allowed_preview_roles(ws),
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
     try:
         bid = uuid.UUID(base_id)
