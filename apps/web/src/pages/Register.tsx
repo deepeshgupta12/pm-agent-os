@@ -1,7 +1,7 @@
 // apps/web/src/pages/Register.tsx
 import { useState } from "react";
 import { Card, Stack, Text, TextInput, Button, Title } from "@mantine/core";
-import { apiFetch } from "../api";
+import { apiFetch } from "../apiClient";
 
 type UserOut = { id: string; email: string };
 

@@ -1,3 +1,5 @@
+// apps/web/src/types.ts
+
 export type Workspace = { id: string; name: string; owner_user_id: string };
 
 export type Agent = {
@@ -421,6 +423,8 @@ export type AgentBuilderMetaOut = {
   timeframe_presets: string[];
   retrieval_knobs: Record<string, unknown>;
   artifact_types: string[];
+  policy_effective?: Record<string, unknown>;
+  rbac_effective?: Record<string, unknown>;
 };
 
 export type CustomAgentPublishedOut = {
@@ -459,4 +463,28 @@ export type AgentArchiveOut = {
   ok: boolean;
   agent_version_id: string;
   status: string; // archived
+};
+
+// -----------------------------
+// Commit 7: Definition JSON helper types (frontend-only)
+// -----------------------------
+export type PromptBlock = {
+  kind: string; // instruction|constraint|checklist|...
+  text: string;
+};
+
+export type AgentDefinitionJson = {
+  artifact?: { type?: string };
+  retrieval?: {
+    enabled?: boolean;
+    query?: string;
+    k?: number;
+    alpha?: number;
+    source_types?: string[];
+    timeframe?: Record<string, unknown>;
+    min_score?: number;
+    overfetch_k?: number;
+    rerank?: boolean;
+  };
+  prompt_blocks?: PromptBlock[];
 };
