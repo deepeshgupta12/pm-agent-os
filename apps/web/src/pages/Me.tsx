@@ -1,7 +1,7 @@
 // apps/web/src/pages/Me.tsx
 import { useEffect, useState } from "react";
 import { Button, Card, Group, Stack, Text, Title } from "@mantine/core";
-import { apiFetch } from "../api";
+import { apiFetch } from "../apiClient";
 
 type UserOut = { id: string; email: string };
 
@@ -52,11 +52,7 @@ export default function Me() {
             </Button>
           </Group>
 
-          {user ? (
-            <pre style={{ margin: 0 }}>{JSON.stringify(user, null, 2)}</pre>
-          ) : (
-            <Text>{msg ?? "Loading..."}</Text>
-          )}
+          {user ? <pre style={{ margin: 0 }}>{JSON.stringify(user, null, 2)}</pre> : <Text>{msg ?? "Loading..."}</Text>}
         </Stack>
       </Card>
     </div>

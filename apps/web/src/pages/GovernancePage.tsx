@@ -13,6 +13,7 @@ import {
   TextInput,
   Title,
   Divider,
+  Collapse,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import type { GovernanceEffectiveOut, GovernanceEventsOut, GovernanceEventOut } from "../types";
@@ -38,9 +39,11 @@ export default function GovernancePage() {
   const [eventsLoading, setEventsLoading] = useState(false);
 
   // filters
-  const [actionPrefix, setActionPrefix] = useState<string>("policy.allowlist");
+  const [actionPrefix, setActionPrefix] = useState<string>(""); // default blank
   const [decision, setDecision] = useState<string>("all"); // all|allow|deny
   const [limit, setLimit] = useState<string>("50");
+
+  const [expandedMeta, setExpandedMeta] = useState<Record<string, boolean>>({});
 
   const limitNum = useMemo(() => {
     const n = Number(limit);
@@ -96,6 +99,19 @@ export default function GovernancePage() {
   async function loadAll() {
     await loadGovernance();
     await loadEvents();
+  }
+
+  function presetAll() {
+    setActionPrefix("");
+    setDecision("all");
+  }
+  function presetPolicy() {
+    setActionPrefix("policy.allowlist");
+    setDecision("all");
+  }
+  function presetRbac() {
+    setActionPrefix("rbac.");
+    setDecision("all");
   }
 
   useEffect(() => {
@@ -165,8 +181,20 @@ export default function GovernancePage() {
           </Group>
 
           <Text size="sm" c="dimmed">
-            Events are returned by <Code>GET /workspaces/:id/governance/events</Code>. Use filters below.
+            Events come from <Code>GET /workspaces/:id/governance/events</Code>. Use filters or presets below.
           </Text>
+
+          <Group>
+            <Button variant="light" onClick={presetAll}>
+              Preset: All
+            </Button>
+            <Button variant="light" onClick={presetPolicy}>
+              Preset: Policy checks
+            </Button>
+            <Button variant="light" onClick={presetRbac}>
+              Preset: RBAC checks
+            </Button>
+          </Group>
 
           <Divider />
 
@@ -175,7 +203,7 @@ export default function GovernancePage() {
               label="action_prefix (optional)"
               value={actionPrefix}
               onChange={(e) => setActionPrefix(e.currentTarget.value)}
-              placeholder="e.g., policy.allowlist."
+              placeholder="e.g., policy.allowlist or rbac."
             />
             <Select
               label="decision"
@@ -187,12 +215,7 @@ export default function GovernancePage() {
               value={decision}
               onChange={(v) => setDecision(v || "all")}
             />
-            <TextInput
-              label="limit"
-              value={limit}
-              onChange={(e) => setLimit(e.currentTarget.value)}
-              placeholder="50"
-            />
+            <TextInput label="limit" value={limit} onChange={(e) => setLimit(e.currentTarget.value)} placeholder="50" />
           </Group>
 
           <Button onClick={loadEvents} loading={eventsLoading}>
@@ -204,47 +227,65 @@ export default function GovernancePage() {
           {eventsLoading ? (
             <Text c="dimmed">Loading events…</Text>
           ) : events.length === 0 ? (
-            <Text c="dimmed">No events found.</Text>
+            <Card withBorder>
+              <Stack gap="xs">
+                <Text c="dimmed">No events found.</Text>
+                <Text size="sm" c="dimmed">
+                  Tip: policy events are generated when you save/publish/run agents with retrieval source types. RBAC events
+                  are generated when you attempt restricted actions (create/publish/archive/run).
+                </Text>
+              </Stack>
+            </Card>
           ) : (
             <Stack gap="xs">
-              {events.map((e) => (
-                <Card key={e.id} withBorder>
-                  <Stack gap={4}>
-                    <Group justify="space-between">
-                      <Group gap="sm">
-                        <Badge variant="light" color={e.decision === "deny" ? "red" : "green"}>
-                          {e.decision}
-                        </Badge>
-                        <Text fw={600}>{e.action}</Text>
+              {events.map((e) => {
+                const open = !!expandedMeta[e.id];
+                return (
+                  <Card key={e.id} withBorder>
+                    <Stack gap={6}>
+                      <Group justify="space-between">
+                        <Group gap="sm">
+                          <Badge variant="light" color={e.decision === "deny" ? "red" : "green"}>
+                            {e.decision}
+                          </Badge>
+                          <Text fw={600}>{e.action}</Text>
+                        </Group>
+                        <Text size="xs" c="dimmed">
+                          {new Date(e.created_at).toLocaleString()}
+                        </Text>
                       </Group>
+
+                      {e.reason ? (
+                        <Text size="sm">
+                          <Text span fw={600}>
+                            reason:
+                          </Text>{" "}
+                          {e.reason}
+                        </Text>
+                      ) : null}
+
                       <Text size="xs" c="dimmed">
-                        {new Date(e.created_at).toLocaleString()}
+                        ws=<Code>{e.workspace_id}</Code> · user=<Code>{e.user_id ?? "null"}</Code>
                       </Text>
-                    </Group>
 
-                    {e.reason ? (
-                      <Text size="sm">
-                        <Text span fw={600}>
-                          reason:
-                        </Text>{" "}
-                        {e.reason}
-                      </Text>
-                    ) : null}
+                      <Group justify="space-between">
+                        <Button
+                          variant="light"
+                          size="xs"
+                          onClick={() => setExpandedMeta((p) => ({ ...p, [e.id]: !p[e.id] }))}
+                        >
+                          {open ? "Hide meta" : "Show meta"}
+                        </Button>
+                        <Badge variant="light">meta keys: {e.meta ? Object.keys(e.meta).length : 0}</Badge>
+                      </Group>
 
-                    <Text size="xs" c="dimmed">
-                      ws=<Code>{e.workspace_id}</Code> · user=<Code>{e.user_id ?? "null"}</Code>
-                    </Text>
-
-                    {e.meta && Object.keys(e.meta).length ? (
-                      <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(e.meta)}</pre>
-                    ) : (
-                      <Text size="sm" c="dimmed">
-                        meta: (empty)
-                      </Text>
-                    )}
-                  </Stack>
-                </Card>
-              ))}
+                      <Collapse in={open}>
+                        <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(e.meta)}</pre>
+                      </Collapse>
+                    </Stack>
+                  </Card>
+                );
+              })}
             </Stack>
           )}
         </Stack>
