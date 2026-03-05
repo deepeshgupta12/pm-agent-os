@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, or_
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
 from app.db.session import get_db
-from app.db.models import Workspace, WorkspaceMember, User
+from app.db.models import Workspace, WorkspaceMember, User, GovernanceEvent
 from app.schemas.core import WorkspaceCreateIn, WorkspaceOut
 from app.schemas.workspaces import WorkspaceMemberInviteIn, WorkspaceMemberOut, WorkspaceRoleOut
 from app.schemas.workspaces import TemplateAdminOut, TemplateAdminUpdateIn
@@ -17,6 +17,8 @@ from app.schemas.workspaces import (
     WorkspaceRBACOut,
     WorkspaceRBACUpdateIn,
 )
+from app.schemas.governance import GovernanceEffectiveOut, GovernanceEventsOut, GovernanceEventOut
+from app.core.governance import load_policy, load_rbac, safe_audit
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -34,7 +36,6 @@ def create_workspace(payload: WorkspaceCreateIn, db: Session = Depends(get_db), 
 
 @router.get("", response_model=list[WorkspaceOut])
 def list_workspaces(db: Session = Depends(get_db), user: User = Depends(require_user)):
-    # owner OR member
     q = (
         select(Workspace)
         .outerjoin(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
@@ -62,13 +63,11 @@ def get_my_role(workspace_id: str, db: Session = Depends(get_db), user: User = D
 def list_members(workspace_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
     ws, _ = require_workspace_access(workspace_id, db, user)
 
-    # Owner row (implicit admin)
     owner = db.get(User, ws.owner_user_id)
     out: list[WorkspaceMemberOut] = []
     if owner:
         out.append(WorkspaceMemberOut(user_id=str(owner.id), email=owner.email, role="admin"))
 
-    # Explicit members
     rows = db.execute(
         select(WorkspaceMember, User)
         .join(User, User.id == WorkspaceMember.user_id)
@@ -77,7 +76,6 @@ def list_members(workspace_id: str, db: Session = Depends(get_db), user: User = 
     ).all()
 
     for wm, u in rows:
-        # skip owner if ever inserted mistakenly
         if u.id == ws.owner_user_id:
             continue
         out.append(WorkspaceMemberOut(user_id=str(u.id), email=u.email, role=wm.role))
@@ -114,7 +112,6 @@ def invite_member(
     ).scalar_one_or_none()
 
     if existing:
-        # idempotent: update role
         existing.role = role
         db.add(existing)
         db.commit()
@@ -192,10 +189,12 @@ def remove_member(
 
     return {"ok": True}
 
+
 @router.get("/{workspace_id}/template-admin", response_model=TemplateAdminOut)
 def get_template_admin(workspace_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
     ws, _role = require_workspace_access(workspace_id, db, user)
     return TemplateAdminOut(workspace_id=str(ws.id), template_admin_json=ws.template_admin_json or {})
+
 
 @router.put("/{workspace_id}/template-admin", response_model=TemplateAdminOut)
 def update_template_admin(
@@ -210,6 +209,7 @@ def update_template_admin(
     db.commit()
     db.refresh(ws)
     return TemplateAdminOut(workspace_id=str(ws.id), template_admin_json=ws.template_admin_json or {})
+
 
 @router.get("/{workspace_id}/approvals-policy", response_model=ApprovalsPolicyOut)
 def get_approvals_policy(workspace_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
@@ -231,12 +231,13 @@ def update_approvals_policy(
     db.refresh(ws)
     return ApprovalsPolicyOut(workspace_id=str(ws.id), approvals_json=ws.approvals_json or {})
 
+
 # -------------------------
 # V3 Governance: Policy + RBAC
 # -------------------------
 @router.get("/{workspace_id}/policy", response_model=WorkspacePolicyOut)
 def get_policy(workspace_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
-    ws, _role = require_workspace_access(workspace_id, db, user)  # viewer+ can read
+    ws, _role = require_workspace_access(workspace_id, db, user)
     return WorkspacePolicyOut(workspace_id=str(ws.id), policy_json=ws.policy_json or {})
 
 
@@ -247,17 +248,32 @@ def update_policy(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    ws, _role = require_workspace_role_min(workspace_id, "admin", db, user)  # admin-only write
-    ws.policy_json = payload.policy_json or {}
+    ws, _role = require_workspace_role_min(workspace_id, "admin", db, user)
+
+    before = ws.policy_json or {}
+    after = payload.policy_json or {}
+
+    ws.policy_json = after
     db.add(ws)
     db.commit()
     db.refresh(ws)
+
+    safe_audit(
+        db,
+        ws=ws,
+        user=user,
+        action="policy.update",
+        decision="allow",
+        reason="Workspace policy updated",
+        meta={"before": before, "after": after},
+    )
+
     return WorkspacePolicyOut(workspace_id=str(ws.id), policy_json=ws.policy_json or {})
 
 
 @router.get("/{workspace_id}/rbac", response_model=WorkspaceRBACOut)
 def get_rbac(workspace_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
-    ws, _role = require_workspace_access(workspace_id, db, user)  # viewer+ can read
+    ws, _role = require_workspace_access(workspace_id, db, user)
     return WorkspaceRBACOut(workspace_id=str(ws.id), rbac_json=ws.rbac_json or {})
 
 
@@ -268,9 +284,77 @@ def update_rbac(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    ws, _role = require_workspace_role_min(workspace_id, "admin", db, user)  # admin-only write
-    ws.rbac_json = payload.rbac_json or {}
+    ws, _role = require_workspace_role_min(workspace_id, "admin", db, user)
+
+    before = ws.rbac_json or {}
+    after = payload.rbac_json or {}
+
+    ws.rbac_json = after
     db.add(ws)
     db.commit()
     db.refresh(ws)
+
+    safe_audit(
+        db,
+        ws=ws,
+        user=user,
+        action="rbac.update",
+        decision="allow",
+        reason="Workspace RBAC updated",
+        meta={"before": before, "after": after},
+    )
+
     return WorkspaceRBACOut(workspace_id=str(ws.id), rbac_json=ws.rbac_json or {})
+
+
+# -------------------------
+# Step 0.4: Effective governance + audit events
+# -------------------------
+@router.get("/{workspace_id}/governance", response_model=GovernanceEffectiveOut)
+def get_governance_effective(workspace_id: str, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    ws, _role = require_workspace_access(workspace_id, db, user)  # viewer+ can read
+    return GovernanceEffectiveOut(
+        workspace_id=str(ws.id),
+        policy_effective=load_policy(ws),
+        rbac_effective=load_rbac(ws),
+    )
+
+
+@router.get("/{workspace_id}/governance/events", response_model=GovernanceEventsOut)
+def list_governance_events(
+    workspace_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    ws, _role = require_workspace_access(workspace_id, db, user)  # viewer+ can read
+
+    lim = int(limit)
+    rows = (
+        db.execute(
+            select(GovernanceEvent)
+            .where(GovernanceEvent.workspace_id == ws.id)
+            .order_by(GovernanceEvent.created_at.desc())
+            .limit(lim)
+        )
+        .scalars()
+        .all()
+    )
+
+    items: list[GovernanceEventOut] = []
+    for e in rows:
+        created_at = e.created_at.isoformat().replace("+00:00", "Z")
+        items.append(
+            GovernanceEventOut(
+                id=str(e.id),
+                workspace_id=str(e.workspace_id),
+                user_id=str(e.user_id) if e.user_id else None,
+                action=e.action,
+                decision=e.decision,
+                reason=e.reason or "",
+                meta=e.meta or {},
+                created_at=created_at,
+            )
+        )
+
+    return GovernanceEventsOut(workspace_id=str(ws.id), items=items)
