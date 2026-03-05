@@ -444,3 +444,19 @@ export type CustomAgentPreviewOut = {
 };
 
 export type CustomAgentRunOut = Run;
+
+// -----------------------------
+// Commit 6 Step 2: Agent Builder create/publish/archive responses
+// -----------------------------
+export type AgentPublishOut = {
+  ok: boolean;
+  agent_base_id: string;
+  published_version_id: string;
+  published_version: number;
+};
+
+export type AgentArchiveOut = {
+  ok: boolean;
+  agent_version_id: string;
+  status: string; // archived
+};
