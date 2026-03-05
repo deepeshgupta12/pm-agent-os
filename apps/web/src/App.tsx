@@ -14,6 +14,10 @@ import Me from "./pages/Me";
 import ActionCenterPage from "./pages/ActionCenterPage";
 import SchedulesPage from "./pages/SchedulesPage";
 
+// Commit 6 pages
+import GovernancePage from "./pages/GovernancePage";
+import AgentBuilderPage from "./pages/AgentBuilderPage";
+
 function TopNav() {
   const loc = useLocation();
   return (
@@ -62,6 +66,10 @@ export default function App() {
           <Route path="/workspaces/:workspaceId" element={<WorkspaceDetailPage />} />
           <Route path="/workspaces/:workspaceId/actions" element={<ActionCenterPage />} />
           <Route path="/workspaces/:workspaceId/schedules" element={<SchedulesPage />} />
+
+          {/* Commit 6: Governance + Agent Builder */}
+          <Route path="/workspaces/:workspaceId/governance" element={<GovernancePage />} />
+          <Route path="/workspaces/:workspaceId/agent-builder" element={<AgentBuilderPage />} />
 
           {/* Run Builder (V0 close) */}
           <Route path="/run-builder/:workspaceId" element={<RunBuilderPage />} />

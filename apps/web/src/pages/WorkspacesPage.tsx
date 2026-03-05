@@ -100,6 +100,15 @@ export default function WorkspacesPage() {
                       <Button component={Link} to={`/workspaces/${w.id}/pipelines`} variant="light">
                         Pipelines
                       </Button>
+
+                      {/* Commit 6 */}
+                      <Button component={Link} to={`/workspaces/${w.id}/agent-builder`} variant="light">
+                        Agent Builder
+                      </Button>
+                      <Button component={Link} to={`/workspaces/${w.id}/governance`} variant="light">
+                        Governance
+                      </Button>
+
                       <Button component={Link} to={`/workspaces/${w.id}`}>
                         Open
                       </Button>

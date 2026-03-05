@@ -44,11 +44,7 @@ export default function Me() {
         <button onClick={logout}>Logout</button>
       </div>
 
-      {user ? (
-        <pre>{JSON.stringify(user, null, 2)}</pre>
-      ) : (
-        <p>{msg ?? "Loading..."}</p>
-      )}
+      {user ? <pre>{JSON.stringify(user, null, 2)}</pre> : <p>{msg ?? "Loading..."}</p>}
     </div>
   );
 }

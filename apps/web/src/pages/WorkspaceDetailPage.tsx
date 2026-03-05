@@ -298,6 +298,14 @@ export default function WorkspaceDetailPage() {
           <Button component={Link} to={`/workspaces/${wid}/schedules`} variant="light">
             Schedules
           </Button>
+
+          {/* Commit 6 */}
+          <Button component={Link} to={`/workspaces/${wid}/agent-builder`} variant="light">
+            Agent Builder
+          </Button>
+          <Button component={Link} to={`/workspaces/${wid}/governance`} variant="light">
+            Governance
+          </Button>
         </Group>
       </Group>
 
@@ -333,15 +341,19 @@ export default function WorkspaceDetailPage() {
               <Button variant="light" onClick={loadTemplateAdmin} loading={tplAdminLoading}>
                 Refresh
               </Button>
-              <Button onClick={saveTemplateAdmin} loading={tplAdminSaving} disabled={!isAdmin || tplAdminLoading || !tplAdminDirty}>
+              <Button
+                onClick={saveTemplateAdmin}
+                loading={tplAdminSaving}
+                disabled={!isAdmin || tplAdminLoading || !tplAdminDirty}
+              >
                 Save
               </Button>
             </Group>
           </Group>
 
           <Text size="sm" c="dimmed">
-            Workspace-scoped configuration for PRD templates, event naming conventions, and research taxonomy tags. Stored as JSON at{" "}
-            <Code>workspaces.template_admin_json</Code>.
+            Workspace-scoped configuration for PRD templates, event naming conventions, and research taxonomy tags.
+            Stored as JSON at <Code>workspaces.template_admin_json</Code>.
           </Text>
 
           {tplAdminErr ? (
@@ -353,7 +365,11 @@ export default function WorkspaceDetailPage() {
           <Textarea
             label="template_admin_json"
             description={
-              tplAdminLoading ? "Loading…" : isAdmin ? "Edit JSON and click Save." : "Viewer/Member: read-only. Ask an admin to update."
+              tplAdminLoading
+                ? "Loading…"
+                : isAdmin
+                ? "Edit JSON and click Save."
+                : "Viewer/Member: read-only. Ask an admin to update."
             }
             autosize
             minRows={10}
@@ -377,18 +393,18 @@ export default function WorkspaceDetailPage() {
           <Text fw={600}>Suggested JSON shape (example)</Text>
           <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
             {`{
-"prd_fields": {
-"required": ["Summary", "Problem", "Users / Segments", "Success Metrics", "Scope", "Requirements"],
-"optional": ["Risks", "Assumptions", "Open Questions", "Next Actions"]
-},
-"event_naming": {
-"format": "category_action_object",
-"examples": ["onboarding_click_cta", "pricing_view_plan"]
-},
-"research_taxonomy_tags": {
-"themes": ["pricing", "onboarding", "performance", "trust"],
-"personas": ["new_user", "power_user", "admin"]
-}
+  "prd_fields": {
+    "required": ["Summary", "Problem", "Users / Segments", "Success Metrics", "Scope", "Requirements"],
+    "optional": ["Risks", "Assumptions", "Open Questions", "Next Actions"]
+  },
+  "event_naming": {
+    "format": "category_action_object",
+    "examples": ["onboarding_click_cta", "pricing_view_plan"]
+  },
+  "research_taxonomy_tags": {
+    "themes": ["pricing", "onboarding", "performance", "trust"],
+    "personas": ["new_user", "power_user", "admin"]
+  }
 }`}
           </pre>
 
@@ -524,7 +540,13 @@ export default function WorkspaceDetailPage() {
             </Card>
           ) : null}
 
-          <Textarea label="Input payload (JSON)" autosize minRows={6} value={inputJson} onChange={(e) => setInputJson(e.currentTarget.value)} />
+          <Textarea
+            label="Input payload (JSON)"
+            autosize
+            minRows={6}
+            value={inputJson}
+            onChange={(e) => setInputJson(e.currentTarget.value)}
+          />
           <Group>
             <Button onClick={createRun} loading={creating}>
               Create Run
