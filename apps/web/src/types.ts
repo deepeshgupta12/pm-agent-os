@@ -368,3 +368,83 @@ export type ScheduleRunDueResponse = {
   schedule_runs: ScheduleRun[];
   now: string; // ISO
 };
+
+// -----------------------------
+// Commit 6: Governance + Agent Builder
+// -----------------------------
+
+export type GovernanceEffective = {
+  workspace_id: string;
+  policy_effective: Record<string, unknown>;
+  rbac_effective: Record<string, unknown>;
+};
+
+export type GovernanceEvent = {
+  id: string;
+  workspace_id: string;
+  user_id?: string | null;
+  action: string;
+  decision: string; // allow|deny
+  reason: string;
+  meta: Record<string, unknown>;
+  created_at: string; // ISO
+};
+
+export type GovernanceEvents = {
+  workspace_id: string;
+  items: GovernanceEvent[];
+};
+
+export type AgentBuilderMeta = {
+  workspace_id: string;
+  allowed_source_types: string[];
+  timeframe_presets: string[];
+  retrieval_knobs: Record<string, unknown>;
+  artifact_types: string[];
+};
+
+export type AgentBase = {
+  id: string;
+  workspace_id: string;
+  key: string;
+  name: string;
+  description: string;
+  created_by_user_id?: string | null;
+  created_at: string; // ISO
+  updated_at: string; // ISO
+};
+
+export type CustomAgentPublished = {
+  agent_base_id: string;
+  published_version_id: string;
+  published_version: number;
+  status: string;
+  definition_json: Record<string, unknown>;
+};
+
+export type CustomAgentPreviewIn = {
+  input_payload: Record<string, unknown>;
+  retrieval?: {
+    enabled: boolean;
+    query: string;
+    k: number;
+    alpha: number;
+    source_types: string[];
+    timeframe: Record<string, unknown>;
+    min_score: number;
+    overfetch_k: number;
+    rerank: boolean;
+  } | null;
+};
+
+export type CustomAgentPreviewOut = {
+  ok: boolean;
+  agent_base_id: string;
+  published_version: number;
+  artifact_type: string;
+  retrieval_resolved: Record<string, unknown>;
+  system_prompt: string;
+  user_prompt: string;
+  llm_enabled: boolean;
+  notes: string[];
+};
