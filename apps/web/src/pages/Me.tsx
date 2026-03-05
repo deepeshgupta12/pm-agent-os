@@ -1,4 +1,6 @@
+// apps/web/src/pages/Me.tsx
 import { useEffect, useState } from "react";
+import { Button, Card, Group, Stack, Text, Title } from "@mantine/core";
 import { apiFetch } from "../api";
 
 type UserOut = { id: string; email: string };
@@ -36,15 +38,27 @@ export default function Me() {
   }, []);
 
   return (
-    <div style={{ maxWidth: 520, margin: "24px auto" }}>
-      <h2>Me</h2>
+    <div style={{ maxWidth: 720, margin: "24px auto" }}>
+      <Title order={2}>Me</Title>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-        <button onClick={loadMe}>Refresh</button>
-        <button onClick={logout}>Logout</button>
-      </div>
+      <Card withBorder mt="md">
+        <Stack gap="sm">
+          <Group>
+            <Button variant="light" onClick={loadMe}>
+              Refresh
+            </Button>
+            <Button color="red" variant="light" onClick={logout}>
+              Logout
+            </Button>
+          </Group>
 
-      {user ? <pre>{JSON.stringify(user, null, 2)}</pre> : <p>{msg ?? "Loading..."}</p>}
+          {user ? (
+            <pre style={{ margin: 0 }}>{JSON.stringify(user, null, 2)}</pre>
+          ) : (
+            <Text>{msg ?? "Loading..."}</Text>
+          )}
+        </Stack>
+      </Card>
     </div>
   );
 }

@@ -1,4 +1,6 @@
+// apps/web/src/pages/Login.tsx
 import { useState } from "react";
+import { Card, Stack, Text, TextInput, Button, Title } from "@mantine/core";
 import { apiFetch } from "../api";
 
 type UserOut = { id: string; email: string };
@@ -27,35 +29,31 @@ export default function Login() {
 
   return (
     <div style={{ maxWidth: 520, margin: "24px auto" }}>
-      <h2>Login</h2>
-      <form onSubmit={onLogin}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <label>
-            Email
-            <input
-              style={{ width: "100%", padding: 8 }}
+      <Title order={2}>Login</Title>
+      <Card withBorder mt="md">
+        <form onSubmit={onLogin}>
+          <Stack gap="sm">
+            <TextInput
+              label="Email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => setEmail(e.currentTarget.value)}
               type="email"
               required
             />
-          </label>
-          <label>
-            Password
-            <input
-              style={{ width: "100%", padding: 8 }}
+            <TextInput
+              label="Password"
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => setPassword(e.currentTarget.value)}
               type="password"
               required
               minLength={8}
               maxLength={72}
             />
-          </label>
-          <button type="submit">Login</button>
-        </div>
-      </form>
-      {msg && <p style={{ marginTop: 12 }}>{msg}</p>}
+            <Button type="submit">Login</Button>
+            {msg ? <Text>{msg}</Text> : null}
+          </Stack>
+        </form>
+      </Card>
     </div>
   );
 }

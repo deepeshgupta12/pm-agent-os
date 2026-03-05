@@ -1,36 +1,27 @@
+// apps/web/src/pages/AgentBuilderPage.tsx
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   Badge,
   Button,
   Card,
-  Divider,
+  Code,
   Group,
   Select,
   Stack,
   Text,
   Textarea,
-  TextInput,
   Title,
-  Code,
+  Divider,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import type {
-  AgentBase,
-  AgentBuilderMeta,
-  CustomAgentPreviewIn,
+  AgentBuilderMetaOut,
+  AgentBaseOut,
+  CustomAgentPublishedOut,
   CustomAgentPreviewOut,
-  CustomAgentPublished,
   Run,
 } from "../types";
-
-function safeJson(v: any): string {
-  try {
-    return JSON.stringify(v ?? {}, null, 2);
-  } catch {
-    return "{}";
-  }
-}
 
 function safeJsonParse(s: string): { ok: boolean; value: any; error?: string } {
   try {
@@ -41,6 +32,14 @@ function safeJsonParse(s: string): { ok: boolean; value: any; error?: string } {
   }
 }
 
+function stableJsonStringify(v: any): string {
+  try {
+    return JSON.stringify(v ?? {}, null, 2);
+  } catch {
+    return "{}";
+  }
+}
+
 export default function AgentBuilderPage() {
   const { workspaceId } = useParams();
   const wid = workspaceId || "";
@@ -48,33 +47,37 @@ export default function AgentBuilderPage() {
 
   const [err, setErr] = useState<string | null>(null);
 
-  const [meta, setMeta] = useState<AgentBuilderMeta | null>(null);
-  const [bases, setBases] = useState<AgentBase[]>([]);
-  const [loadingMeta, setLoadingMeta] = useState(false);
-  const [loadingBases, setLoadingBases] = useState(false);
+  // meta
+  const [meta, setMeta] = useState<AgentBuilderMetaOut | null>(null);
+  const [metaLoading, setMetaLoading] = useState(false);
 
+  // bases
+  const [bases, setBases] = useState<AgentBaseOut[]>([]);
+  const [basesLoading, setBasesLoading] = useState(false);
   const [baseId, setBaseId] = useState<string | null>(null);
-  const selectedBase = useMemo(() => bases.find((b) => b.id === baseId) || null, [bases, baseId]);
 
-  const [published, setPublished] = useState<CustomAgentPublished | null>(null);
-  const [loadingPublished, setLoadingPublished] = useState(false);
+  // published def
+  const [published, setPublished] = useState<CustomAgentPublishedOut | null>(null);
+  const [publishedLoading, setPublishedLoading] = useState(false);
 
-  // Preview
-  const [previewInputJson, setPreviewInputJson] = useState<string>(
-    JSON.stringify({ goal: "Write a PRD for X", context: "", constraints: "" }, null, 2)
+  // input payload + retrieval override
+  const [inputJson, setInputJson] = useState<string>(
+    stableJsonStringify({ goal: "Write a PRD for X", context: "", constraints: "" })
   );
   const [retrievalOverrideJson, setRetrievalOverrideJson] = useState<string>("{}");
-  const [previewOut, setPreviewOut] = useState<CustomAgentPreviewOut | null>(null);
+
+  // preview
+  const [preview, setPreview] = useState<CustomAgentPreviewOut | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 
-  // Run
-  const [runLoading, setRunLoading] = useState(false);
+  // run
+  const [running, setRunning] = useState(false);
 
   const baseOptions = useMemo(
     () =>
       bases.map((b) => ({
         value: b.id,
-        label: `${b.name} (${b.key})`,
+        label: `${b.name} · ${b.key}`,
       })),
     [bases]
   );
@@ -82,15 +85,15 @@ export default function AgentBuilderPage() {
   async function loadMeta() {
     if (!wid) return;
     setErr(null);
-    setLoadingMeta(true);
+    setMetaLoading(true);
 
-    const res = await apiFetch<AgentBuilderMeta>(`/workspaces/${wid}/agent-builder/meta`, { method: "GET" });
+    const res = await apiFetch<AgentBuilderMetaOut>(`/workspaces/${wid}/agent-builder/meta`, { method: "GET" });
 
-    setLoadingMeta(false);
+    setMetaLoading(false);
 
     if (!res.ok) {
       setMeta(null);
-      setErr(`Agent Builder meta load failed: ${res.status} ${res.error}`);
+      setErr(`Agent builder meta load failed: ${res.status} ${res.error}`);
       return;
     }
 
@@ -100,40 +103,119 @@ export default function AgentBuilderPage() {
   async function loadBases() {
     if (!wid) return;
     setErr(null);
-    setLoadingBases(true);
+    setBasesLoading(true);
 
-    const res = await apiFetch<AgentBase[]>(`/workspaces/${wid}/agent-bases`, { method: "GET" });
+    const res = await apiFetch<AgentBaseOut[]>(`/workspaces/${wid}/agent-bases`, { method: "GET" });
 
-    setLoadingBases(false);
+    setBasesLoading(false);
 
     if (!res.ok) {
       setBases([]);
+      setBaseId(null);
       setErr(`Agent bases load failed: ${res.status} ${res.error}`);
       return;
     }
 
     setBases(res.data || []);
     if (!baseId && (res.data || []).length > 0) setBaseId(res.data[0].id);
+    if ((res.data || []).length === 0) setBaseId(null);
   }
 
   async function loadPublished(bid: string) {
     if (!wid || !bid) return;
     setErr(null);
-    setLoadingPublished(true);
+    setPublishedLoading(true);
 
-    const res = await apiFetch<CustomAgentPublished>(`/workspaces/${wid}/agent-bases/${bid}/published`, {
+    const res = await apiFetch<CustomAgentPublishedOut>(`/workspaces/${wid}/agent-bases/${bid}/published`, {
       method: "GET",
     });
 
-    setLoadingPublished(false);
+    setPublishedLoading(false);
 
     if (!res.ok) {
+      // Not fatal: show "no published"
       setPublished(null);
-      setErr(`Published version load failed: ${res.status} ${res.error}`);
       return;
     }
 
     setPublished(res.data);
+  }
+
+  async function doPreview() {
+    if (!wid || !baseId) return;
+
+    const inputParsed = safeJsonParse(inputJson);
+    if (!inputParsed.ok) {
+      setErr(`input_payload JSON invalid: ${inputParsed.error}`);
+      return;
+    }
+
+    const retrievalParsed = safeJsonParse(retrievalOverrideJson);
+    if (!retrievalParsed.ok) {
+      setErr(`retrieval override JSON invalid: ${retrievalParsed.error}`);
+      return;
+    }
+
+    const payload: any = {
+      input_payload: inputParsed.value || {},
+      retrieval: Object.keys(retrievalParsed.value || {}).length ? retrievalParsed.value : null,
+    };
+
+    setErr(null);
+    setPreviewLoading(true);
+
+    const res = await apiFetch<CustomAgentPreviewOut>(`/workspaces/${wid}/agent-bases/${baseId}/preview`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    setPreviewLoading(false);
+
+    if (!res.ok) {
+      setPreview(null);
+      setErr(`Preview failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setPreview(res.data);
+  }
+
+  async function doRun() {
+    if (!wid || !baseId) return;
+
+    const inputParsed = safeJsonParse(inputJson);
+    if (!inputParsed.ok) {
+      setErr(`input_payload JSON invalid: ${inputParsed.error}`);
+      return;
+    }
+
+    const retrievalParsed = safeJsonParse(retrievalOverrideJson);
+    if (!retrievalParsed.ok) {
+      setErr(`retrieval override JSON invalid: ${retrievalParsed.error}`);
+      return;
+    }
+
+    const payload: any = {
+      input_payload: inputParsed.value || {},
+      retrieval: Object.keys(retrievalParsed.value || {}).length ? retrievalParsed.value : null,
+    };
+
+    setErr(null);
+    setRunning(true);
+
+    const res = await apiFetch<Run>(`/workspaces/${wid}/agent-bases/${baseId}/runs`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    setRunning(false);
+
+    if (!res.ok) {
+      setErr(`Run failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    nav(`/runs/${res.data.id}`);
   }
 
   async function loadAll() {
@@ -148,100 +230,15 @@ export default function AgentBuilderPage() {
   }, [wid]);
 
   useEffect(() => {
+    // whenever base changes, try load published
     if (!baseId) {
       setPublished(null);
-      setPreviewOut(null);
+      setPreview(null);
       return;
     }
     void loadPublished(baseId);
-    setPreviewOut(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [baseId]);
-
-  async function preview() {
-    if (!wid || !baseId) return;
-
-    setErr(null);
-    setPreviewLoading(true);
-
-    const ip = safeJsonParse(previewInputJson);
-    if (!ip.ok) {
-      setPreviewLoading(false);
-      setErr(`Preview input JSON invalid: ${ip.error}`);
-      return;
-    }
-
-    const ro = safeJsonParse(retrievalOverrideJson);
-    if (!ro.ok) {
-      setPreviewLoading(false);
-      setErr(`Retrieval override JSON invalid: ${ro.error}`);
-      return;
-    }
-
-    // retrieval override is optional; if empty object => send null
-    const retrievalOverride = ro.value && Object.keys(ro.value || {}).length > 0 ? ro.value : null;
-
-    const payload: CustomAgentPreviewIn = {
-      input_payload: ip.value || {},
-      retrieval: retrievalOverride,
-    };
-
-    const res = await apiFetch<CustomAgentPreviewOut>(`/workspaces/${wid}/agent-bases/${baseId}/preview`, {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-
-    setPreviewLoading(false);
-
-    if (!res.ok) {
-      setPreviewOut(null);
-      setErr(`Preview failed: ${res.status} ${res.error}`);
-      return;
-    }
-
-    setPreviewOut(res.data);
-  }
-
-  async function runNow() {
-    if (!wid || !baseId) return;
-
-    setErr(null);
-    setRunLoading(true);
-
-    const ip = safeJsonParse(previewInputJson);
-    if (!ip.ok) {
-      setRunLoading(false);
-      setErr(`Run input JSON invalid: ${ip.error}`);
-      return;
-    }
-
-    const ro = safeJsonParse(retrievalOverrideJson);
-    if (!ro.ok) {
-      setRunLoading(false);
-      setErr(`Retrieval override JSON invalid: ${ro.error}`);
-      return;
-    }
-    const retrievalOverride = ro.value && Object.keys(ro.value || {}).length > 0 ? ro.value : null;
-
-    const payload = {
-      input_payload: ip.value || {},
-      retrieval: retrievalOverride,
-    };
-
-    const res = await apiFetch<Run>(`/workspaces/${wid}/agent-bases/${baseId}/runs`, {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-
-    setRunLoading(false);
-
-    if (!res.ok) {
-      setErr(`Run failed: ${res.status} ${res.error}`);
-      return;
-    }
-
-    nav(`/runs/${res.data.id}`);
-  }
 
   return (
     <Stack gap="md">
@@ -249,9 +246,9 @@ export default function AgentBuilderPage() {
         <Title order={2}>Agent Builder</Title>
         <Group>
           <Button component={Link} to={`/workspaces/${wid}`} variant="light">
-            Back to Workspace
+            Back
           </Button>
-          <Button variant="light" onClick={loadAll} loading={loadingMeta || loadingBases}>
+          <Button onClick={loadAll} loading={metaLoading || basesLoading}>
             Refresh
           </Button>
         </Group>
@@ -268,30 +265,17 @@ export default function AgentBuilderPage() {
           <Group justify="space-between">
             <Group gap="sm">
               <Text fw={700}>Builder Meta</Text>
-              <Badge variant="light">from API</Badge>
+              <Badge variant="light">governance-aware</Badge>
             </Group>
-            <Button variant="light" onClick={loadMeta} loading={loadingMeta}>
+            <Button variant="light" onClick={loadMeta} loading={metaLoading}>
               Refresh meta
             </Button>
           </Group>
 
-          {meta ? (
-            <Stack gap={4}>
-              <Text size="sm">
-                allowed_source_types: <Code>{(meta.allowed_source_types || []).join(", ") || "(none)"}</Code>
-              </Text>
-              <Text size="sm">
-                timeframe_presets: <Code>{(meta.timeframe_presets || []).join(", ") || "(none)"}</Code>
-              </Text>
-              <Text size="sm">
-                artifact_types: <Code>{(meta.artifact_types || []).join(", ") || "(none)"}</Code>
-              </Text>
-              <Textarea label="retrieval_knobs (json)" autosize minRows={6} value={safeJson(meta.retrieval_knobs)} readOnly />
-            </Stack>
+          {!meta ? (
+            <Text c="dimmed">{metaLoading ? "Loading…" : "No meta loaded."}</Text>
           ) : (
-            <Text size="sm" c="dimmed">
-              Meta not loaded yet.
-            </Text>
+            <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{stableJsonStringify(meta)}</pre>
           )}
         </Stack>
       </Card>
@@ -303,39 +287,24 @@ export default function AgentBuilderPage() {
               <Text fw={700}>Agent Bases</Text>
               <Badge variant="light">{bases.length} items</Badge>
             </Group>
-            <Button variant="light" onClick={loadBases} loading={loadingBases}>
+            <Button variant="light" onClick={loadBases} loading={basesLoading}>
               Refresh bases
             </Button>
           </Group>
 
-          <Select
-            label="Select agent base"
-            data={baseOptions}
-            value={baseId}
-            onChange={setBaseId}
-            searchable
-            nothingFoundMessage="No agent bases"
-          />
-
-          {selectedBase ? (
-            <Card withBorder>
-              <Stack gap={4}>
-                <Group gap="sm">
-                  <Badge variant="light">{selectedBase.key}</Badge>
-                  <Text fw={700}>{selectedBase.name}</Text>
-                </Group>
-                <Text size="sm" c="dimmed">
-                  {selectedBase.description || "(no description)"}
-                </Text>
-                <Text size="xs" c="dimmed">
-                  id={selectedBase.id}
-                </Text>
-              </Stack>
-            </Card>
-          ) : (
-            <Text size="sm" c="dimmed">
-              Pick a base to continue.
+          {bases.length === 0 ? (
+            <Text c="dimmed">
+              No agent bases in this workspace yet. Create one via API first (Commit 6 step is UI-only).
             </Text>
+          ) : (
+            <Select
+              label="Select agent base"
+              data={baseOptions}
+              value={baseId}
+              onChange={(v) => setBaseId(v)}
+              searchable
+              nothingFoundMessage="No agent bases"
+            />
           )}
         </Stack>
       </Card>
@@ -349,105 +318,104 @@ export default function AgentBuilderPage() {
             </Group>
             <Button
               variant="light"
-              onClick={() => baseId && loadPublished(baseId)}
-              loading={loadingPublished}
+              onClick={() => (baseId ? loadPublished(baseId) : null)}
+              loading={publishedLoading}
               disabled={!baseId}
             >
               Refresh published
             </Button>
           </Group>
 
-          {published ? (
-            <Stack gap="xs">
-              <Text size="sm">
-                version: <Code>{published.published_version}</Code> · version_id:{" "}
-                <Code>{published.published_version_id}</Code>
-              </Text>
-              <Textarea
-                label="definition_json"
-                autosize
-                minRows={10}
-                value={safeJson(published.definition_json)}
-                readOnly
-              />
-            </Stack>
+          {!baseId ? (
+            <Text c="dimmed">Pick an agent base first.</Text>
+          ) : !published ? (
+            <Text c="dimmed">No published version loaded (or it may not exist).</Text>
           ) : (
-            <Text size="sm" c="dimmed">
-              No published version loaded (or it may not exist).
-            </Text>
+            <>
+              <Text size="sm" c="dimmed">
+                base_id: <Code>{published.agent_base_id}</Code> · published_version:{" "}
+                <Code>{published.published_version}</Code>
+              </Text>
+              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{stableJsonStringify(published.definition_json)}</pre>
+            </>
           )}
         </Stack>
       </Card>
 
       <Card withBorder>
         <Stack gap="sm">
-          <Text fw={700}>Preview + Run</Text>
-          <Text size="sm" c="dimmed">
-            Preview calls <Code>POST /workspaces/:id/agent-bases/:baseId/preview</Code>. Run calls{" "}
-            <Code>POST /workspaces/:id/agent-bases/:baseId/runs</Code>.
-          </Text>
+          <Group justify="space-between">
+            <Group gap="sm">
+              <Text fw={700}>Preview + Run</Text>
+              <Badge variant="light">no side effects in preview</Badge>
+            </Group>
+            <Text size="sm" c="dimmed">
+              Preview: <Code>POST /workspaces/:id/agent-bases/:baseId/preview</Code> · Run:{" "}
+              <Code>POST /workspaces/:id/agent-bases/:baseId/runs</Code>
+            </Text>
+          </Group>
 
           <Divider />
 
           <Textarea
             label="input_payload (JSON)"
             autosize
-            minRows={8}
-            value={previewInputJson}
-            onChange={(e) => setPreviewInputJson(e.currentTarget.value)}
+            minRows={6}
+            value={inputJson}
+            onChange={(e) => setInputJson(e.currentTarget.value)}
           />
 
           <Textarea
             label="retrieval override (JSON, optional)"
-            description='If empty {}, the published definition retrieval defaults are used. Example: {"enabled":true,"query":"...","k":6,"alpha":0.65,"source_types":["docs"],"timeframe":{"preset":"30d"},"min_score":0.15,"overfetch_k":3,"rerank":false}'
+            description='If empty {}, published definition retrieval defaults are used. Example: {"enabled":true,"query":"...","k":6,"alpha":0.65,"source_types":["docs"],"timeframe":{"preset":"30d"},"min_score":0.15,"overfetch_k":3,"rerank":false}'
             autosize
-            minRows={6}
+            minRows={4}
             value={retrievalOverrideJson}
             onChange={(e) => setRetrievalOverrideJson(e.currentTarget.value)}
           />
 
           <Group>
-            <Button onClick={preview} loading={previewLoading} disabled={!baseId}>
-              Preview prompts
+            <Button onClick={doPreview} loading={previewLoading} disabled={!baseId}>
+              Preview
             </Button>
-            <Button onClick={runNow} loading={runLoading} disabled={!baseId}>
-              Run custom agent
+            <Button onClick={doRun} loading={running} disabled={!baseId}>
+              Run
             </Button>
           </Group>
 
-          {previewOut ? (
+          {preview ? (
             <Card withBorder>
-              <Stack gap="sm">
-                <Group gap="sm">
-                  <Badge variant="light">artifact_type: {previewOut.artifact_type}</Badge>
-                  <Badge variant="light" color={previewOut.llm_enabled ? "green" : "gray"}>
-                    llm_enabled: {String(previewOut.llm_enabled)}
-                  </Badge>
-                  <Badge variant="light">published_version: {previewOut.published_version}</Badge>
+              <Stack gap="xs">
+                <Group justify="space-between">
+                  <Text fw={700}>Preview Output</Text>
+                  <Badge variant="light">{preview.llm_enabled ? "LLM enabled" : "LLM disabled"}</Badge>
                 </Group>
 
-                {previewOut.notes?.length ? (
-                  <Card withBorder>
-                    <Text fw={600}>Notes</Text>
-                    <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{previewOut.notes.join("\n")}</pre>
-                  </Card>
+                <Text size="sm" c="dimmed">
+                  artifact_type: <Code>{preview.artifact_type}</Code> · published_version:{" "}
+                  <Code>{preview.published_version}</Code>
+                </Text>
+
+                <Text fw={600}>retrieval_resolved</Text>
+                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{stableJsonStringify(preview.retrieval_resolved)}</pre>
+
+                <Text fw={600}>system_prompt</Text>
+                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{preview.system_prompt}</pre>
+
+                <Text fw={600}>user_prompt</Text>
+                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{preview.user_prompt}</pre>
+
+                {preview.notes?.length ? (
+                  <>
+                    <Text fw={600}>notes</Text>
+                    <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{stableJsonStringify(preview.notes)}</pre>
+                  </>
                 ) : null}
-
-                <Textarea label="system_prompt" autosize minRows={6} value={previewOut.system_prompt || ""} readOnly />
-                <Textarea label="user_prompt" autosize minRows={12} value={previewOut.user_prompt || ""} readOnly />
-
-                <Textarea
-                  label="retrieval_resolved (json)"
-                  autosize
-                  minRows={6}
-                  value={safeJson(previewOut.retrieval_resolved)}
-                  readOnly
-                />
               </Stack>
             </Card>
           ) : (
             <Text size="sm" c="dimmed">
-              Run preview to see prompts.
+              Run preview to validate prompt wiring and policy enforcement.
             </Text>
           )}
         </Stack>
