@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import select
@@ -14,14 +15,18 @@ from app.db.models import GovernanceEvent, User, Workspace, WorkspaceMember
 # Deterministic effective governance defaults
 # -------------------------
 _DEFAULT_POLICY: Dict[str, Any] = {
+    # V1 Policy Center: internal-only toggle
+    "internal_only": False,
     "retrieval": {
-        "allowed_source_types": [],  # empty => no allowlist enforcement
+        # empty => no allowlist enforcement
+        "allowed_source_types": [],
+        # None => do not enforce retention (yet)
         "retention_days": None,
-        "block_external_links": False,
     },
     "privacy": {
         "pii_masking": {
             "enabled": False,
+            # none | write_time | export_time | both
             "mode": "none",
         }
     },
@@ -32,7 +37,7 @@ _DEFAULT_RBAC: Dict[str, Any] = {
         "can_create_agent_base_roles": ["admin", "member"],
         "can_publish_agent_roles": ["admin"],
         "can_archive_agent_roles": ["admin"],
-        # NEW (Commit 5): runtime / visibility permissions
+        # runtime / visibility permissions
         "can_preview_agent_roles": ["admin", "member"],
         "can_view_published_agent_roles": ["admin", "member", "viewer"],
         "can_run_agent_roles": ["admin", "member"],
@@ -64,6 +69,123 @@ def load_policy(ws: Workspace) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raw = {}
     return _deep_merge(_DEFAULT_POLICY, raw)
+
+def normalize_policy_json(raw: Any) -> Dict[str, Any]:
+    """
+    Normalizes incoming policy JSON into a safe, deterministic shape.
+    Keeps the surface area intentionally small for v1.
+
+    Expected v1 shape:
+    {
+      "retrieval": {
+        "allowed_source_types": [..],
+        "retention_days": <int|null>,
+        "block_external_links": <bool>
+      },
+      "privacy": {
+        "pii_masking": { "enabled": <bool>, "mode": "none" | ... }
+      }
+    }
+    """
+    if not isinstance(raw, dict):
+        raw = {}
+
+    retrieval = raw.get("retrieval")
+    if not isinstance(retrieval, dict):
+        retrieval = {}
+
+    privacy = raw.get("privacy")
+    if not isinstance(privacy, dict):
+        privacy = {}
+
+    pii = privacy.get("pii_masking")
+    if not isinstance(pii, dict):
+        pii = {}
+
+    # allowed_source_types -> list[str] lowercase deduped
+    ast = retrieval.get("allowed_source_types", [])
+    if not isinstance(ast, list):
+        ast = []
+    clean_types: List[str] = []
+    for x in ast:
+        s = str(x).strip().lower()
+        if s:
+            clean_types.append(s)
+    # stable de-dupe
+    seen = set()
+    allowed_source_types: List[str] = []
+    for s in clean_types:
+        if s in seen:
+            continue
+        seen.add(s)
+        allowed_source_types.append(s)
+
+    # retention_days -> int | None (must be positive if set)
+    rd = retrieval.get("retention_days", None)
+    retention_days: Optional[int] = None
+    if rd is None or rd == "":
+        retention_days = None
+    else:
+        try:
+            rd_i = int(rd)
+            if rd_i > 0:
+                retention_days = rd_i
+            else:
+                retention_days = None
+        except Exception:
+            retention_days = None
+
+    # block_external_links -> bool
+    bel = retrieval.get("block_external_links", False)
+    block_external_links = bool(bel)
+
+    # pii_masking.enabled/mode (keep permissive, but deterministic)
+    enabled = bool(pii.get("enabled", False))
+    mode = str(pii.get("mode", "none") or "none").strip().lower() or "none"
+
+    normalized: Dict[str, Any] = {
+        "retrieval": {
+            "allowed_source_types": allowed_source_types,
+            "retention_days": retention_days,
+            "block_external_links": block_external_links,
+        },
+        "privacy": {
+            "pii_masking": {
+                "enabled": enabled,
+                "mode": mode,
+            }
+        },
+    }
+    return normalized
+
+
+def retention_cutoff_ts(ws: Workspace) -> Optional[datetime]:
+    """
+    Returns a UTC datetime cutoff based on policy.retrieval.retention_days.
+    If retention_days is not set or invalid => None.
+
+    Cutoff semantics:
+    - delete items with created_at < cutoff
+    """
+    eff = load_policy(ws)
+    retrieval = eff.get("retrieval", {})
+    if not isinstance(retrieval, dict):
+        return None
+
+    rd = retrieval.get("retention_days")
+    if rd is None or rd == "":
+        return None
+
+    try:
+        days = int(rd)
+    except Exception:
+        return None
+
+    if days <= 0:
+        return None
+
+    now = datetime.now(timezone.utc)
+    return now - timedelta(days=days)
 
 
 def load_rbac(ws: Workspace) -> Dict[str, Any]:
@@ -135,11 +257,88 @@ def policy_assert_allowed_sources(ws: Workspace, requested_source_types: Optiona
             raise ValueError(f"Source type '{st}' is not allowed by workspace policy.")
 
 
-def policy_apply_pii_masking(ws: Workspace, text: str) -> str:
+def policy_retention_days(ws: Workspace) -> Optional[int]:
     """
-    Deterministic placeholder. Switch based on load_policy(ws)['privacy']['pii_masking'] later.
+    Returns retention days if configured, else None.
     """
-    return text or ""
+    eff = load_policy(ws)
+    v = eff.get("retrieval", {}).get("retention_days", None)
+    if v is None:
+        return None
+    try:
+        n = int(v)
+        if n <= 0:
+            return None
+        return n
+    except Exception:
+        return None
+
+
+def policy_internal_only(ws: Workspace) -> bool:
+    eff = load_policy(ws)
+    return bool(eff.get("internal_only", False))
+
+
+def policy_pii_masking_config(ws: Workspace) -> Dict[str, Any]:
+    eff = load_policy(ws)
+    cfg = eff.get("privacy", {}).get("pii_masking", {}) or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    enabled = bool(cfg.get("enabled", False))
+    mode = str(cfg.get("mode", "none") or "none").strip().lower()
+    if mode not in {"none", "write_time", "export_time", "both"}:
+        mode = "none"
+    return {"enabled": enabled, "mode": mode}
+
+
+_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+_PHONE_RE = re.compile(r"\b(?:\+?\d{1,3}[- ]?)?(?:\(?\d{3,5}\)?[- ]?)?\d{6,10}\b")
+# Very light “ID-ish” masking; avoid breaking normal numbers too aggressively.
+_LONG_NUM_RE = re.compile(r"\b\d{9,16}\b")
+
+
+def _mask_pii_basic(text: str) -> str:
+    """
+    Deterministic, best-effort PII masking.
+    V1: email, phone-ish patterns, long numeric tokens.
+    """
+    if not text:
+        return ""
+
+    out = text
+    out = _EMAIL_RE.sub("[REDACTED_EMAIL]", out)
+    out = _PHONE_RE.sub("[REDACTED_PHONE]", out)
+    out = _LONG_NUM_RE.sub("[REDACTED_ID]", out)
+    return out
+
+
+def policy_apply_pii_masking(ws: Workspace, text: str, *, phase: str) -> str:
+    """
+    phase: "write" | "export"
+    mode mapping:
+      - none        => no masking
+      - write_time  => mask only at write
+      - export_time => mask only at export
+      - both        => mask both
+    """
+    cfg = policy_pii_masking_config(ws)
+    if not cfg.get("enabled"):
+        return text or ""
+
+    mode = str(cfg.get("mode") or "none").strip().lower()
+    phase = str(phase or "").strip().lower()
+
+    if mode == "none":
+        return text or ""
+
+    if mode == "write_time" and phase != "write":
+        return text or ""
+
+    if mode == "export_time" and phase != "export":
+        return text or ""
+
+    # both OR matching phase
+    return _mask_pii_basic(text or "")
 
 
 # -------------------------
@@ -229,6 +428,22 @@ def audit_rbac_check(
     safe_audit(db, ws=ws, user=user, action=action, decision=decision, reason=reason, meta=meta)
 
 
+def audit_internal_only_check(
+    db: Session,
+    *,
+    ws: Workspace,
+    user: Optional[User],
+    action: str,
+    decision: str,
+    reason: str,
+) -> None:
+    meta = {
+        "kind": "policy_internal_only",
+        "internal_only": policy_internal_only(ws),
+    }
+    safe_audit(db, ws=ws, user=user, action=action, decision=decision, reason=reason, meta=meta)
+
+
 # -------------------------
 # RBAC: role resolution + allow checks
 # -------------------------
@@ -314,7 +529,7 @@ def rbac_assert(
     allowed_roles: List[str],
 ) -> None:
     """
-    Commit 5: single RBAC enforcement helper with auditing.
+    Single RBAC enforcement helper with auditing.
     - Resolves role deterministically
     - Audits allow/deny
     - Raises ValueError if denied (caller converts to HTTP 403)
@@ -349,7 +564,7 @@ def rbac_assert(
 
 
 # -------------------------
-# RBAC public helpers (existing + new)
+# RBAC public helpers
 # -------------------------
 def rbac_can_create_connector(db: Session, ws: Workspace, user: Optional[User]) -> bool:
     role = _get_user_workspace_role(db, ws, user)
@@ -381,7 +596,6 @@ def rbac_can_archive_agent(db: Session, ws: Workspace, user: Optional[User]) -> 
     return _is_role_allowed(role, allowed)
 
 
-# NEW (Commit 5): agent-builder runtime permissions
 def rbac_allowed_preview_roles(ws: Workspace) -> List[str]:
     return _rbac_allowed_roles(ws, ("agent_builder", "can_preview_agent_roles"), ["admin", "member"])
 
@@ -395,7 +609,7 @@ def rbac_allowed_run_roles(ws: Workspace) -> List[str]:
 
 
 # -------------------------
-# Commit 5: Policy enforcement helper for definitions
+# Policy enforcement helper for agent definitions
 # -------------------------
 def extract_definition_source_types(definition_json: Dict[str, Any]) -> List[str]:
     """
@@ -434,7 +648,7 @@ def enforce_policy_for_definition(
     action: str,
 ) -> None:
     """
-    Commit 5: single policy enforcement path for agents_v2 save/publish.
+    Single policy enforcement path for agents_v2 save/publish.
     - Enforces allowlist (if configured)
     - Audits allow/deny
     - Raises ValueError when disallowed
