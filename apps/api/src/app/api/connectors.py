@@ -8,15 +8,21 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, text as sql_text
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
+from app.api.deps import (
+    require_user,
+    require_workspace_access,
+    require_workspace_role_min,
+    get_workspace_role,
+)
 from app.core.github_client import GitHubClient, GitHubAPIError
 from app.core.ingest_common import get_or_create_source, upsert_document, rebuild_chunks, embed_document
 from app.core.google_client import GoogleClient, GoogleAPIError
 from app.core.config import settings
 from app.core.governance import (
     policy_assert_allowed_sources,
-    rbac_can_create_connector,
-    rbac_can_trigger_connector_sync,
+    policy_allowed_source_types,
+    audit_policy_check,
+    audit_rbac_check,
 )
 from app.db.session import get_db
 from app.db.models import Connector, IngestionJob, User, Workspace
@@ -37,14 +43,94 @@ VALID_TYPES = {"docs", "jira", "github", "slack", "support", "analytics"}
 VALID_STATUSES = {"connected", "disconnected"}
 
 
-def _enforce_policy_sources(ws: Workspace, requested: Optional[List[str]]) -> None:
+# -------------------------
+# Step 0.4: Policy + RBAC audit logging helpers
+# -------------------------
+def _enforce_policy_sources(
+    db: Session,
+    ws: Workspace,
+    user: User,
+    requested: Optional[List[str]],
+    action: str,
+) -> None:
     """
-    Step 0.3.1: Convert policy ValueError into a clean HTTP 403 (never 500).
+    Step 0.4:
+    - Enforce workspace policy allowlist for source types.
+    - Always log allow/deny decision into governance_events (never breaks request).
+    - Convert ValueError -> HTTP 403.
     """
+    allowlist = policy_allowed_source_types(ws)
+    req = [str(x).strip().lower() for x in (requested or []) if str(x).strip()]
+
     try:
-        policy_assert_allowed_sources(ws, requested)
+        policy_assert_allowed_sources(ws, req or None)
+        audit_policy_check(
+            db,
+            ws=ws,
+            user=user,
+            action=action,
+            requested_source_types=req,
+            allowlist=allowlist,
+            decision="allow",
+            reason="ok",
+        )
     except ValueError as e:
+        audit_policy_check(
+            db,
+            ws=ws,
+            user=user,
+            action=action,
+            requested_source_types=req,
+            allowlist=allowlist,
+            decision="deny",
+            reason=str(e),
+        )
         raise HTTPException(status_code=403, detail=str(e))
+
+
+def _enforce_rbac(
+    db: Session,
+    ws: Workspace,
+    user: User,
+    *,
+    allowed_roles: List[str],
+    action: str,
+) -> None:
+    """
+    Step 0.4:
+    - Enforce advanced RBAC rule (allowed_roles) for a specific action.
+    - Always log allow/deny into governance_events.
+    """
+    role = get_workspace_role(db, ws, user)
+    allowed = [str(r).strip().lower() for r in (allowed_roles or []) if str(r).strip()]
+    role_l = (role or "").strip().lower()
+
+    ok = bool(role_l and role_l in allowed)
+
+    if ok:
+        audit_rbac_check(
+            db,
+            ws=ws,
+            user=user,
+            action=action,
+            role=role,
+            allowed_roles=allowed_roles,
+            decision="allow",
+            reason="ok",
+        )
+        return
+
+    audit_rbac_check(
+        db,
+        ws=ws,
+        user=user,
+        action=action,
+        role=role,
+        allowed_roles=allowed_roles,
+        decision="deny",
+        reason="Not allowed by RBAC.",
+    )
+    raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
@@ -149,9 +235,11 @@ def create_connector(
 ):
     ws, _role = require_workspace_role_min(workspace_id, "admin", db, user)  # admin config
 
-    # RBAC enforcement (advanced)
-    if not rbac_can_create_connector(db, ws, user):
-        raise HTTPException(status_code=403, detail="Not allowed to create connectors in this workspace (RBAC).")
+    # Step 0.4 RBAC enforcement + audit
+    allowed_roles = (ws.rbac_json or {}).get("connectors", {}).get("can_create_connector_roles", ["admin"])
+    if not isinstance(allowed_roles, list) or not allowed_roles:
+        allowed_roles = ["admin"]
+    _enforce_rbac(db, ws, user, allowed_roles=[str(x) for x in allowed_roles], action="rbac.connectors.create")
 
     ctype = payload.type.strip().lower()
     name = payload.name.strip()
@@ -159,8 +247,8 @@ def create_connector(
     if ctype not in VALID_TYPES:
         raise HTTPException(status_code=400, detail="Invalid connector type")
 
-    # Policy enforcement: connector type maps to source_type
-    _enforce_policy_sources(ws, [ctype])
+    # Step 0.4 Policy enforcement + audit
+    _enforce_policy_sources(db, ws, user, [ctype], "policy.allowlist.connectors.create")
 
     # idempotent by (workspace_id, type, name)
     existing = db.execute(
@@ -206,9 +294,8 @@ def update_connector(
 
     ws, _role = require_workspace_role_min(str(c.workspace_id), "admin", db, user)
 
-    # Policy: if changing status/config/name only, no source policy needed;
-    # but we still ensure the connector's type itself is allowed if allowlist exists.
-    _enforce_policy_sources(ws, [str(c.type or "").strip().lower()])
+    # Step 0.4 Policy audit: ensure the connector's type itself is allowed if allowlist exists.
+    _enforce_policy_sources(db, ws, user, [str(c.type or "").strip().lower()], "policy.allowlist.connectors.update")
 
     if payload.name is not None:
         c.name = payload.name.strip()
@@ -238,7 +325,7 @@ def trigger_sync(
     Keeps old semantics: stamps last_sync_at for basic health checks.
     member+ can trigger; admin configures.
 
-    Step 0.3: RBAC + policy enforcement added.
+    Step 0.4: RBAC + policy enforcement + audit logging.
     """
     try:
         cid = uuid.UUID(connector_id)
@@ -255,11 +342,20 @@ def trigger_sync(
 
     require_workspace_role_min(str(ws.id), "member", db, user)
 
-    if not rbac_can_trigger_connector_sync(db, ws, user):
-        raise HTTPException(status_code=403, detail="Not allowed to trigger connector sync (RBAC).")
+    # Step 0.4 RBAC enforcement + audit
+    allowed_roles = (ws.rbac_json or {}).get("connectors", {}).get("can_trigger_sync_roles", ["admin", "member"])
+    if not isinstance(allowed_roles, list) or not allowed_roles:
+        allowed_roles = ["admin", "member"]
+    _enforce_rbac(db, ws, user, allowed_roles=[str(x) for x in allowed_roles], action="rbac.connectors.trigger_sync")
 
-    # Policy enforcement: connector type is the implied source type
-    _enforce_policy_sources(ws, [str(c.type or "").strip().lower()])
+    # Step 0.4 Policy enforcement + audit: connector type is implied source type
+    _enforce_policy_sources(
+        db,
+        ws,
+        user,
+        [str(c.type or "").strip().lower()],
+        "policy.allowlist.connectors.trigger_sync",
+    )
 
     c.last_sync_at = datetime.now(timezone.utc)
     c.last_error = None
@@ -311,8 +407,8 @@ def create_docs_ingestion_job(
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
-    # Policy enforcement
-    _enforce_policy_sources(ws, ["docs"])
+    # Policy enforcement + audit
+    _enforce_policy_sources(db, ws, user, ["docs"], "policy.allowlist.connectors.ingestion_jobs.docs")
 
     try:
         cid = uuid.UUID(connector_id)
@@ -429,8 +525,8 @@ def create_github_ingestion_job(
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
-    # Policy enforcement
-    _enforce_policy_sources(ws, ["github"])
+    # Policy enforcement + audit
+    _enforce_policy_sources(db, ws, user, ["github"], "policy.allowlist.connectors.ingestion_jobs.github")
 
     try:
         cid = uuid.UUID(connector_id)
@@ -510,7 +606,13 @@ def create_github_ingestion_job(
     try:
         # Releases
         if payload.include_releases:
-            releases, _dbg_rel = client.list_releases(owner, repo, per_page=releases_per_page, max_pages=max_pages, max_items=max_items)
+            releases, _dbg_rel = client.list_releases(
+                owner,
+                repo,
+                per_page=releases_per_page,
+                max_pages=max_pages,
+                max_items=max_items,
+            )
             for rel in releases:
                 stats["releases_seen"] += 1
 
@@ -561,7 +663,14 @@ def create_github_ingestion_job(
 
         # PRs
         if payload.include_prs:
-            prs, _dbg_prs = client.list_pull_requests(owner, repo, state=prs_state, per_page=prs_per_page, max_pages=max_pages, max_items=max_items)
+            prs, _dbg_prs = client.list_pull_requests(
+                owner,
+                repo,
+                state=prs_state,
+                per_page=prs_per_page,
+                max_pages=max_pages,
+                max_items=max_items,
+            )
             for pr in prs:
                 stats["prs_seen"] += 1
 
@@ -616,7 +725,14 @@ def create_github_ingestion_job(
 
         # Issues (filter PRs out)
         if payload.include_issues:
-            items, _dbg_issues = client.list_issues(owner, repo, state=issues_state, per_page=issues_per_page, max_pages=max_pages, max_items=max_items)
+            items, _dbg_issues = client.list_issues(
+                owner,
+                repo,
+                state=issues_state,
+                per_page=issues_per_page,
+                max_pages=max_pages,
+                max_items=max_items,
+            )
             issues = [it for it in items if it.get("pull_request") is None]
 
             for issue in issues:
@@ -712,8 +828,8 @@ def create_google_docs_ingestion_job(
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
-    # Policy enforcement
-    _enforce_policy_sources(ws, ["docs"])
+    # Policy enforcement + audit
+    _enforce_policy_sources(db, ws, user, ["docs"], "policy.allowlist.connectors.ingestion_jobs.gdocs")
 
     try:
         cid = uuid.UUID(connector_id)
@@ -920,16 +1036,12 @@ def embeddings_run_once(
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
     if source_type:
-        _enforce_policy_sources(ws, [source_type.strip().lower()])
+        _enforce_policy_sources(db, ws, user, [source_type.strip().lower()], "policy.allowlist.connectors.embeddings.run_once")
 
     lim = int(limit_docs)
     max_chunks = int(max_total_chunks)
 
-    base_q = (
-        select(Document)
-        .where(Document.workspace_id == ws.id)
-        .order_by(Document.updated_at.desc())
-    )
+    base_q = select(Document).where(Document.workspace_id == ws.id).order_by(Document.updated_at.desc())
 
     if source_type:
         st = source_type.strip().lower()

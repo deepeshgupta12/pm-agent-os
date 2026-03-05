@@ -43,18 +43,42 @@ from app.schemas.core import (
     RunRegenerateWithRetrievalIn,
 )
 
+from app.core.governance import (
+    policy_assert_allowed_sources,
+    policy_apply_pii_masking,
+    policy_allowed_source_types,
+    audit_policy_check,
+)
+
 router = APIRouter(tags=["runs"])
 
 
-def _enforce_policy_sources(ws: Workspace, requested: Optional[List[str]]) -> None:
-    """
-    Step 0.3.1: Convert policy ValueError into a clean HTTP 403 (never 500).
-    """
+def _enforce_policy_sources(db: Session, ws: Workspace, user: User, requested: Optional[List[str]], action: str) -> None:
+    allowlist = policy_allowed_source_types(ws)
     try:
         policy_assert_allowed_sources(ws, requested)
+        audit_policy_check(
+            db,
+            ws=ws,
+            user=user,
+            action=action,
+            requested_source_types=requested or [],
+            allowlist=allowlist,
+            decision="allow",
+            reason="ok",
+        )
     except ValueError as e:
+        audit_policy_check(
+            db,
+            ws=ws,
+            user=user,
+            action=action,
+            requested_source_types=requested or [],
+            allowlist=allowlist,
+            decision="deny",
+            reason=str(e),
+        )
         raise HTTPException(status_code=403, detail=str(e))
-
 
 # -------------------------
 # Helpers
@@ -362,8 +386,7 @@ def create_run(
             "rerank": rerank,
         }
 
-        # V3 policy enforcement (allowlist)
-        _enforce_policy_sources(ws, source_types or None)
+        _enforce_policy_sources(db, ws, user, source_types or None, "policy.allowlist.runs.create_run.retrieval")
 
         items = hybrid_retrieve(
             db,
@@ -582,8 +605,7 @@ def regenerate_with_retrieval(
         "rerank": rerank,
     }
 
-    # V3 policy enforcement (allowlist)
-    _enforce_policy_sources(ws, source_types or None)
+    _enforce_policy_sources(db, ws, user, source_types or None, "policy.allowlist.runs.regenerate_with_retrieval")
 
     items = hybrid_retrieve(
         db,

@@ -19,6 +19,7 @@ from app.api.integrations_github import router as github_router
 from app.api.action_center import router as action_center_router
 from app.api.pipelines import router as pipelines_router
 from app.api.schedules import router as schedules_router
+from app.api.governance import router as governance_router
 
 app = FastAPI(title="PM Agent OS API", version="0.0.1")
 
@@ -45,3 +46,4 @@ app.include_router(action_center_router)
 app.include_router(pipelines_router)
 app.include_router(schedules_router)
 app.include_router(agents_v2_router)
+app.include_router(governance_router)

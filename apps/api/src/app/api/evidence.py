@@ -14,17 +14,28 @@ from app.core.governance import policy_assert_allowed_sources, policy_apply_pii_
 from app.db.session import get_db
 from app.db.models import Run, Evidence, User, RunLog, Workspace
 from app.schemas.core import EvidenceCreateIn, EvidenceOut
+from app.core.governance import policy_allowed_source_types, audit_policy_check
 
 router = APIRouter(tags=["evidence"])
 
 
-def _enforce_policy_sources(ws: Workspace, requested: Optional[List[str]]) -> None:
-    """
-    Step 0.3.1: Convert policy ValueError into a clean HTTP 403 (never 500).
-    """
+def _enforce_policy_sources(db: Session, ws: Workspace, user: User, requested: Optional[List[str]], action: str) -> None:
+    allowlist = policy_allowed_source_types(ws)
     try:
         policy_assert_allowed_sources(ws, requested)
+        audit_policy_check(
+            db, ws=ws, user=user, action=action,
+            requested_source_types=requested or [],
+            allowlist=allowlist,
+            decision="allow", reason="ok"
+        )
     except ValueError as e:
+        audit_policy_check(
+            db, ws=ws, user=user, action=action,
+            requested_source_types=requested or [],
+            allowlist=allowlist,
+            decision="deny", reason=str(e)
+        )
         raise HTTPException(status_code=403, detail=str(e))
 
 
@@ -171,8 +182,7 @@ def auto_add_evidence(
     # member+ only
     require_workspace_role_min(str(run.workspace_id), "member", db, user)
 
-    # Policy allowlist exists? This endpoint doesn't accept source_types, so we allow "defaults".
-    _enforce_policy_sources(ws, None)
+    _enforce_policy_sources(db, ws, user, None, "policy.allowlist.evidence.auto_add")
 
     items = hybrid_retrieve(
         db,
@@ -259,8 +269,7 @@ def attach_preview_as_evidence(
         "rerank": bool(r.rerank),
     }
 
-    # Policy enforcement for preview’s requested source types
-    _enforce_policy_sources(ws, retrieval_meta.get("source_types") or None)
+    _enforce_policy_sources(db, ws, user, retrieval_meta.get("source_types") or None, "policy.allowlist.evidence.attach_preview")
 
     created: List[Evidence] = []
     for rank, it in enumerate(payload.items, start=1):

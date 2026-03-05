@@ -91,16 +91,20 @@ class Workspace(Base):
     rbac_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
     schedules: Mapped[List["Schedule"]] = relationship(
-    back_populates="workspace", cascade="all, delete-orphan"
+        back_populates="workspace", cascade="all, delete-orphan"
     )
 
     agent_bases: Mapped[List["AgentBase"]] = relationship(
-    back_populates="workspace", cascade="all, delete-orphan"
+        back_populates="workspace", cascade="all, delete-orphan"
     )
 
     connectors: Mapped[List["Connector"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
     ingestion_jobs: Mapped[List["IngestionJob"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
     retrieval_requests: Mapped[List["RetrievalRequest"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+
+    governance_events: Mapped[List["GovernanceEvent"]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan"
     )
 
@@ -128,6 +132,35 @@ class WorkspaceMember(Base):
     user: Mapped["User"] = relationship(back_populates="workspace_memberships")
 
 
+class GovernanceEvent(Base):
+    __tablename__ = "governance_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    action: Mapped[str] = mapped_column(String(120), nullable=False)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)  # allow|deny
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    meta: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="governance_events")
+
+
 class AgentBase(Base):
     __tablename__ = "agent_bases"
 
@@ -140,9 +173,7 @@ class AgentBase(Base):
         index=True,
     )
 
-    # stable key/slug within a workspace, e.g. "custom_prd_agent"
     key: Mapped[str] = mapped_column(String(120), nullable=False)
-
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
@@ -158,7 +189,6 @@ class AgentBase(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
-    # relationships
     workspace: Mapped["Workspace"] = relationship(back_populates="agent_bases")
     versions: Mapped[List["AgentVersion"]] = relationship(back_populates="agent_base", cascade="all, delete-orphan")
 
@@ -190,7 +220,6 @@ class AgentVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     agent_base: Mapped["AgentBase"] = relationship(back_populates="versions")
-
 
 
 class AgentDefinition(Base):
@@ -266,11 +295,11 @@ class Artifact(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")  # draft|in_review|final
 
     assigned_to_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-    UUID(as_uuid=True),
-    ForeignKey("users.id", ondelete="SET NULL"),
-    nullable=True,
-    index=True,
-)
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     assigned_to_user: Mapped[Optional["User"]] = relationship(
         foreign_keys=[assigned_to_user_id]
@@ -378,6 +407,7 @@ class RunLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     run: Mapped["Run"] = relationship(back_populates="logs")
+
 
 class RunStatusEvent(Base):
     __tablename__ = "run_status_events"
@@ -592,25 +622,20 @@ class PipelineStep(Base):
     pipeline_run: Mapped["PipelineRun"] = relationship(back_populates="steps")
     run: Mapped[Optional["Run"]] = relationship(back_populates="pipeline_steps")
 
+
 class ActionItem(Base):
     __tablename__ = "action_items"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
-
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
-
-    # Optional assignment (member/admin can assign)
     assigned_to_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
-
-    # Optional decision actor (admin approves/rejects/cancels)
     decided_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -618,17 +643,10 @@ class ActionItem(Base):
     type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued", index=True)
     title: Mapped[str] = mapped_column(String(240), nullable=False, default="")
-
-    # Stores action inputs (internal-only for V2)
     payload_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
-
-    # Optional "what this action targets" — e.g., "artifact:{id}"
     target_ref: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
-
-    # decision metadata
     decision_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
@@ -648,11 +666,11 @@ class ActionItem(Base):
         back_populates="decided_action_items", foreign_keys=[decided_by_user_id]
     )
 
+
 class ActionItemDecision(Base):
     __tablename__ = "action_item_decisions"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-
     action_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("action_items.id", ondelete="CASCADE"),
@@ -670,18 +688,17 @@ class ActionItemDecision(Base):
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
+
 class Schedule(Base):
     __tablename__ = "schedules"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-
     created_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -690,22 +707,11 @@ class Schedule(Base):
     )
 
     name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
-
-    # agent_run | pipeline_run
     kind: Mapped[str] = mapped_column(String(32), nullable=False, default="agent_run")
-
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="UTC")
-
-    # Either cron OR interval_json drives next_run_at computation
     cron: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
 
-    # Example:
-    # {"type":"daily","at":"09:00"} OR {"type":"weekly","days":[1,3,5],"at":"10:30"}
     interval_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
-
-    # Execution payload:
-    # If kind=agent_run -> {"workspace_id":..., "agent_id":..., "input_payload":..., "retrieval":...}
-    # If kind=pipeline_run -> {"workspace_id":..., "template_id":..., "input_payload":...}
     payload_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -735,7 +741,6 @@ class ScheduleRun(Base):
     __tablename__ = "schedule_runs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-
     schedule_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("schedules.id", ondelete="CASCADE"),
@@ -743,22 +748,18 @@ class ScheduleRun(Base):
         index=True,
     )
 
-    # running | success | failed
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
-
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    # Link to execution objects (we’ll wire these in Commit 2/3)
     run_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     pipeline_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
 
     meta: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
     schedule: Mapped["Schedule"] = relationship(back_populates="runs")
-    
+
 
 class ArtifactComment(Base):
     __tablename__ = "artifact_comments"

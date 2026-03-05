@@ -21,6 +21,7 @@ from app.core.governance import (
     policy_assert_allowed_sources,
     policy_apply_pii_masking,
     policy_allowed_source_types,
+    audit_policy_check,
 )
 from app.schemas.retrieval import (
     IngestResult,
@@ -34,13 +35,37 @@ from app.schemas.retrieval import (
 router = APIRouter(tags=["retrieval"])
 
 
-def _enforce_policy_sources(ws: Workspace, requested: Optional[List[str]]) -> None:
+def _enforce_policy_sources(db: Session, ws: Workspace, user: User, requested: Optional[List[str]], action: str) -> None:
     """
-    Step 0.3.1: Convert policy ValueError into a clean HTTP 403 (never 500).
+    Step 0.4: logs allow/deny to governance_events + converts policy ValueError -> HTTP 403.
     """
+    allowlist = policy_allowed_source_types(ws)
+
     try:
         policy_assert_allowed_sources(ws, requested)
+        # log allow (deterministic)
+        audit_policy_check(
+            db,
+            ws=ws,
+            user=user,
+            action=action,
+            requested_source_types=requested or [],
+            allowlist=allowlist,
+            decision="allow",
+            reason="ok",
+        )
     except ValueError as e:
+        # log deny
+        audit_policy_check(
+            db,
+            ws=ws,
+            user=user,
+            action=action,
+            requested_source_types=requested or [],
+            allowlist=allowlist,
+            decision="deny",
+            reason=str(e),
+        )
         raise HTTPException(status_code=403, detail=str(e))
 
 
@@ -185,8 +210,7 @@ def create_or_get_docs_source(
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
-    # V3 policy enforcement: docs source must be allowed if allowlist exists
-    _enforce_policy_sources(ws, ["docs"])
+    _enforce_policy_sources(db, ws, user, ["docs"], "policy.allowlist.sources.create_docs")
 
     s = _get_or_create_source(db, ws.id, "docs", payload.name.strip() or "Docs")
     if payload.name.strip() and s.name != payload.name.strip():
@@ -216,8 +240,7 @@ def ingest_docs_text(
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
-    # V3 policy enforcement: manual docs ingest counts as source_type="docs"
-    _enforce_policy_sources(ws, ["docs"])
+    _enforce_policy_sources(db, ws, user, ["docs"], "policy.allowlist.documents.ingest_docs")
 
     src = _get_or_create_source(db, ws.id, "docs", "Docs")
 
@@ -271,7 +294,7 @@ def list_documents(
 
     # V3 policy enforcement: source_type filter must be allowed
     if source_type:
-        _enforce_policy_sources(ws, [source_type.strip().lower()])
+        _enforce_policy_sources(db, ws, user, [source_type.strip().lower()], "policy.allowlist.documents.list")
 
     q = select(Document).where(Document.workspace_id == ws.id)
 
@@ -302,7 +325,7 @@ def embed_document_chunks(
     # Enforce policy based on doc source type
     src = db.get(Source, doc.source_id)
     if src:
-        _enforce_policy_sources(ws, [str(src.type or "").strip().lower()])
+       _enforce_policy_sources(db, ws, user, "policy.allowlist.embeddings.embed_document")
 
     chunks = (
         db.execute(select(Chunk).where(Chunk.document_id == doc.id).order_by(Chunk.chunk_index.asc()))
@@ -395,8 +418,7 @@ def retrieve(
 
     stypes = _parse_source_types(source_types)
 
-    # V3 policy enforcement: block disallowed source types
-    _enforce_policy_sources(ws, stypes or None)
+    _enforce_policy_sources(db, ws, user, stypes or None, "policy.allowlist.retrieval.retrieve")
 
     timeframe_json, start_ts, end_ts = _compute_timeframe(
         preset=timeframe_preset,
