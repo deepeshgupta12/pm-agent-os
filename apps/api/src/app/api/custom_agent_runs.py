@@ -26,6 +26,7 @@ from app.core.citations import (
     body_has_inline_citations,
     build_inline_citation_patch,
     citation_enforcement_report,
+    citation_enforcement_report_skipped,
     render_citation_compliance_md,
 )
 
@@ -254,8 +255,21 @@ def run_custom_agent(
     db.commit()
     db.refresh(run)
 
-    _write_status_event(db, run=run, from_status=None, to_status="created", message="Run created", meta={"custom_agent_base_id": str(base.id)})
-    _set_run_status(db, run=run, to_status="running", message="Run started", meta={"custom_agent_base_id": str(base.id)})
+    _write_status_event(
+        db,
+        run=run,
+        from_status=None,
+        to_status="created",
+        message="Run created",
+        meta={"custom_agent_base_id": str(base.id)},
+    )
+    _set_run_status(
+        db,
+        run=run,
+        to_status="running",
+        message="Run started",
+        meta={"custom_agent_base_id": str(base.id)},
+    )
 
     ev_items: List[Evidence] = []
     retrieval_meta: Dict[str, Any] = {
@@ -344,8 +358,8 @@ def run_custom_agent(
     # Generate markdown (LLM or deterministic)
     evidence_text = format_evidence_for_prompt(ev_items)
     md = ""
+
     if settings.LLM_ENABLED and settings.OPENAI_API_KEY:
-        # Build evidence pack for citation grounding
         evidence_dicts = [
             {"excerpt": e.excerpt, "source_ref": e.source_ref, "source_name": e.source_name, "meta": e.meta or {}}
             for e in ev_items
@@ -382,7 +396,6 @@ def run_custom_agent(
             patch = build_inline_citation_patch(normalized)
             md = md.rstrip() + "\n\n" + patch + "\n"
     else:
-        # Deterministic scaffold
         md = f"""# {title}
 
 ## Summary
@@ -406,8 +419,16 @@ Deterministic draft scaffold (LLM disabled).
 """
 
     # Citation compliance report (only when evidence exists)
+    # Commit 3 change: SKIP (not FAIL) when LLM is disabled
     try:
-        rep = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
+        if len(ev_items) > 0 and not (settings.LLM_ENABLED and settings.OPENAI_API_KEY):
+            rep = citation_enforcement_report_skipped(
+                evidence_count=len(ev_items),
+                reason="LLM disabled; deterministic scaffold does not guarantee citation density.",
+            )
+        else:
+            rep = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
+
         if len(ev_items) > 0:
             md = md.rstrip() + "\n\n" + render_citation_compliance_md(rep) + "\n"
             db.add(

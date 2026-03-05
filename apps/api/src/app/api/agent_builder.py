@@ -1,0 +1,215 @@
+from __future__ import annotations
+
+import uuid
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
+from app.core.config import settings
+from app.core.generator import AGENT_TO_DEFAULT_ARTIFACT_TYPE
+from app.core.governance import (
+    policy_allowed_source_types,
+    policy_assert_allowed_sources,
+    audit_policy_check,
+)
+from app.core.prompts import build_system_prompt, build_user_prompt_custom
+from app.db.session import get_db
+from app.db.models import AgentBase, AgentVersion, User, Workspace
+from app.schemas.agent_builder import (
+    AgentBuilderMetaOut,
+    CustomAgentPublishedOut,
+    CustomAgentPreviewIn,
+    CustomAgentPreviewOut,
+)
+from app.schemas.core import RetrievalConfigIn
+
+router = APIRouter(tags=["agent_builder"])
+
+
+def _artifact_type(definition_json: Dict[str, Any]) -> str:
+    art = definition_json.get("artifact") or {}
+    if not isinstance(art, dict):
+        art = {}
+    t = str(art.get("type") or "").strip()
+    return t or "strategy_memo"
+
+
+def _published_version_or_409(db: Session, base_id: uuid.UUID) -> AgentVersion:
+    v = (
+        db.execute(
+            select(AgentVersion)
+            .where(AgentVersion.agent_base_id == base_id)
+            .where(AgentVersion.status == "published")
+            .order_by(AgentVersion.version.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+    if not v:
+        raise HTTPException(status_code=409, detail="No published version exists for this agent base")
+    return v
+
+
+def _merge_retrieval_defaults(defn: Dict[str, Any], override: Optional[RetrievalConfigIn]) -> Dict[str, Any]:
+    base = defn.get("retrieval") or {}
+    if not isinstance(base, dict):
+        base = {}
+
+    out = dict(base)
+    if override is None:
+        return out
+
+    out["enabled"] = bool(override.enabled)
+    out["query"] = str(override.query or "")
+    out["k"] = int(override.k)
+    out["alpha"] = float(override.alpha)
+    out["source_types"] = [str(x).strip().lower() for x in (override.source_types or []) if str(x).strip()]
+    out["timeframe"] = override.timeframe or {}
+    out["min_score"] = float(override.min_score)
+    out["overfetch_k"] = int(override.overfetch_k)
+    out["rerank"] = bool(override.rerank)
+    return out
+
+
+def _audit_policy(db: Session, *, ws: Workspace, user: User, action: str, requested: List[str], decision: str, reason: str) -> None:
+    allowlist = policy_allowed_source_types(ws)
+    audit_policy_check(
+        db,
+        ws=ws,
+        user=user,
+        action=action,
+        requested_source_types=requested,
+        allowlist=allowlist,
+        decision=decision,
+        reason=reason,
+    )
+
+
+def _enforce_policy_sources(db: Session, ws: Workspace, user: User, requested: Optional[List[str]], action: str) -> None:
+    req = [str(x).strip().lower() for x in (requested or []) if str(x).strip()]
+    try:
+        policy_assert_allowed_sources(ws, req or None)
+        _audit_policy(db, ws=ws, user=user, action=action, requested=req, decision="allow", reason="ok")
+    except ValueError as e:
+        _audit_policy(db, ws=ws, user=user, action=action, requested=req, decision="deny", reason=str(e))
+        raise HTTPException(status_code=403, detail=str(e))
+
+
+@router.get("/workspaces/{workspace_id}/agent-builder/meta", response_model=AgentBuilderMetaOut)
+def agent_builder_meta(
+    workspace_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    ws, _role = require_workspace_access(workspace_id, db, user)
+
+    # Policy allowlist drives builder source selection constraints.
+    allowed_source_types = policy_allowed_source_types(ws)
+
+    # Artifact types = union of known defaults; UI can show these templates.
+    # We include stable values from AGENT_TO_DEFAULT_ARTIFACT_TYPE map.
+    artifact_types = sorted({v for v in (AGENT_TO_DEFAULT_ARTIFACT_TYPE or {}).values() if str(v).strip()})
+
+    return AgentBuilderMetaOut(
+        workspace_id=str(ws.id),
+        allowed_source_types=allowed_source_types,
+        artifact_types=artifact_types,
+    )
+
+
+@router.get("/workspaces/{workspace_id}/agent-bases/{base_id}/published", response_model=CustomAgentPublishedOut)
+def get_published_custom_agent(
+    workspace_id: str,
+    base_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    ws, _role = require_workspace_access(workspace_id, db, user)
+
+    try:
+        bid = uuid.UUID(base_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Agent base not found")
+
+    base = db.get(AgentBase, bid)
+    if not base or str(base.workspace_id) != str(ws.id):
+        raise HTTPException(status_code=404, detail="Agent base not found")
+
+    vpub = _published_version_or_409(db, base.id)
+    return CustomAgentPublishedOut(
+        agent_base_id=str(base.id),
+        published_version_id=str(vpub.id),
+        published_version=int(vpub.version),
+        definition_json=vpub.definition_json or {},
+    )
+
+
+@router.post("/workspaces/{workspace_id}/agent-bases/{base_id}/preview", response_model=CustomAgentPreviewOut)
+def preview_custom_agent(
+    workspace_id: str,
+    base_id: str,
+    payload: CustomAgentPreviewIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
+
+    try:
+        bid = uuid.UUID(base_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Agent base not found")
+
+    base = db.get(AgentBase, bid)
+    if not base or str(base.workspace_id) != str(ws.id):
+        raise HTTPException(status_code=404, detail="Agent base not found")
+
+    vpub = _published_version_or_409(db, base.id)
+    defn = vpub.definition_json or {}
+
+    # Resolve retrieval config (defaults + override)
+    r = _merge_retrieval_defaults(defn, payload.retrieval)
+    r_source_types = [str(x).strip().lower() for x in (r.get("source_types") or []) if str(x).strip()]
+
+    # Enforce policy on source selection (preview should behave exactly like save/run)
+    _enforce_policy_sources(
+        db,
+        ws,
+        user,
+        r_source_types or None,
+        action="policy.allowlist.agent_builder.preview_definition",
+    )
+
+    artifact_type = _artifact_type(defn)
+
+    # Build prompts (for UI preview). This does NOT execute the run.
+    evidence_text = ""  # preview does not retrieve (no side effects, no cost)
+    citations_block = ""  # preview does not fetch evidence pack
+
+    system_prompt = build_system_prompt()
+    user_prompt = build_user_prompt_custom(
+        definition_json=defn,
+        input_payload=payload.input_payload or {},
+        evidence_text=evidence_text,
+        artifact_type=artifact_type,
+        citations_block=citations_block,
+    )
+
+    notes: List[str] = []
+    if not (settings.LLM_ENABLED and settings.OPENAI_API_KEY):
+        notes.append("LLM is disabled; preview shows prompts only. Execution will generate deterministic scaffold.")
+
+    return CustomAgentPreviewOut(
+        ok=True,
+        agent_base_id=str(base.id),
+        published_version=int(vpub.version),
+        artifact_type=artifact_type,
+        retrieval_resolved=r,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        llm_enabled=bool(settings.LLM_ENABLED and settings.OPENAI_API_KEY),
+        notes=notes,
+    )

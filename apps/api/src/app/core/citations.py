@@ -119,20 +119,12 @@ def build_inline_citation_patch(citations: List[Dict[str, Any]]) -> str:
 
 
 # -------------------------
-# NEW: Hard citation enforcement
+# Hard citation enforcement
 # -------------------------
 
-# Heuristic: split into sentences-ish chunks. We avoid heavy NLP.
 _SENT_SPLIT = re.compile(r"(?<=[\.\!\?])\s+|\n+")
-
-# Inline citation tokens like [1] [12]
 _CITE = re.compile(r"\[[0-9]{1,3}\]")
-
-# Ignore code blocks entirely (often contain brackets)
 _FENCE = re.compile(r"```.*?```", re.DOTALL)
-
-# Headings
-_H2 = re.compile(r"^##\s+(.+)$", re.MULTILINE)
 
 
 def _strip_code(md: str) -> str:
@@ -155,7 +147,6 @@ def _sentence_chunks(body: str) -> List[str]:
         t = (p or "").strip()
         if not t:
             continue
-        # skip tiny fragments
         if len(t) < 20:
             continue
         out.append(t)
@@ -163,12 +154,6 @@ def _sentence_chunks(body: str) -> List[str]:
 
 
 def _artifact_thresholds(artifact_type: str) -> Dict[str, Any]:
-    """
-    Rule knobs per artifact type.
-    min_cited_sentence_ratio: fraction of meaningful sentences that contain >=1 citation
-    require_inline_if_evidence: if True, evidence_count>0 requires inline citations in body
-    """
-    # tuned for V1: strict enough to stop fluff, not so strict that it blocks everything
     base = {
         "require_inline_if_evidence": True,
         "min_cited_sentence_ratio": 0.25,
@@ -181,7 +166,6 @@ def _artifact_thresholds(artifact_type: str) -> Dict[str, Any]:
         return {**base, "min_cited_sentence_ratio": 0.30}
     if t in {"problem_brief", "research_summary", "competitive_matrix"}:
         return {**base, "min_cited_sentence_ratio": 0.25}
-    # default memo-ish
     return base
 
 
@@ -191,19 +175,6 @@ def citation_enforcement_report(
     md: str,
     evidence_count: int,
 ) -> Dict[str, Any]:
-    """
-    Returns:
-      {
-        ok: bool,
-        confidence_score: float (0..1),
-        evidence_count: int,
-        total_sentences: int,
-        cited_sentences: int,
-        cited_sentence_ratio: float,
-        reasons: list[str],
-        thresholds: dict,
-      }
-    """
     thresholds = _artifact_thresholds(artifact_type)
 
     body, sources = split_body_and_sources(md or "")
@@ -222,28 +193,21 @@ def citation_enforcement_report(
     reasons: List[str] = []
     ok = True
 
-    # Evidence exists => must have inline citations (not just a Sources section)
     if evidence_count > 0 and thresholds.get("require_inline_if_evidence", True):
         if not body_has_inline_citations(md):
             ok = False
             reasons.append("Evidence was attached, but the draft body has no inline citations like [1].")
 
-    # Density check
     min_ratio = float(thresholds.get("min_cited_sentence_ratio", 0.25))
     if evidence_count > 0:
-        # only enforce density when evidence exists
         if ratio + 1e-9 < min_ratio:
             ok = False
-            reasons.append(
-                f"Citation density too low: cited_sentence_ratio={ratio:.2f} < required {min_ratio:.2f}."
-            )
+            reasons.append(f"Citation density too low: cited_sentence_ratio={ratio:.2f} < required {min_ratio:.2f}.")
 
-    # Sources section presence (so user can inspect)
     if evidence_count > 0 and "## Sources" not in (md or ""):
         ok = False
         reasons.append("Missing '## Sources' section.")
 
-    # Confidence score (simple)
     confidence = max(0.0, min(1.0, ratio))
 
     return {
@@ -255,10 +219,29 @@ def citation_enforcement_report(
         "cited_sentence_ratio": float(ratio),
         "reasons": reasons,
         "thresholds": thresholds,
+        "mode": "enforced",
+    }
+
+
+def citation_enforcement_report_skipped(*, evidence_count: int, reason: str) -> Dict[str, Any]:
+    """
+    When LLM is disabled (deterministic scaffold), we should not FAIL citation density checks.
+    """
+    return {
+        "ok": True,
+        "confidence_score": 1.0,
+        "evidence_count": int(evidence_count),
+        "total_sentences": 0,
+        "cited_sentences": 0,
+        "cited_sentence_ratio": 1.0,
+        "reasons": [str(reason or "skipped")],
+        "thresholds": {},
+        "mode": "skipped",
     }
 
 
 def render_citation_compliance_md(report: Dict[str, Any]) -> str:
+    mode = str(report.get("mode") or "enforced")
     ok = bool(report.get("ok"))
     cs = float(report.get("confidence_score") or 0.0)
     ev = int(report.get("evidence_count") or 0)
@@ -268,6 +251,15 @@ def render_citation_compliance_md(report: Dict[str, Any]) -> str:
 
     lines: List[str] = []
     lines.append("## Citation Compliance")
+
+    if mode == "skipped":
+        lines.append("- Status: ⏭️ SKIPPED")
+        lines.append(f"- Evidence attached: `{ev}`")
+        reasons = report.get("reasons") or []
+        if reasons:
+            lines.append(f"- Reason: {reasons[0]}")
+        return "\n".join(lines).strip()
+
     lines.append(f"- Status: {'✅ PASS' if ok else '❌ FAIL'}")
     lines.append(f"- Evidence attached: `{ev}`")
     lines.append(f"- Confidence score: `{cs:.2f}` (proxy = cited sentence ratio)")
@@ -282,10 +274,10 @@ def render_citation_compliance_md(report: Dict[str, Any]) -> str:
         for r in reasons:
             lines.append(f"- {r}")
 
-    lines.append("")
-    lines.append("### How to fix")
-    lines.append("- Add inline citations like `[1]` at the end of sentences that rely on evidence.")
-    lines.append("- If something cannot be grounded, move it to **Unknowns / Assumptions**.")
-    lines.append("- Ensure **## Sources** lists the evidence IDs.")
+        lines.append("")
+        lines.append("### How to fix")
+        lines.append("- Add inline citations like `[1]` at the end of sentences that rely on evidence.")
+        lines.append("- If something cannot be grounded, move it to **Unknowns / Assumptions**.")
+        lines.append("- Ensure **## Sources** lists the evidence IDs.")
 
     return "\n".join(lines).strip()

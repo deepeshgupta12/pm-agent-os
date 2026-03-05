@@ -18,6 +18,7 @@ from app.core.citations import (
     body_has_inline_citations,
     build_inline_citation_patch,
     citation_enforcement_report,
+    citation_enforcement_report_skipped,
     render_citation_compliance_md,
 )
 from app.core.governance import policy_assert_allowed_sources, policy_apply_pii_masking
@@ -79,6 +80,7 @@ def _enforce_policy_sources(db: Session, ws: Workspace, user: User, requested: O
             reason=str(e),
         )
         raise HTTPException(status_code=403, detail=str(e))
+
 
 # -------------------------
 # Helpers
@@ -485,13 +487,21 @@ def create_run(
 
     # -------------------------
     # V1: Hard citation enforcement (only when evidence exists)
+    # Commit 3 change: SKIP when LLM is disabled to avoid false FAIL.
     # -------------------------
     try:
-        rep = citation_enforcement_report(
-            artifact_type=artifact_type,
-            md=md,
-            evidence_count=len(ev_items),
-        )
+        if len(ev_items) > 0 and not (settings.LLM_ENABLED and settings.OPENAI_API_KEY):
+            rep = citation_enforcement_report_skipped(
+                evidence_count=len(ev_items),
+                reason="LLM disabled; deterministic scaffold does not guarantee citation density.",
+            )
+        else:
+            rep = citation_enforcement_report(
+                artifact_type=artifact_type,
+                md=md,
+                evidence_count=len(ev_items),
+            )
+
         if len(ev_items) > 0:
             md = md.rstrip() + "\n\n" + render_citation_compliance_md(rep) + "\n"
             db.add(
@@ -522,10 +532,18 @@ def create_run(
     if ev_items:
         r.output_summary += f" Evidence attached: {len(ev_items)} snippet(s)."
 
-    # add enforcement outcome to summary if failed
+    # add enforcement outcome to summary if failed (Commit 3: do not flag failure in skipped mode)
     try:
         if len(ev_items) > 0:
-            rep2 = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
+            if not (settings.LLM_ENABLED and settings.OPENAI_API_KEY):
+                # skipped mode => never add failure note
+                rep2 = citation_enforcement_report_skipped(
+                    evidence_count=len(ev_items),
+                    reason="LLM disabled; deterministic scaffold does not guarantee citation density.",
+                )
+            else:
+                rep2 = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
+
             if not rep2.get("ok"):
                 r.output_summary += f" ⚠️ Citation check failed (confidence={float(rep2.get('confidence_score') or 0.0):.2f})."
     except Exception:
@@ -696,9 +714,16 @@ def regenerate_with_retrieval(
         )
         title = latest.title or _title
 
-    # V1 enforcement
+    # V1 enforcement (Commit 3: skip when LLM disabled)
     try:
-        rep = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
+        if len(ev_items) > 0 and not (settings.LLM_ENABLED and settings.OPENAI_API_KEY):
+            rep = citation_enforcement_report_skipped(
+                evidence_count=len(ev_items),
+                reason="LLM disabled; deterministic scaffold does not guarantee citation density.",
+            )
+        else:
+            rep = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
+
         if len(ev_items) > 0:
             md = md.rstrip() + "\n\n" + render_citation_compliance_md(rep) + "\n"
             db.add(
@@ -732,7 +757,14 @@ def regenerate_with_retrieval(
 
     try:
         if len(ev_items) > 0:
-            rep2 = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
+            if not (settings.LLM_ENABLED and settings.OPENAI_API_KEY):
+                rep2 = citation_enforcement_report_skipped(
+                    evidence_count=len(ev_items),
+                    reason="LLM disabled; deterministic scaffold does not guarantee citation density.",
+                )
+            else:
+                rep2 = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
+
             if not rep2.get("ok"):
                 r.output_summary += f" ⚠️ Citation check failed (confidence={float(rep2.get('confidence_score') or 0.0):.2f})."
     except Exception:
@@ -1127,11 +1159,7 @@ def rag_debug(
             {
                 "batch_id": b.get("batch_id"),
                 "batch_kind": b.get("batch_kind"),
-                "created_at": (
-                    b.get("created_at").isoformat().replace("+00:00", "Z")
-                    if isinstance(b.get("created_at"), datetime)
-                    else None
-                ),
+                "created_at": (b.get("created_at").isoformat().replace("+00:00", "Z") if isinstance(b.get("created_at"), datetime) else None),
                 "evidence_count": int(b.get("evidence_count") or 0),
                 "retrieval": b.get("retrieval") or {},
             }
