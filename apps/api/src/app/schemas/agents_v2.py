@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, List
-
+from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
+
+from app.schemas.core import RetrievalConfigIn
 
 
 # -------------------------
@@ -12,13 +13,6 @@ class AgentBaseCreateIn(BaseModel):
     key: str = Field(min_length=2, max_length=120)
     name: str = Field(min_length=2, max_length=200)
     description: str = Field(default="", max_length=20000)
-
-
-class AgentBaseUpdateIn(BaseModel):
-    # PATCH semantics
-    key: Optional[str] = Field(default=None, min_length=2, max_length=120)
-    name: Optional[str] = Field(default=None, min_length=2, max_length=200)
-    description: Optional[str] = Field(default=None, max_length=20000)
 
 
 class AgentBaseOut(BaseModel):
@@ -43,14 +37,6 @@ class AgentVersionCreateIn(BaseModel):
     definition_json: Dict[str, Any] = Field(default_factory=dict)
 
 
-class AgentVersionUpdateIn(BaseModel):
-    """
-    PATCH a DRAFT version only.
-    If definition_json omitted => keep existing.
-    """
-    definition_json: Optional[Dict[str, Any]] = None
-
-
 class AgentVersionOut(BaseModel):
     id: str
     agent_base_id: str
@@ -68,7 +54,10 @@ class AgentPublishOut(BaseModel):
     published_version: int
 
 
-class AgentArchiveOut(BaseModel):
-    ok: bool = True
-    agent_version_id: str
-    status: str  # archived
+# -------------------------
+# NEW (Commit 2): Run a published custom agent
+# -------------------------
+class CustomAgentRunIn(BaseModel):
+    input_payload: Dict[str, Any] = Field(default_factory=dict)
+    # Optional override (if omitted, use stored definition_json.retrieval defaults)
+    retrieval: Optional[RetrievalConfigIn] = None
