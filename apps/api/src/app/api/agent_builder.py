@@ -29,6 +29,23 @@ from app.schemas.core import RetrievalConfigIn
 router = APIRouter(tags=["agent_builder"])
 
 
+# -------------------------
+# Constants for Builder Meta
+# -------------------------
+_TIMEFRAME_PRESETS: List[str] = ["7d", "30d", "90d", "custom"]
+
+_RETRIEVAL_KNOBS: Dict[str, Any] = {
+    "defaults": {"k": 6, "alpha": 0.65, "min_score": 0.15, "overfetch_k": 3, "rerank": False},
+    "bounds": {
+        "k": {"min": 1, "max": 50},
+        "alpha": {"min": 0.0, "max": 1.0},
+        "min_score": {"min": 0.0, "max": 1.0},
+        "overfetch_k": {"min": 1, "max": 10},
+        "rerank": {"min": 0, "max": 1},
+    },
+}
+
+
 def _artifact_type(definition_json: Dict[str, Any]) -> str:
     art = definition_json.get("artifact") or {}
     if not isinstance(art, dict):
@@ -107,16 +124,16 @@ def agent_builder_meta(
 ):
     ws, _role = require_workspace_access(workspace_id, db, user)
 
-    # Policy allowlist drives builder source selection constraints.
     allowed_source_types = policy_allowed_source_types(ws)
 
     # Artifact types = union of known defaults; UI can show these templates.
-    # We include stable values from AGENT_TO_DEFAULT_ARTIFACT_TYPE map.
     artifact_types = sorted({v for v in (AGENT_TO_DEFAULT_ARTIFACT_TYPE or {}).values() if str(v).strip()})
 
     return AgentBuilderMetaOut(
         workspace_id=str(ws.id),
         allowed_source_types=allowed_source_types,
+        timeframe_presets=list(_TIMEFRAME_PRESETS),
+        retrieval_knobs=dict(_RETRIEVAL_KNOBS),
         artifact_types=artifact_types,
     )
 
@@ -144,6 +161,7 @@ def get_published_custom_agent(
         agent_base_id=str(base.id),
         published_version_id=str(vpub.id),
         published_version=int(vpub.version),
+        status="published",
         definition_json=vpub.definition_json or {},
     )
 
@@ -186,16 +204,13 @@ def preview_custom_agent(
     artifact_type = _artifact_type(defn)
 
     # Build prompts (for UI preview). This does NOT execute the run.
-    evidence_text = ""  # preview does not retrieve (no side effects, no cost)
-    citations_block = ""  # preview does not fetch evidence pack
-
     system_prompt = build_system_prompt()
     user_prompt = build_user_prompt_custom(
         definition_json=defn,
         input_payload=payload.input_payload or {},
-        evidence_text=evidence_text,
+        evidence_text="",  # preview does not retrieve (no side effects)
         artifact_type=artifact_type,
-        citations_block=citations_block,
+        citations_block="",  # preview does not fetch evidence pack
     )
 
     notes: List[str] = []
