@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, List
+
 from pydantic import BaseModel, Field
 
 
@@ -11,6 +12,13 @@ class AgentBaseCreateIn(BaseModel):
     key: str = Field(min_length=2, max_length=120)
     name: str = Field(min_length=2, max_length=200)
     description: str = Field(default="", max_length=20000)
+
+
+class AgentBaseUpdateIn(BaseModel):
+    # PATCH semantics
+    key: Optional[str] = Field(default=None, min_length=2, max_length=120)
+    name: Optional[str] = Field(default=None, min_length=2, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=20000)
 
 
 class AgentBaseOut(BaseModel):
@@ -35,6 +43,14 @@ class AgentVersionCreateIn(BaseModel):
     definition_json: Dict[str, Any] = Field(default_factory=dict)
 
 
+class AgentVersionUpdateIn(BaseModel):
+    """
+    PATCH a DRAFT version only.
+    If definition_json omitted => keep existing.
+    """
+    definition_json: Optional[Dict[str, Any]] = None
+
+
 class AgentVersionOut(BaseModel):
     id: str
     agent_base_id: str
@@ -50,3 +66,9 @@ class AgentPublishOut(BaseModel):
     agent_base_id: str
     published_version_id: str
     published_version: int
+
+
+class AgentArchiveOut(BaseModel):
+    ok: bool = True
+    agent_version_id: str
+    status: str  # archived
