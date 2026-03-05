@@ -1,3 +1,4 @@
+// apps/web/src/App.tsx
 import { AppShell, Group, Anchor, Text } from "@mantine/core";
 import { Link, Route, Routes, useLocation } from "react-router-dom";
 import WorkspacesPage from "./pages/WorkspacesPage";
@@ -13,8 +14,6 @@ import Register from "./pages/Register";
 import Me from "./pages/Me";
 import ActionCenterPage from "./pages/ActionCenterPage";
 import SchedulesPage from "./pages/SchedulesPage";
-
-// Commit 6 pages
 import GovernancePage from "./pages/GovernancePage";
 import AgentBuilderPage from "./pages/AgentBuilderPage";
 
@@ -67,14 +66,14 @@ export default function App() {
           <Route path="/workspaces/:workspaceId/actions" element={<ActionCenterPage />} />
           <Route path="/workspaces/:workspaceId/schedules" element={<SchedulesPage />} />
 
-          {/* Commit 6: Governance + Agent Builder */}
+          {/* New: Governance + Agent Builder */}
           <Route path="/workspaces/:workspaceId/governance" element={<GovernancePage />} />
           <Route path="/workspaces/:workspaceId/agent-builder" element={<AgentBuilderPage />} />
 
-          {/* Run Builder (V0 close) */}
+          {/* Run Builder */}
           <Route path="/run-builder/:workspaceId" element={<RunBuilderPage />} />
 
-          {/* Docs (V0 close) */}
+          {/* Docs */}
           <Route path="/workspaces/:workspaceId/docs" element={<DocsPage />} />
 
           {/* Pipelines */}

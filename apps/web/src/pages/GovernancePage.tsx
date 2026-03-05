@@ -1,22 +1,21 @@
+// apps/web/src/pages/GovernancePage.tsx
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   Badge,
   Button,
   Card,
+  Code,
   Group,
   Select,
   Stack,
   Text,
   TextInput,
   Title,
-  Code,
   Divider,
-  Textarea,
-  Table,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
-import type { GovernanceEffective, GovernanceEvents, GovernanceEvent } from "../types";
+import type { GovernanceEffectiveOut, GovernanceEventsOut, GovernanceEventOut } from "../types";
 
 function safeJson(v: any): string {
   try {
@@ -26,64 +25,64 @@ function safeJson(v: any): string {
   }
 }
 
-function decisionColor(decision: string): string {
-  const d = (decision || "").toLowerCase();
-  if (d === "allow") return "green";
-  if (d === "deny") return "red";
-  return "gray";
-}
-
 export default function GovernancePage() {
   const { workspaceId } = useParams();
   const wid = workspaceId || "";
 
   const [err, setErr] = useState<string | null>(null);
 
-  const [effective, setEffective] = useState<GovernanceEffective | null>(null);
-  const [events, setEvents] = useState<GovernanceEvent[]>([]);
-  const [loadingEffective, setLoadingEffective] = useState(false);
-  const [loadingEvents, setLoadingEvents] = useState(false);
+  const [gov, setGov] = useState<GovernanceEffectiveOut | null>(null);
+  const [govLoading, setGovLoading] = useState(false);
+
+  const [events, setEvents] = useState<GovernanceEventOut[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(false);
 
   // filters
+  const [actionPrefix, setActionPrefix] = useState<string>("policy.allowlist");
+  const [decision, setDecision] = useState<string>("all"); // all|allow|deny
   const [limit, setLimit] = useState<string>("50");
-  const [decision, setDecision] = useState<string | null>(null); // allow|deny|null
-  const [actionPrefix, setActionPrefix] = useState<string>("");
 
-  const effectiveJson = useMemo(() => safeJson(effective), [effective]);
+  const limitNum = useMemo(() => {
+    const n = Number(limit);
+    if (!Number.isFinite(n) || n < 1) return 50;
+    return Math.min(200, Math.floor(n));
+  }, [limit]);
 
-  async function loadEffective() {
+  async function loadGovernance() {
     if (!wid) return;
     setErr(null);
-    setLoadingEffective(true);
+    setGovLoading(true);
 
-    const res = await apiFetch<GovernanceEffective>(`/workspaces/${wid}/governance`, { method: "GET" });
+    const res = await apiFetch<GovernanceEffectiveOut>(`/workspaces/${wid}/governance`, { method: "GET" });
 
-    setLoadingEffective(false);
+    setGovLoading(false);
 
     if (!res.ok) {
-      setEffective(null);
+      setGov(null);
       setErr(`Governance load failed: ${res.status} ${res.error}`);
       return;
     }
 
-    setEffective(res.data);
+    setGov(res.data);
   }
 
   async function loadEvents() {
     if (!wid) return;
     setErr(null);
-    setLoadingEvents(true);
+    setEventsLoading(true);
 
     const params = new URLSearchParams();
-    params.set("limit", String(Number(limit) || 50));
-    if (decision) params.set("decision", decision);
+    params.set("limit", String(limitNum));
+
+    if (decision !== "all") params.set("decision", decision);
     if (actionPrefix.trim()) params.set("action_prefix", actionPrefix.trim());
 
-    const res = await apiFetch<GovernanceEvents>(`/workspaces/${wid}/governance/events?${params.toString()}`, {
-      method: "GET",
-    });
+    const res = await apiFetch<GovernanceEventsOut>(
+      `/workspaces/${wid}/governance/events?${params.toString()}`,
+      { method: "GET" }
+    );
 
-    setLoadingEvents(false);
+    setEventsLoading(false);
 
     if (!res.ok) {
       setEvents([]);
@@ -95,7 +94,7 @@ export default function GovernancePage() {
   }
 
   async function loadAll() {
-    await loadEffective();
+    await loadGovernance();
     await loadEvents();
   }
 
@@ -111,9 +110,9 @@ export default function GovernancePage() {
         <Title order={2}>Governance</Title>
         <Group>
           <Button component={Link} to={`/workspaces/${wid}`} variant="light">
-            Back to Workspace
+            Back
           </Button>
-          <Button variant="light" onClick={loadAll} loading={loadingEffective || loadingEvents}>
+          <Button onClick={loadAll} loading={govLoading || eventsLoading}>
             Refresh
           </Button>
         </Group>
@@ -132,16 +131,24 @@ export default function GovernancePage() {
               <Text fw={700}>Effective Governance</Text>
               <Badge variant="light">policy + rbac</Badge>
             </Group>
-            <Button variant="light" onClick={loadEffective} loading={loadingEffective}>
+            <Button variant="light" onClick={loadGovernance} loading={govLoading}>
               Refresh
             </Button>
           </Group>
 
-          <Text size="sm" c="dimmed">
-            This is the merged view returned by <Code>GET /workspaces/:id/governance</Code>.
-          </Text>
+          {!gov ? (
+            <Text c="dimmed">{govLoading ? "Loading…" : "No governance payload loaded yet."}</Text>
+          ) : (
+            <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+              {safeJson({ policy_effective: gov.policy_effective, rbac_effective: gov.rbac_effective })}
+            </pre>
+          )}
 
-          <Textarea label="governance_effective (json)" autosize minRows={10} value={effectiveJson} readOnly />
+          {gov ? (
+            <Text size="xs" c="dimmed">
+              workspace_id: <Code>{gov.workspace_id}</Code>
+            </Text>
+          ) : null}
         </Stack>
       </Card>
 
@@ -152,7 +159,7 @@ export default function GovernancePage() {
               <Text fw={700}>Governance Events</Text>
               <Badge variant="light">audit trail</Badge>
             </Group>
-            <Button variant="light" onClick={loadEvents} loading={loadingEvents}>
+            <Button variant="light" onClick={loadEvents} loading={eventsLoading}>
               Refresh
             </Button>
           </Group>
@@ -163,7 +170,7 @@ export default function GovernancePage() {
 
           <Divider />
 
-          <Group align="end" grow>
+          <Group grow>
             <TextInput
               label="action_prefix (optional)"
               value={actionPrefix}
@@ -173,12 +180,12 @@ export default function GovernancePage() {
             <Select
               label="decision"
               data={[
-                { value: "", label: "all" },
+                { value: "all", label: "all" },
                 { value: "allow", label: "allow" },
                 { value: "deny", label: "deny" },
               ]}
-              value={decision ?? ""}
-              onChange={(v) => setDecision(v ? v : null)}
+              value={decision}
+              onChange={(v) => setDecision(v || "all")}
             />
             <TextInput
               label="limit"
@@ -186,55 +193,59 @@ export default function GovernancePage() {
               onChange={(e) => setLimit(e.currentTarget.value)}
               placeholder="50"
             />
-            <Button onClick={loadEvents} loading={loadingEvents}>
-              Apply
-            </Button>
           </Group>
+
+          <Button onClick={loadEvents} loading={eventsLoading}>
+            Apply
+          </Button>
 
           <Divider />
 
-          {events.length === 0 ? (
-            <Text size="sm" c="dimmed">
-              No events found.
-            </Text>
+          {eventsLoading ? (
+            <Text c="dimmed">Loading events…</Text>
+          ) : events.length === 0 ? (
+            <Text c="dimmed">No events found.</Text>
           ) : (
-            <Table striped withTableBorder withColumnBorders>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Decision</Table.Th>
-                  <Table.Th>Action</Table.Th>
-                  <Table.Th>Reason</Table.Th>
-                  <Table.Th>Created</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {events.map((e) => (
-                  <Table.Tr key={e.id}>
-                    <Table.Td>
-                      <Badge variant="light" color={decisionColor(e.decision)}>
-                        {e.decision}
-                      </Badge>
-                    </Table.Td>
-                    <Table.Td style={{ maxWidth: 520 }}>
-                      <Text size="sm" style={{ wordBreak: "break-word" }}>
-                        {e.action}
-                      </Text>
+            <Stack gap="xs">
+              {events.map((e) => (
+                <Card key={e.id} withBorder>
+                  <Stack gap={4}>
+                    <Group justify="space-between">
+                      <Group gap="sm">
+                        <Badge variant="light" color={e.decision === "deny" ? "red" : "green"}>
+                          {e.decision}
+                        </Badge>
+                        <Text fw={600}>{e.action}</Text>
+                      </Group>
                       <Text size="xs" c="dimmed">
-                        id={e.id}
+                        {new Date(e.created_at).toLocaleString()}
                       </Text>
-                    </Table.Td>
-                    <Table.Td style={{ maxWidth: 520 }}>
-                      <Text size="sm" style={{ wordBreak: "break-word" }}>
-                        {e.reason || "-"}
+                    </Group>
+
+                    {e.reason ? (
+                      <Text size="sm">
+                        <Text span fw={600}>
+                          reason:
+                        </Text>{" "}
+                        {e.reason}
                       </Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="sm">{e.created_at}</Text>
-                    </Table.Td>
-                  </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </Table>
+                    ) : null}
+
+                    <Text size="xs" c="dimmed">
+                      ws=<Code>{e.workspace_id}</Code> · user=<Code>{e.user_id ?? "null"}</Code>
+                    </Text>
+
+                    {e.meta && Object.keys(e.meta).length ? (
+                      <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(e.meta)}</pre>
+                    ) : (
+                      <Text size="sm" c="dimmed">
+                        meta: (empty)
+                      </Text>
+                    )}
+                  </Stack>
+                </Card>
+              ))}
+            </Stack>
           )}
         </Stack>
       </Card>

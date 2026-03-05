@@ -370,16 +370,15 @@ export type ScheduleRunDueResponse = {
 };
 
 // -----------------------------
-// Commit 6: Governance + Agent Builder
+// Commit 6: Governance + Agent Builder UI types
 // -----------------------------
-
-export type GovernanceEffective = {
+export type GovernanceEffectiveOut = {
   workspace_id: string;
   policy_effective: Record<string, unknown>;
   rbac_effective: Record<string, unknown>;
 };
 
-export type GovernanceEvent = {
+export type GovernanceEventOut = {
   id: string;
   workspace_id: string;
   user_id?: string | null;
@@ -390,12 +389,33 @@ export type GovernanceEvent = {
   created_at: string; // ISO
 };
 
-export type GovernanceEvents = {
+export type GovernanceEventsOut = {
   workspace_id: string;
-  items: GovernanceEvent[];
+  items: GovernanceEventOut[];
 };
 
-export type AgentBuilderMeta = {
+export type AgentBaseOut = {
+  id: string;
+  workspace_id: string;
+  key: string;
+  name: string;
+  description: string;
+  created_by_user_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AgentVersionOut = {
+  id: string;
+  agent_base_id: string;
+  version: number;
+  status: string;
+  definition_json: Record<string, unknown>;
+  created_by_user_id?: string | null;
+  created_at: string;
+};
+
+export type AgentBuilderMetaOut = {
   workspace_id: string;
   allowed_source_types: string[];
   timeframe_presets: string[];
@@ -403,38 +423,12 @@ export type AgentBuilderMeta = {
   artifact_types: string[];
 };
 
-export type AgentBase = {
-  id: string;
-  workspace_id: string;
-  key: string;
-  name: string;
-  description: string;
-  created_by_user_id?: string | null;
-  created_at: string; // ISO
-  updated_at: string; // ISO
-};
-
-export type CustomAgentPublished = {
+export type CustomAgentPublishedOut = {
   agent_base_id: string;
   published_version_id: string;
   published_version: number;
   status: string;
   definition_json: Record<string, unknown>;
-};
-
-export type CustomAgentPreviewIn = {
-  input_payload: Record<string, unknown>;
-  retrieval?: {
-    enabled: boolean;
-    query: string;
-    k: number;
-    alpha: number;
-    source_types: string[];
-    timeframe: Record<string, unknown>;
-    min_score: number;
-    overfetch_k: number;
-    rerank: boolean;
-  } | null;
 };
 
 export type CustomAgentPreviewOut = {
@@ -447,4 +441,22 @@ export type CustomAgentPreviewOut = {
   user_prompt: string;
   llm_enabled: boolean;
   notes: string[];
+};
+
+export type CustomAgentRunOut = Run;
+
+// -----------------------------
+// Commit 6 Step 2: Agent Builder create/publish/archive responses
+// -----------------------------
+export type AgentPublishOut = {
+  ok: boolean;
+  agent_base_id: string;
+  published_version_id: string;
+  published_version: number;
+};
+
+export type AgentArchiveOut = {
+  ok: boolean;
+  agent_version_id: string;
+  status: string; // archived
 };

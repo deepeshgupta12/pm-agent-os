@@ -1,3 +1,4 @@
+// apps/web/src/pages/WorkspaceDetailPage.tsx
 import { useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import {
@@ -56,9 +57,7 @@ export default function WorkspaceDetailPage() {
   );
   const [creating, setCreating] = useState(false);
 
-  // -------------------------
-  // Commit 2: Template Admin (workspace settings)
-  // -------------------------
+  // Template Admin
   const [tplAdmin, setTplAdmin] = useState<TemplateAdmin | null>(null);
   const [tplAdminLoading, setTplAdminLoading] = useState(false);
   const [tplAdminSaving, setTplAdminSaving] = useState(false);
@@ -86,11 +85,9 @@ export default function WorkspaceDetailPage() {
     setTplAdminLoading(true);
 
     const res = await apiFetch<TemplateAdmin>(`/workspaces/${wid}/template-admin`, { method: "GET" });
-
     setTplAdminLoading(false);
 
     if (!res.ok) {
-      // Not fatal for rest of page
       setTplAdmin(null);
       setTplAdminJson("{}");
       setTplAdminDirty(false);
@@ -134,42 +131,6 @@ export default function WorkspaceDetailPage() {
     setTplAdmin(res.data);
     setTplAdminJson(stableJsonStringify(res.data.template_admin_json || {}));
     setTplAdminDirty(false);
-  }
-
-  async function loadAll() {
-    setErr(null);
-
-    const wsRes = await apiFetch<Workspace>(`/workspaces/${wid}`, { method: "GET" });
-    if (!wsRes.ok) {
-      setErr(`Workspace load failed: ${wsRes.status} ${wsRes.error}`);
-      return;
-    }
-    setWs(wsRes.data);
-
-    const roleRes = await apiFetch<WorkspaceRole>(`/workspaces/${wid}/my-role`, { method: "GET" });
-    if (!roleRes.ok) {
-      setErr(`Role load failed: ${roleRes.status} ${roleRes.error}`);
-      return;
-    }
-    setMyRole(roleRes.data);
-
-    const agentsRes = await apiFetch<Agent[]>("/agents", { method: "GET" });
-    if (!agentsRes.ok) {
-      setErr(`Agents load failed: ${agentsRes.status} ${agentsRes.error}`);
-      return;
-    }
-    setAgents(agentsRes.data);
-    if (!agentId && agentsRes.data.length > 0) setAgentId(agentsRes.data[0].id);
-
-    const runsRes = await apiFetch<Run[]>(`/workspaces/${wid}/runs`, { method: "GET" });
-    if (!runsRes.ok) {
-      setErr(`Runs load failed: ${runsRes.status} ${runsRes.error}`);
-      return;
-    }
-    setRuns(runsRes.data);
-
-    await loadMembers();
-    await loadTemplateAdmin();
   }
 
   async function loadMembers() {
@@ -247,6 +208,42 @@ export default function WorkspaceDetailPage() {
     await loadMembers();
   }
 
+  async function loadAll() {
+    setErr(null);
+
+    const wsRes = await apiFetch<Workspace>(`/workspaces/${wid}`, { method: "GET" });
+    if (!wsRes.ok) {
+      setErr(`Workspace load failed: ${wsRes.status} ${wsRes.error}`);
+      return;
+    }
+    setWs(wsRes.data);
+
+    const roleRes = await apiFetch<WorkspaceRole>(`/workspaces/${wid}/my-role`, { method: "GET" });
+    if (!roleRes.ok) {
+      setErr(`Role load failed: ${roleRes.status} ${roleRes.error}`);
+      return;
+    }
+    setMyRole(roleRes.data);
+
+    const agentsRes = await apiFetch<Agent[]>("/agents", { method: "GET" });
+    if (!agentsRes.ok) {
+      setErr(`Agents load failed: ${agentsRes.status} ${agentsRes.error}`);
+      return;
+    }
+    setAgents(agentsRes.data);
+    if (!agentId && agentsRes.data.length > 0) setAgentId(agentsRes.data[0].id);
+
+    const runsRes = await apiFetch<Run[]>(`/workspaces/${wid}/runs`, { method: "GET" });
+    if (!runsRes.ok) {
+      setErr(`Runs load failed: ${runsRes.status} ${runsRes.error}`);
+      return;
+    }
+    setRuns(runsRes.data);
+
+    await loadMembers();
+    await loadTemplateAdmin();
+  }
+
   async function createRun() {
     if (!agentId) return;
     setErr(null);
@@ -298,8 +295,6 @@ export default function WorkspaceDetailPage() {
           <Button component={Link} to={`/workspaces/${wid}/schedules`} variant="light">
             Schedules
           </Button>
-
-          {/* Commit 6 */}
           <Button component={Link} to={`/workspaces/${wid}/agent-builder`} variant="light">
             Agent Builder
           </Button>
@@ -325,7 +320,6 @@ export default function WorkspaceDetailPage() {
         <Text c="dimmed">Loading workspace…</Text>
       )}
 
-      {/* Commit 2: Template Admin */}
       <Card withBorder>
         <Stack gap="sm">
           <Group justify="space-between">
@@ -352,8 +346,8 @@ export default function WorkspaceDetailPage() {
           </Group>
 
           <Text size="sm" c="dimmed">
-            Workspace-scoped configuration for PRD templates, event naming conventions, and research taxonomy tags.
-            Stored as JSON at <Code>workspaces.template_admin_json</Code>.
+            Workspace-scoped configuration stored as JSON at <Code>workspaces.template_admin_json</Code>. A brand new
+            workspace will default to <Code>{`{}`}</Code> until you save values.
           </Text>
 
           {tplAdminErr ? (
