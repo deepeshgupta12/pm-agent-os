@@ -301,6 +301,9 @@ export default function WorkspaceDetailPage() {
           <Button component={Link} to={`/workspaces/${wid}/governance`} variant="light">
             Governance
           </Button>
+          <Button component={Link} to={`/workspaces/${wid}/policy`} variant="light">
+            Policy Center
+          </Button>
         </Group>
       </Group>
 

@@ -37,14 +37,29 @@ _DEFAULT_RBAC: Dict[str, Any] = {
         "can_create_agent_base_roles": ["admin", "member"],
         "can_publish_agent_roles": ["admin"],
         "can_archive_agent_roles": ["admin"],
-        # runtime / visibility permissions
         "can_preview_agent_roles": ["admin", "member"],
         "can_view_published_agent_roles": ["admin", "member", "viewer"],
         "can_run_agent_roles": ["admin", "member"],
     },
     "connectors": {
+        # workspace-wide defaults
+        "can_read_connectors_roles": ["admin", "member", "viewer"],
         "can_create_connector_roles": ["admin"],
+        "can_update_connector_roles": ["admin"],
         "can_trigger_sync_roles": ["admin", "member"],
+        # optional overrides
+        "per_type": {},       # e.g. {"github": {"can_trigger_sync_roles": ["admin"]}}
+        "per_connector": {},  # e.g. {"<connector_uuid>": {"can_trigger_sync_roles": ["admin"]}}
+    },
+    "action_center": {
+        # workspace-wide defaults
+        "can_list_actions_roles": ["admin", "member", "viewer"],
+        "can_create_action_roles": ["admin", "member"],
+        "can_review_action_roles": ["admin"],   # default: only admins review
+        "can_cancel_action_roles": ["admin"],   # default: only admins cancel (you still allow creator cancel in route)
+        "can_execute_action_roles": ["admin"],  # default: only admins execute side-effects
+        # optional overrides by action type
+        "per_type": {},  # e.g. {"decision_log_create": {"can_review_action_roles": ["admin","member"]}}
     },
 }
 
@@ -511,6 +526,125 @@ def _rbac_allowed_roles(ws: Workspace, path: Tuple[str, ...], default: List[str]
         seen.add(s)
         uniq.append(s)
     return uniq
+
+
+def _rbac_get_dict(ws: Workspace, path: Tuple[str, ...]) -> Optional[Dict[str, Any]]:
+    eff = load_rbac(ws)
+    cur: Any = eff
+    for p in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(p)
+    return cur if isinstance(cur, dict) else None
+
+
+def _rbac_get_list(ws: Workspace, path: Tuple[str, ...], default: List[str]) -> List[str]:
+    return _rbac_allowed_roles(ws, path, default)
+
+
+def _normalize_uuid_str(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+# -------------------------
+# Connectors RBAC helpers (with overrides)
+# -------------------------
+def rbac_allowed_connectors_read_roles(ws: Workspace) -> List[str]:
+    return _rbac_get_list(ws, ("connectors", "can_read_connectors_roles"), ["admin", "member", "viewer"])
+
+
+def rbac_allowed_connectors_create_roles(ws: Workspace) -> List[str]:
+    return _rbac_get_list(ws, ("connectors", "can_create_connector_roles"), ["admin"])
+
+
+def rbac_allowed_connectors_update_roles(ws: Workspace) -> List[str]:
+    return _rbac_get_list(ws, ("connectors", "can_update_connector_roles"), ["admin"])
+
+
+def rbac_allowed_connectors_trigger_sync_roles(
+    ws: Workspace,
+    *,
+    connector_type: Optional[str] = None,
+    connector_id: Optional[str] = None,
+) -> List[str]:
+    # 1) start with workspace default
+    base = _rbac_get_list(ws, ("connectors", "can_trigger_sync_roles"), ["admin", "member"])
+
+    # 2) per_type override
+    ctype = (connector_type or "").strip().lower()
+    if ctype:
+        per_type = _rbac_get_dict(ws, ("connectors", "per_type")) or {}
+        rule = per_type.get(ctype)
+        if isinstance(rule, dict) and isinstance(rule.get("can_trigger_sync_roles"), list):
+            return _rbac_allowed_roles(ws, ("connectors", "per_type", ctype, "can_trigger_sync_roles"), base)
+
+    # 3) per_connector override
+    cid = _normalize_uuid_str(connector_id)
+    if cid:
+        per_conn = _rbac_get_dict(ws, ("connectors", "per_connector")) or {}
+        rule = per_conn.get(cid)
+        if isinstance(rule, dict) and isinstance(rule.get("can_trigger_sync_roles"), list):
+            return _rbac_allowed_roles(ws, ("connectors", "per_connector", cid, "can_trigger_sync_roles"), base)
+
+    return base
+
+
+# -------------------------
+# Action Center RBAC helpers (with per-type overrides)
+# -------------------------
+def rbac_allowed_action_center_list_roles(ws: Workspace) -> List[str]:
+    return _rbac_get_list(ws, ("action_center", "can_list_actions_roles"), ["admin", "member", "viewer"])
+
+
+def rbac_allowed_action_center_create_roles(ws: Workspace, *, action_type: Optional[str] = None) -> List[str]:
+    base = _rbac_get_list(ws, ("action_center", "can_create_action_roles"), ["admin", "member"])
+    at = (action_type or "").strip()
+    if not at:
+        return base
+    per = _rbac_get_dict(ws, ("action_center", "per_type")) or {}
+    rule = per.get(at)
+    if isinstance(rule, dict) and isinstance(rule.get("can_create_action_roles"), list):
+        return _rbac_allowed_roles(ws, ("action_center", "per_type", at, "can_create_action_roles"), base)
+    return base
+
+
+def rbac_allowed_action_center_review_roles(ws: Workspace, *, action_type: Optional[str] = None) -> List[str]:
+    base = _rbac_get_list(ws, ("action_center", "can_review_action_roles"), ["admin"])
+    at = (action_type or "").strip()
+    if not at:
+        return base
+    per = _rbac_get_dict(ws, ("action_center", "per_type")) or {}
+    rule = per.get(at)
+    if isinstance(rule, dict) and isinstance(rule.get("can_review_action_roles"), list):
+        return _rbac_allowed_roles(ws, ("action_center", "per_type", at, "can_review_action_roles"), base)
+    return base
+
+
+def rbac_allowed_action_center_cancel_roles(ws: Workspace, *, action_type: Optional[str] = None) -> List[str]:
+    base = _rbac_get_list(ws, ("action_center", "can_cancel_action_roles"), ["admin"])
+    at = (action_type or "").strip()
+    if not at:
+        return base
+    per = _rbac_get_dict(ws, ("action_center", "per_type")) or {}
+    rule = per.get(at)
+    if isinstance(rule, dict) and isinstance(rule.get("can_cancel_action_roles"), list):
+        return _rbac_allowed_roles(ws, ("action_center", "per_type", at, "can_cancel_action_roles"), base)
+    return base
+
+
+def rbac_allowed_action_center_execute_roles(ws: Workspace, *, action_type: Optional[str] = None) -> List[str]:
+    base = _rbac_get_list(ws, ("action_center", "can_execute_action_roles"), ["admin"])
+    at = (action_type or "").strip()
+    if not at:
+        return base
+    per = _rbac_get_dict(ws, ("action_center", "per_type")) or {}
+    rule = per.get(at)
+    if isinstance(rule, dict) and isinstance(rule.get("can_execute_action_roles"), list):
+        return _rbac_allowed_roles(ws, ("action_center", "per_type", at, "can_execute_action_roles"), base)
+    return base
 
 
 def _is_role_allowed(role: Optional[str], allowed_roles: List[str]) -> bool:

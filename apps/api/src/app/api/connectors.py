@@ -25,6 +25,11 @@ from app.core.governance import (
     audit_rbac_check,
     policy_internal_only,
     audit_internal_only_check,
+    rbac_assert,
+    rbac_allowed_connectors_read_roles,
+    rbac_allowed_connectors_create_roles,
+    rbac_allowed_connectors_update_roles,
+    rbac_allowed_connectors_trigger_sync_roles,
 )
 from app.db.session import get_db
 from app.db.models import Connector, IngestionJob, User, Workspace
@@ -252,6 +257,16 @@ def list_connectors(
     user: User = Depends(require_user),
 ):
     ws, _role = require_workspace_access(workspace_id, db, user)  # viewer+ can read
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.connectors.read",
+            allowed_roles=rbac_allowed_connectors_read_roles(ws),
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
     items = (
         db.execute(select(Connector).where(Connector.workspace_id == ws.id).order_by(Connector.created_at.desc()))
         .scalars()
@@ -272,11 +287,16 @@ def create_connector(
     # V1 Policy: internal-only blocks connectors
     _enforce_internal_only(db, ws, user, action="policy.internal_only.connectors.create")
 
-    # Step 0.4 RBAC enforcement + audit
-    allowed_roles = (ws.rbac_json or {}).get("connectors", {}).get("can_create_connector_roles", ["admin"])
-    if not isinstance(allowed_roles, list) or not allowed_roles:
-        allowed_roles = ["admin"]
-    _enforce_rbac(db, ws, user, allowed_roles=[str(x) for x in allowed_roles], action="rbac.connectors.create")
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.connectors.read",
+            allowed_roles=rbac_allowed_connectors_read_roles(ws),
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
     ctype = payload.type.strip().lower()
     name = payload.name.strip()
@@ -330,6 +350,16 @@ def update_connector(
         raise HTTPException(status_code=404, detail="Connector not found")
 
     ws, _role = require_workspace_role_min(str(c.workspace_id), "admin", db, user)
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.connectors.update",
+            allowed_roles=rbac_allowed_connectors_update_roles(ws),
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
     # V1 Policy: internal-only blocks connectors
     _enforce_internal_only(db, ws, user, action="policy.internal_only.connectors.update")
@@ -382,6 +412,22 @@ def trigger_sync(
         raise HTTPException(status_code=404, detail="Workspace not found")
 
     require_workspace_role_min(str(ws.id), "member", db, user)
+
+    allowed = rbac_allowed_connectors_trigger_sync_roles(
+    ws,
+    connector_type=str(c.type or "").strip().lower(),
+    connector_id=str(c.id),
+    )
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.connectors.trigger_sync",
+            allowed_roles=allowed,
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
     # V1 Policy: internal-only blocks connectors
     _enforce_internal_only(db, ws, user, action="policy.internal_only.connectors.trigger_sync")
@@ -456,6 +502,22 @@ def create_docs_ingestion_job(
 
     # Policy enforcement + audit
     _enforce_policy_sources(db, ws, user, ["docs"], "policy.allowlist.connectors.ingestion_jobs.docs")
+
+    allowed = rbac_allowed_connectors_trigger_sync_roles(
+        ws,
+        connector_type="<docs>",
+        connector_id=str(c.id),
+    )
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.connectors.ingestion",
+            allowed_roles=allowed,
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
     try:
         cid = uuid.UUID(connector_id)
@@ -577,6 +639,22 @@ def create_github_ingestion_job(
 
     # Policy enforcement + audit
     _enforce_policy_sources(db, ws, user, ["github"], "policy.allowlist.connectors.ingestion_jobs.github")
+
+    allowed = rbac_allowed_connectors_trigger_sync_roles(
+        ws,
+        connector_type="<github>",
+        connector_id=str(c.id),
+    )
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.connectors.ingestion",
+            allowed_roles=allowed,
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
     try:
         cid = uuid.UUID(connector_id)
@@ -883,6 +961,22 @@ def create_google_docs_ingestion_job(
 
     # Policy enforcement + audit
     _enforce_policy_sources(db, ws, user, ["docs"], "policy.allowlist.connectors.ingestion_jobs.gdocs")
+
+    allowed = rbac_allowed_connectors_trigger_sync_roles(
+        ws,
+        connector_type="<docs>",
+        connector_id=str(c.id),
+    )
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.connectors.ingestion",
+            allowed_roles=allowed,
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
     try:
         cid = uuid.UUID(connector_id)

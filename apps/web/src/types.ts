@@ -488,3 +488,23 @@ export type AgentDefinitionJson = {
   };
   prompt_blocks?: PromptBlock[];
 };
+
+// -----------------------------
+// Policy Center v1
+// -----------------------------
+export type WorkspacePolicyOut = {
+  workspace_id: string;
+  policy_json: Record<string, unknown>;
+};
+
+export type WorkspacePolicyUpdateIn = {
+  policy_json: Record<string, unknown>;
+};
+
+export type WorkspacePolicyPurgeOut = {
+  ok: boolean;
+  workspace_id: string;
+  cutoff: string; // RFC3339 UTC
+  deleted_evidence: number;
+  deleted_logs: number;
+};

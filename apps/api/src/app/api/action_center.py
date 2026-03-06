@@ -27,6 +27,15 @@ from app.schemas.core import (
     ActionItemDecisionOut,
 )
 
+from app.core.governance import (
+    rbac_assert,
+    rbac_allowed_action_center_list_roles,
+    rbac_allowed_action_center_create_roles,
+    rbac_allowed_action_center_review_roles,
+    rbac_allowed_action_center_cancel_roles,
+    rbac_allowed_action_center_execute_roles,
+)
+
 router = APIRouter(tags=["action_center"])
 
 VALID_STATUSES = {"queued", "approved", "rejected", "cancelled"}
@@ -216,6 +225,12 @@ def _decisions_to_out(rows: List[ActionItemDecision]) -> List[ActionItemDecision
         )
     return out
 
+def _rbac_or_403(db: Session, *, ws: Workspace, user: User, action: str, allowed_roles: List[str]) -> None:
+    try:
+        rbac_assert(db, ws=ws, user=user, action=action, allowed_roles=allowed_roles)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
+
 
 # ---------------------------
 # Routes
@@ -231,6 +246,14 @@ def list_actions(
     user: User = Depends(require_user),
 ):
     ws, _role = require_workspace_access(workspace_id, db, user)
+
+    _rbac_or_403(
+        db,
+        ws=ws,
+        user=user,
+        action="rbac.action_center.list",
+        allowed_roles=rbac_allowed_action_center_list_roles(ws),
+    )
 
     q = select(ActionItem).where(ActionItem.workspace_id == ws.id)
 
@@ -260,11 +283,20 @@ def create_action(
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
-    action_type = payload.type.strip()
+    # ✅ define action_type BEFORE RBAC usage
+    action_type = (payload.type or "").strip()
+
+    _rbac_or_403(
+        db,
+        ws=ws,
+        user=user,
+        action="rbac.action_center.create",
+        allowed_roles=rbac_allowed_action_center_create_roles(ws, action_type=action_type),
+    )
 
     rule = _policy_for_action(ws, action_type)
 
-    # creator permission enforcement
+    # creator permission enforcement (approvals policy)
     if not _is_creator_allowed(ws, user, db, rule):
         raise HTTPException(status_code=403, detail="Not allowed to create this action type")
 
@@ -379,6 +411,14 @@ def cancel_action(
 
     ws, role = require_workspace_access(str(a.workspace_id), db, user)
 
+    _rbac_or_403(
+        db,
+        ws=ws,
+        user=user,
+        action="rbac.action_center.cancel",
+        allowed_roles=rbac_allowed_action_center_cancel_roles(ws, action_type=a.type),
+    )
+
     # Only queued actions can be cancelled
     if a.status != "queued":
         raise HTTPException(status_code=409, detail="Only queued actions can be cancelled")
@@ -414,6 +454,14 @@ def decide_action(
 
     ws, _ = require_workspace_access(str(a.workspace_id), db, user)
     rule = _policy_for_action(ws, a.type)
+
+    _rbac_or_403(
+        db,
+        ws=ws,
+        user=user,
+        action="rbac.action_center.review",
+        allowed_roles=rbac_allowed_action_center_review_roles(ws, action_type=a.type),
+    )
 
     if a.status != "queued":
         raise HTTPException(status_code=409, detail="Action item is already decided")
@@ -462,6 +510,13 @@ def decide_action(
         # If approved, run executor (A: create NEW Run+Artifact)
         if new_status == "approved":
             try:
+                _rbac_or_403(
+                    db,
+                    ws=ws,
+                    user=user,
+                    action="rbac.action_center.execute",
+                    allowed_roles=rbac_allowed_action_center_execute_roles(ws, action_type=a.type),
+                )
                 execute_action_if_applicable(db=db, ws=ws, user=user, action=a)
                 db.refresh(a)
             except Exception as e:
