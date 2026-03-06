@@ -1,0 +1,89 @@
+/* apps/web/src/styles/glass.css */
+
+/* App background */
+:root {
+  --glass-bg: rgba(255, 255, 255, 0.06);
+  --glass-bg-strong: rgba(255, 255, 255, 0.09);
+  --glass-border: rgba(255, 255, 255, 0.10);
+  --glass-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+  --glass-blur: 16px;
+
+  --app-bg-0: #0b1020;
+  --app-bg-1: #0b1629;
+  --app-bg-2: #0e1b31;
+}
+
+/* Remove demo feel: full-height document */
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: radial-gradient(
+      1200px 700px at 20% 20%,
+      rgba(120, 120, 255, 0.12),
+      transparent 55%
+    ),
+    radial-gradient(
+      900px 600px at 80% 30%,
+      rgba(90, 255, 200, 0.08),
+      transparent 60%
+    ),
+    radial-gradient(
+      900px 700px at 40% 90%,
+      rgba(255, 160, 100, 0.06),
+      transparent 60%
+    ),
+    linear-gradient(180deg, var(--app-bg-0), var(--app-bg-2));
+}
+
+/* A subtle grain to stop flat gradients looking cheap */
+.app-shell-bg {
+  position: relative;
+  min-height: 100%;
+}
+
+.app-shell-bg::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.06;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)' opacity='.35'/%3E%3C/svg%3E");
+}
+
+/* Glass surface utility */
+.glass-surface {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+}
+
+/* Slightly stronger for headers/nav */
+.glass-surface-strong {
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+}
+
+/* Page wrapper: consistent spacing for "console" */
+.page-wrap {
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 18px 18px 28px 18px;
+}
+
+/* Keep content readable on very wide screens */
+@media (min-width: 1400px) {
+  .page-wrap {
+    max-width: 1240px;
+  }
+}

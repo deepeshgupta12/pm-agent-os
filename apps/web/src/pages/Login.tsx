@@ -1,7 +1,9 @@
 // apps/web/src/pages/Login.tsx
-import { useState } from "react";
-import { Card, Stack, Text, TextInput, Button, Title } from "@mantine/core";
+import { useMemo, useState } from "react";
+import { Button, Group, PasswordInput, Text, TextInput } from "@mantine/core";
 import { apiFetch } from "../apiClient";
+import GlassCard from "../components/Glass/GlassCard";
+import GlassPage from "../components/Glass/GlassPage";
 
 type UserOut = { id: string; email: string };
 
@@ -9,6 +11,11 @@ export default function Login() {
   const [email, setEmail] = useState("test@example.com");
   const [password, setPassword] = useState("Password123");
   const [msg, setMsg] = useState<string | null>(null);
+
+  const next = useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("next") || "/workspaces";
+  }, []);
 
   async function onLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -25,35 +32,57 @@ export default function Login() {
     }
 
     setMsg(`Logged in as ${res.data.email}`);
+    window.location.href = next;
   }
 
   return (
-    <div style={{ maxWidth: 520, margin: "24px auto" }}>
-      <Title order={2}>Login</Title>
-      <Card withBorder mt="md">
-        <form onSubmit={onLogin}>
-          <Stack gap="sm">
-            <TextInput
-              label="Email"
-              value={email}
-              onChange={(e) => setEmail(e.currentTarget.value)}
-              type="email"
-              required
-            />
-            <TextInput
-              label="Password"
-              value={password}
-              onChange={(e) => setPassword(e.currentTarget.value)}
-              type="password"
-              required
-              minLength={8}
-              maxLength={72}
-            />
-            <Button type="submit">Login</Button>
-            {msg ? <Text>{msg}</Text> : null}
-          </Stack>
-        </form>
-      </Card>
-    </div>
+    <GlassPage
+      title="Sign in"
+      subtitle="Use your account to access workspaces and runs."
+      right={
+        <Group>
+          <Button variant="light" component="a" href="/register">
+            Create account
+          </Button>
+          <Button variant="light" component="a" href="/workspaces">
+            Workspaces
+          </Button>
+        </Group>
+      }
+    >
+      <div style={{ maxWidth: 560 }}>
+        <GlassCard>
+          <form onSubmit={onLogin}>
+            <Group grow>
+              <TextInput
+                label="Email"
+                value={email}
+                onChange={(e) => setEmail(e.currentTarget.value)}
+                type="email"
+                required
+              />
+              <PasswordInput
+                label="Password"
+                value={password}
+                onChange={(e) => setPassword(e.currentTarget.value)}
+                required
+                minLength={8}
+                maxLength={72}
+              />
+            </Group>
+
+            <Group mt="md">
+              <Button type="submit">Sign in</Button>
+            </Group>
+
+            {msg ? (
+              <Text mt="sm" c={msg.startsWith("Login failed") ? "red" : undefined}>
+                {msg}
+              </Text>
+            ) : null}
+          </form>
+        </GlassCard>
+      </div>
+    </GlassPage>
   );
 }

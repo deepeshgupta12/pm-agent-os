@@ -1,7 +1,9 @@
 // apps/web/src/pages/Me.tsx
 import { useEffect, useState } from "react";
-import { Button, Card, Group, Stack, Text, Title } from "@mantine/core";
+import { Button, Group, Text } from "@mantine/core";
 import { apiFetch } from "../apiClient";
+import GlassCard from "../components/Glass/GlassCard";
+import GlassPage from "../components/Glass/GlassPage";
 
 type UserOut = { id: string; email: string };
 
@@ -14,7 +16,7 @@ export default function Me() {
     const res = await apiFetch<UserOut>("/auth/me", { method: "GET" });
     if (!res.ok) {
       setUser(null);
-      setMsg(`Not logged in: ${res.status} ${res.error}`);
+      setMsg(`Not signed in: ${res.status} ${res.error}`);
       return;
     }
     setUser(res.data);
@@ -29,7 +31,7 @@ export default function Me() {
       return;
     }
     setUser(null);
-    setMsg("Logged out.");
+    setMsg("Signed out.");
   }
 
   useEffect(() => {
@@ -38,23 +40,42 @@ export default function Me() {
   }, []);
 
   return (
-    <div style={{ maxWidth: 720, margin: "24px auto" }}>
-      <Title order={2}>Me</Title>
-
-      <Card withBorder mt="md">
-        <Stack gap="sm">
+    <GlassPage
+      title="Account"
+      subtitle="Session and identity."
+      right={
+        <Group>
+          <Button variant="light" component="a" href="/workspaces">
+            Workspaces
+          </Button>
+          <Button variant="light" onClick={loadMe}>
+            Refresh
+          </Button>
+        </Group>
+      }
+    >
+      <div style={{ maxWidth: 720 }}>
+        <GlassCard>
           <Group>
             <Button variant="light" onClick={loadMe}>
               Refresh
             </Button>
             <Button color="red" variant="light" onClick={logout}>
-              Logout
+              Sign out
             </Button>
           </Group>
 
-          {user ? <pre style={{ margin: 0 }}>{JSON.stringify(user, null, 2)}</pre> : <Text>{msg ?? "Loading..."}</Text>}
-        </Stack>
-      </Card>
-    </div>
+          {user ? (
+            <pre style={{ marginTop: 12, marginBottom: 0, whiteSpace: "pre-wrap" }}>
+              {JSON.stringify(user, null, 2)}
+            </pre>
+          ) : (
+            <Text mt="sm" c={msg?.startsWith("Logout failed") ? "red" : "dimmed"}>
+              {msg ?? "Loading…"}
+            </Text>
+          )}
+        </GlassCard>
+      </div>
+    </GlassPage>
   );
 }
