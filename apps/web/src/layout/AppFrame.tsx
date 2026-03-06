@@ -4,6 +4,8 @@ import { Outlet, useLocation } from "react-router-dom";
 import HeaderBar from "./HeaderBar";
 import SideNav from "./SideNav";
 
+const LAST_WS_KEY = "pmos:lastWorkspaceId";
+
 function extractWorkspaceIdFromPath(pathname: string): string | null {
   const m1 = pathname.match(/^\/workspaces\/([0-9a-fA-F-]{36})(\/|$)/);
   if (m1?.[1]) return m1[1];
@@ -14,19 +16,43 @@ function extractWorkspaceIdFromPath(pathname: string): string | null {
   return null;
 }
 
+function readLastWorkspaceId(): string | null {
+  try {
+    const v = window.localStorage.getItem(LAST_WS_KEY);
+    if (!v) return null;
+    return /^[0-9a-fA-F-]{36}$/.test(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastWorkspaceId(wid: string) {
+  try {
+    window.localStorage.setItem(LAST_WS_KEY, wid);
+  } catch {
+    // ignore
+  }
+}
+
 export default function AppFrame() {
   const loc = useLocation();
-  const workspaceId = extractWorkspaceIdFromPath(loc.pathname);
+  const routeWorkspaceId = extractWorkspaceIdFromPath(loc.pathname);
+
+  const activeWorkspaceId = routeWorkspaceId || readLastWorkspaceId();
+
+  if (routeWorkspaceId) {
+    writeLastWorkspaceId(routeWorkspaceId);
+  }
 
   return (
     <div className="app-shell-bg">
       <AppShell header={{ height: 56 }} navbar={{ width: 260, breakpoint: "sm" }} padding={0}>
         <AppShell.Header>
-          <HeaderBar workspaceId={workspaceId} />
+          <HeaderBar workspaceId={activeWorkspaceId} routeWorkspaceId={routeWorkspaceId} />
         </AppShell.Header>
 
         <AppShell.Navbar p={0}>
-          <SideNav workspaceId={workspaceId} />
+          <SideNav workspaceId={activeWorkspaceId} />
         </AppShell.Navbar>
 
         <AppShell.Main>

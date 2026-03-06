@@ -3,7 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import AppFrame from "./layout/AppFrame";
 
-// Pages
+// Pages (existing)
 import WorkspacesPage from "./pages/WorkspacesPage";
 import WorkspaceDetailPage from "./pages/WorkspaceDetailPage";
 import WorkspaceOverviewPage from "./pages/WorkspaceOverviewPage";
@@ -22,6 +22,14 @@ import GovernancePage from "./pages/GovernancePage";
 import AgentBuilderPage from "./pages/AgentBuilderPage";
 import PolicyCenterPage from "./pages/PolicyCenterPage";
 
+// Pages (Commit 16: global IA)
+import RunsPage from "./pages/RunsPage";
+import OutputsPage from "./pages/OutputsPage";
+import ApprovalsPage from "./pages/ApprovalsPage";
+import DocsHomePage from "./pages/DocsHomePage";
+import SchedulesHomePage from "./pages/SchedulesHomePage";
+import SettingsHomePage from "./pages/SettingsHomePage";
+
 export default function App() {
   return (
     <Routes>
@@ -34,12 +42,17 @@ export default function App() {
       <Route element={<AppFrame />}>
         <Route path="/" element={<Navigate to="/workspaces" replace />} />
 
+        {/* Global IA */}
         <Route path="/workspaces" element={<WorkspacesPage />} />
+        <Route path="/runs" element={<RunsPage />} />
+        <Route path="/outputs" element={<OutputsPage />} />
+        <Route path="/approvals" element={<ApprovalsPage />} />
+        <Route path="/docs" element={<DocsHomePage />} />
+        <Route path="/schedules" element={<SchedulesHomePage />} />
+        <Route path="/settings" element={<SettingsHomePage />} />
 
-        {/* Commit 11: workspace overview is default landing */}
+        {/* Workspace scoped */}
         <Route path="/workspaces/:workspaceId" element={<WorkspaceOverviewPage />} />
-
-        {/* Keep old page reachable */}
         <Route path="/workspaces/:workspaceId/_legacy" element={<WorkspaceDetailPage />} />
 
         <Route path="/workspaces/:workspaceId/actions" element={<ActionCenterPage />} />
@@ -54,6 +67,7 @@ export default function App() {
         <Route path="/workspaces/:workspaceId/pipelines" element={<PipelinesPage />} />
         <Route path="/pipelines/runs/:pipelineRunId" element={<PipelineRunDetailPage />} />
 
+        {/* Detail pages */}
         <Route path="/runs/:runId" element={<RunDetailPage />} />
         <Route path="/artifacts/:artifactId" element={<ArtifactDetailPage />} />
 
