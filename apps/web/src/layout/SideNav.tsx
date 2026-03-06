@@ -14,23 +14,33 @@ function NavItem({
   active?: boolean;
 }) {
   return (
-    <Button
-      component={Link}
-      to={to}
-      variant="subtle"
-      justify="flex-start"
-      fullWidth
-      disabled={disabled}
-      className={`nav-item ${active ? "nav-item-active" : "nav-item-inactive"}`}
-      styles={{
-        root: {
-          height: 38,
-          borderRadius: 10,
-        },
-      }}
-    >
-      {label}
-    </Button>
+    <div className="sidenav-item" data-active={active ? "true" : "false"}>
+      <Button
+        component={Link}
+        to={to}
+        variant="subtle"
+        size="sm"
+        justify="flex-start"
+        fullWidth
+        disabled={disabled}
+        styles={{
+          root: {
+            height: 36,
+            borderRadius: 10,
+            paddingLeft: 18,
+            paddingRight: 12,
+            opacity: disabled ? 0.55 : 1,
+            background: active ? "rgba(255,255,255,0.06)" : "transparent",
+            border: active ? "1px solid rgba(255,255,255,0.12)" : "1px solid transparent",
+          },
+          label: {
+            fontWeight: active ? 700 : 600,
+          },
+        }}
+      >
+        {label}
+      </Button>
+    </div>
   );
 }
 
@@ -39,7 +49,7 @@ export default function SideNav({ workspaceId }: { workspaceId: string | null })
   const hasWs = !!workspaceId;
   const wid = workspaceId || "";
 
-  const isActive = (prefix: string) => loc.pathname === prefix || loc.pathname.startsWith(prefix + "/");
+  const isActive = (prefix: string) => loc.pathname.startsWith(prefix);
 
   const wsBase = hasWs ? `/workspaces/${wid}` : "/workspaces";
   const runBuilder = hasWs ? `/run-builder/${wid}` : "/workspaces";
@@ -48,7 +58,7 @@ export default function SideNav({ workspaceId }: { workspaceId: string | null })
     <div style={{ height: "100%" }} className="glass-surface-strong">
       <Stack gap="sm" p="md">
         <Stack gap={6}>
-          <Text size="xs" tt="uppercase" fw={700} className="nav-group-title">
+          <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
             Workspace
           </Text>
           <NavItem label="Overview" to={wsBase} disabled={!hasWs} active={hasWs && isActive(wsBase)} />
@@ -76,7 +86,7 @@ export default function SideNav({ workspaceId }: { workspaceId: string | null })
         <Divider />
 
         <Stack gap={6}>
-          <Text size="xs" tt="uppercase" fw={700} className="nav-group-title">
+          <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
             Governance
           </Text>
           <NavItem

@@ -4,8 +4,11 @@ import { Link, useParams } from "react-router-dom";
 import { Badge, Button, Divider, Group, SimpleGrid, Stack, Text } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import type { Run, Workspace, WorkspaceRole, ActionItem } from "../types";
-import GlassCard from "../components/Glass/GlassCard";
+
 import GlassPage from "../components/Glass/GlassPage";
+import GlassCard from "../components/Glass/GlassCard";
+import GlassSection from "../components/Glass/GlassSection";
+import GlassStat from "../components/Glass/GlassStat";
 
 type Counts = {
   queuedActions?: number;
@@ -82,23 +85,36 @@ export default function WorkspaceOverviewPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wid]);
 
+  const headerRight = (
+    <Group>
+      <Button component={Link} to="/workspaces" variant="light" size="sm">
+        Back
+      </Button>
+      <Button component={Link} to={`/run-builder/${wid}`} size="sm">
+        Create run
+      </Button>
+      <Button variant="light" onClick={loadAll} loading={loading} size="sm">
+        Refresh
+      </Button>
+    </Group>
+  );
+
+  const statsRight = (
+    <Group gap="sm" wrap="wrap">
+      {roleBadge}
+      {typeof counts.queuedActions === "number" ? (
+        <GlassStat label="Approvals" value={counts.queuedActions} />
+      ) : null}
+      {typeof counts.recentRuns === "number" ? <GlassStat label="Runs" value={counts.recentRuns} /> : null}
+      <GlassStat label="Access" value={isAdmin ? "Admin" : "Read-only"} />
+    </Group>
+  );
+
   return (
     <GlassPage
       title={ws?.name ? `Workspace · ${ws.name}` : "Workspace"}
       subtitle="A calm starting point for runs, approvals, and governance."
-      right={
-        <Group>
-          <Button component={Link} to="/workspaces" variant="light">
-            Back
-          </Button>
-          <Button component={Link} to={`/run-builder/${wid}`}>
-            Create run
-          </Button>
-          <Button variant="light" onClick={loadAll} loading={loading}>
-            Refresh
-          </Button>
-        </Group>
-      }
+      right={headerRight}
     >
       <Stack gap="md">
         {err ? (
@@ -107,119 +123,172 @@ export default function WorkspaceOverviewPage() {
           </GlassCard>
         ) : null}
 
-        <GlassCard>
-          <Group justify="space-between" align="flex-start">
-            <Stack gap={2}>
-              <Text fw={700}>{ws?.name || "Loading…"}</Text>
-              <Text size="xs" c="dimmed">
-                {ws?.id || wid}
-              </Text>
-            </Stack>
-
-            <Group gap="xs">
-              {roleBadge}
-              {typeof counts.queuedActions === "number" ? (
-                <Badge variant="light">Approvals: {counts.queuedActions}</Badge>
-              ) : null}
-              {typeof counts.recentRuns === "number" ? <Badge variant="light">Runs: {counts.recentRuns}</Badge> : null}
-              <Badge variant="light" color={isAdmin ? "grape" : "gray"}>
-                {isAdmin ? "admin" : "read-only"}
-              </Badge>
-            </Group>
-          </Group>
-
-          <Divider my="md" />
+        <GlassSection
+          title={ws?.name ? ws.name : "Loading…"}
+          description={ws?.id ? ws.id : wid}
+          right={statsRight}
+        >
+          <Divider />
 
           <SimpleGrid cols={{ base: 1, sm: 2, md: 3 }} spacing="md">
             <GlassCard p="md">
-              <Stack gap={6}>
+              <Stack gap={8}>
                 <Text fw={700}>Run Builder</Text>
                 <Text size="sm" c="dimmed">
                   Create a run using an agent and optional retrieval.
                 </Text>
-                <Button component={Link} to={`/run-builder/${wid}`} variant="light">
-                  Open Run Builder
-                </Button>
+                <Group>
+                  <Button component={Link} to={`/run-builder/${wid}`} variant="light" size="sm">
+                    Open Run Builder
+                  </Button>
+                </Group>
               </Stack>
             </GlassCard>
 
             <GlassCard p="md">
-              <Stack gap={6}>
+              <Stack gap={8}>
                 <Group justify="space-between">
                   <Text fw={700}>Approvals</Text>
-                  {typeof counts.queuedActions === "number" ? <Badge variant="light">{counts.queuedActions} queued</Badge> : null}
+                  {typeof counts.queuedActions === "number" ? (
+                    <GlassStat label="Queued" value={counts.queuedActions} />
+                  ) : null}
                 </Group>
                 <Text size="sm" c="dimmed">
                   Review approval items and execution outcomes.
                 </Text>
-                <Button component={Link} to={`/workspaces/${wid}/actions`} variant="light">
-                  Open Approvals
-                </Button>
+                <Group>
+                  <Button component={Link} to={`/workspaces/${wid}/actions`} variant="light" size="sm">
+                    Open Approvals
+                  </Button>
+                </Group>
               </Stack>
             </GlassCard>
 
             <GlassCard p="md">
-              <Stack gap={6}>
+              <Stack gap={8}>
                 <Text fw={700}>Docs</Text>
                 <Text size="sm" c="dimmed">
                   Ingest and search workspace knowledge.
                 </Text>
-                <Button component={Link} to={`/workspaces/${wid}/docs`} variant="light">
-                  Open Docs
-                </Button>
+                <Group>
+                  <Button component={Link} to={`/workspaces/${wid}/docs`} variant="light" size="sm">
+                    Open Docs
+                  </Button>
+                </Group>
               </Stack>
             </GlassCard>
 
             <GlassCard p="md">
-              <Stack gap={6}>
+              <Stack gap={8}>
                 <Text fw={700}>Schedules</Text>
                 <Text size="sm" c="dimmed">
                   Automate runs on intervals.
                 </Text>
-                <Button component={Link} to={`/workspaces/${wid}/schedules`} variant="light">
-                  Open Schedules
-                </Button>
+                <Group>
+                  <Button component={Link} to={`/workspaces/${wid}/schedules`} variant="light" size="sm">
+                    Open Schedules
+                  </Button>
+                </Group>
               </Stack>
             </GlassCard>
 
             <GlassCard p="md">
-              <Stack gap={6}>
+              <Stack gap={8}>
                 <Text fw={700}>Pipelines</Text>
                 <Text size="sm" c="dimmed">
                   Execute multi-step workflows.
                 </Text>
-                <Button component={Link} to={`/workspaces/${wid}/pipelines`} variant="light">
-                  Open Pipelines
-                </Button>
+                <Group>
+                  <Button component={Link} to={`/workspaces/${wid}/pipelines`} variant="light" size="sm">
+                    Open Pipelines
+                  </Button>
+                </Group>
               </Stack>
             </GlassCard>
 
             <GlassCard p="md">
-              <Stack gap={6}>
+              <Stack gap={8}>
                 <Text fw={700}>Agent Builder</Text>
                 <Text size="sm" c="dimmed">
                   Create and publish agent versions.
                 </Text>
-                <Button component={Link} to={`/workspaces/${wid}/agent-builder`} variant="light">
-                  Open Agent Builder
-                </Button>
+                <Group>
+                  <Button component={Link} to={`/workspaces/${wid}/agent-builder`} variant="light" size="sm">
+                    Open Agent Builder
+                  </Button>
+                </Group>
               </Stack>
             </GlassCard>
           </SimpleGrid>
-        </GlassCard>
+        </GlassSection>
 
-        <GlassCard>
-          <Group justify="space-between" align="center">
-            <Text fw={700}>Recent runs</Text>
-            {typeof counts.recentRuns === "number" ? (
-              <Text size="sm" c="dimmed">
-                total: {counts.recentRuns}
-              </Text>
-            ) : null}
-          </Group>
+        <GlassSection
+          title="Workspace settings"
+          description="Policy and governance controls for this workspace."
+          right={
+            <Group gap="sm" wrap="wrap">
+              <GlassStat label="Access" value={isAdmin ? "Admin" : "Read-only"} />
+            </Group>
+          }
+        >
+          <SimpleGrid cols={{ base: 1, sm: 2, md: 3 }} spacing="md">
+            <GlassCard p="md">
+              <Stack gap={8}>
+                <Text fw={700}>Policy Center</Text>
+                <Text size="sm" c="dimmed">
+                  Internal-only, allowlists, retention.
+                </Text>
+                <Group>
+                  <Button component={Link} to={`/workspaces/${wid}/policy`} variant="light" size="sm">
+                    Open Policy Center
+                  </Button>
+                </Group>
+              </Stack>
+            </GlassCard>
 
-          <Divider my="md" />
+            <GlassCard p="md">
+              <Stack gap={8}>
+                <Text fw={700}>Audit log</Text>
+                <Text size="sm" c="dimmed">
+                  Governance events (policy + RBAC).
+                </Text>
+                <Group>
+                  <Button component={Link} to={`/workspaces/${wid}/governance`} variant="light" size="sm">
+                    Open Governance
+                  </Button>
+                </Group>
+              </Stack>
+            </GlassCard>
 
+            <GlassCard p="md">
+              <Stack gap={8}>
+                <Text fw={700}>Member management</Text>
+                <Text size="sm" c="dimmed">
+                  Roles and access (legacy page).
+                </Text>
+                <Group>
+                  <Button component={Link} to={`/workspaces/${wid}/_legacy`} variant="light" size="sm">
+                    Open Members
+                  </Button>
+                </Group>
+              </Stack>
+            </GlassCard>
+          </SimpleGrid>
+
+          {!isMemberPlus ? (
+            <Text size="sm" c="dimmed" mt="sm">
+              Some actions may be limited by your role.
+            </Text>
+          ) : null}
+        </GlassSection>
+
+        <GlassSection
+          title="Recent runs"
+          description="Latest activity in this workspace."
+          right={
+            typeof counts.recentRuns === "number" ? <GlassStat label="Total" value={counts.recentRuns} /> : undefined
+          }
+        >
           {runs.length === 0 ? (
             <Text c="dimmed">No runs yet.</Text>
           ) : (
@@ -227,22 +296,24 @@ export default function WorkspaceOverviewPage() {
               {runs.map((r) => (
                 <GlassCard key={r.id} p="md">
                   <Group justify="space-between" align="flex-start">
-                    <Stack gap={4}>
+                    <Stack gap={6}>
                       <Group gap="sm">
                         <Badge variant="light">{r.status}</Badge>
                         <Text fw={600}>{r.agent_id}</Text>
                       </Group>
+
                       {r.output_summary ? (
                         <Text size="sm" c="dimmed">
                           {r.output_summary}
                         </Text>
                       ) : null}
+
                       <Text size="xs" c="dimmed">
                         {r.id}
                       </Text>
                     </Stack>
 
-                    <Button component={Link} to={`/runs/${r.id}`} variant="light">
+                    <Button component={Link} to={`/runs/${r.id}`} variant="light" size="sm">
                       Open
                     </Button>
                   </Group>
@@ -250,13 +321,7 @@ export default function WorkspaceOverviewPage() {
               ))}
             </Stack>
           )}
-
-          {!isMemberPlus ? (
-            <Text size="sm" c="dimmed" mt="sm">
-              Some actions may be limited by your role.
-            </Text>
-          ) : null}
-        </GlassCard>
+        </GlassSection>
       </Stack>
     </GlassPage>
   );
