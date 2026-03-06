@@ -1,8 +1,11 @@
+// apps/web/src/pages/WorkspacesPage.tsx
 import { useEffect, useState } from "react";
-import { Button, Card, Group, Stack, Text, TextInput, Title, Badge } from "@mantine/core";
+import { Button, Group, Stack, Text, TextInput } from "@mantine/core";
+import { Link } from "react-router-dom";
 import { apiFetch } from "../apiClient";
 import type { Workspace } from "../types";
-import { Link } from "react-router-dom";
+import GlassCard from "../components/Glass/GlassCard";
+import GlassPage from "../components/Glass/GlassPage";
 
 export default function WorkspacesPage() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -24,10 +27,12 @@ export default function WorkspacesPage() {
   async function createWorkspace() {
     setLoading(true);
     setErr(null);
+
     const res = await apiFetch<Workspace>("/workspaces", {
       method: "POST",
       body: JSON.stringify({ name }),
     });
+
     setLoading(false);
 
     if (!res.ok) {
@@ -40,32 +45,27 @@ export default function WorkspacesPage() {
   }
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, []);
 
   return (
-    <Stack gap="md">
-      <Group justify="space-between" align="flex-start">
-        <Stack gap={2}>
-          <Title order={2}>Workspaces</Title>
-          <Text size="sm" c="dimmed">
-            Pick a workspace to run agents, review approvals, and manage policy.
-          </Text>
-        </Stack>
-        <Button variant="light" onClick={load}>
-          Refresh
-        </Button>
-      </Group>
-
-      <Card withBorder>
+    <GlassPage
+      title="Workspaces"
+      subtitle="Pick a workspace to run agents, review approvals, and manage policy."
+      right={
+        <Group>
+          <Button variant="light" onClick={load}>
+            Refresh
+          </Button>
+          <Button component={Link} to="/me" variant="default">
+            Account
+          </Button>
+        </Group>
+      }
+    >
+      <GlassCard>
         <Stack gap="sm">
-          <Group justify="space-between">
-            <Group gap="sm">
-              <Text fw={700}>Create workspace</Text>
-              <Badge variant="light">V0</Badge>
-            </Group>
-          </Group>
+          <Text fw={700}>Create workspace</Text>
 
           <Group align="end">
             <TextInput
@@ -80,20 +80,22 @@ export default function WorkspacesPage() {
             </Button>
           </Group>
 
-          {err && <Text c="red">{err}</Text>}
+          {err ? <Text c="red">{err}</Text> : null}
         </Stack>
-      </Card>
+      </GlassCard>
 
-      <Card withBorder>
+      <GlassCard>
         <Stack gap="sm">
-          <Text fw={700}>Your workspaces</Text>
+          <Group justify="space-between">
+            <Text fw={700}>Your workspaces</Text>
+          </Group>
 
           {workspaces.length === 0 ? (
             <Text c="dimmed">No workspaces yet.</Text>
           ) : (
             <Stack gap="xs">
               {workspaces.map((w) => (
-                <Card key={w.id} withBorder>
+                <GlassCard key={w.id} p="md">
                   <Group justify="space-between" align="flex-start">
                     <Stack gap={2}>
                       <Text fw={600}>{w.name}</Text>
@@ -114,12 +116,12 @@ export default function WorkspacesPage() {
                       </Button>
                     </Group>
                   </Group>
-                </Card>
+                </GlassCard>
               ))}
             </Stack>
           )}
         </Stack>
-      </Card>
-    </Stack>
+      </GlassCard>
+    </GlassPage>
   );
 }

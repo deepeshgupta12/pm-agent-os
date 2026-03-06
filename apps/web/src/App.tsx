@@ -1,6 +1,9 @@
 // apps/web/src/App.tsx
-import { AppShell, Group, Anchor, Text } from "@mantine/core";
-import { Link, Route, Routes, useLocation } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
+
+import AppFrame from "./layout/AppFrame";
+
+// Pages
 import WorkspacesPage from "./pages/WorkspacesPage";
 import WorkspaceDetailPage from "./pages/WorkspaceDetailPage";
 import WorkspaceOverviewPage from "./pages/WorkspaceOverviewPage";
@@ -19,87 +22,43 @@ import GovernancePage from "./pages/GovernancePage";
 import AgentBuilderPage from "./pages/AgentBuilderPage";
 import PolicyCenterPage from "./pages/PolicyCenterPage";
 
-function TopNav() {
-  const loc = useLocation();
-  return (
-    <Group justify="space-between" px="md" py="sm">
-      <Group gap="md">
-        <Text fw={700}>PM Agent OS</Text>
-        <Anchor component={Link} to="/workspaces">
-          Workspaces
-        </Anchor>
-      </Group>
-
-      <Group gap="md">
-        <Anchor component={Link} to="/register">
-          Register
-        </Anchor>
-        <Anchor component={Link} to="/login">
-          Login
-        </Anchor>
-        <Anchor component={Link} to="/me">
-          Me
-        </Anchor>
-
-        <Text size="xs" c="dimmed">
-          {loc.pathname}
-        </Text>
-      </Group>
-    </Group>
-  );
-}
-
 export default function App() {
   return (
-    <AppShell header={{ height: 56 }} padding="md">
-      <AppShell.Header>
-        <TopNav />
-      </AppShell.Header>
+    <Routes>
+      {/* Auth (no shell) */}
+      <Route path="/register" element={<Register />} />
+      <Route path="/login" element={<Login />} />
+      <Route path="/me" element={<Me />} />
 
-      <AppShell.Main>
-        <Routes>
-          <Route path="/" element={<WorkspacesPage />} />
+      {/* App shell */}
+      <Route element={<AppFrame />}>
+        <Route path="/" element={<Navigate to="/workspaces" replace />} />
 
-          {/* Auth */}
-          <Route path="/register" element={<Register />} />
-          <Route path="/login" element={<Login />} />
-          <Route path="/me" element={<Me />} />
+        <Route path="/workspaces" element={<WorkspacesPage />} />
 
-          {/* Platform */}
-          <Route path="/workspaces" element={<WorkspacesPage />} />
+        {/* Commit 11: workspace overview is default landing */}
+        <Route path="/workspaces/:workspaceId" element={<WorkspaceOverviewPage />} />
 
-          {/* Commit 11: workspace overview is the default landing */}
-          <Route path="/workspaces/:workspaceId" element={<WorkspaceOverviewPage />} />
+        {/* Keep old page reachable */}
+        <Route path="/workspaces/:workspaceId/_legacy" element={<WorkspaceDetailPage />} />
 
-          {/* Keep old page reachable if needed (not linked) */}
-          <Route path="/workspaces/:workspaceId/_legacy" element={<WorkspaceDetailPage />} />
+        <Route path="/workspaces/:workspaceId/actions" element={<ActionCenterPage />} />
+        <Route path="/workspaces/:workspaceId/schedules" element={<SchedulesPage />} />
+        <Route path="/workspaces/:workspaceId/policy" element={<PolicyCenterPage />} />
+        <Route path="/workspaces/:workspaceId/governance" element={<GovernancePage />} />
+        <Route path="/workspaces/:workspaceId/agent-builder" element={<AgentBuilderPage />} />
 
-          <Route path="/workspaces/:workspaceId/actions" element={<ActionCenterPage />} />
-          <Route path="/workspaces/:workspaceId/schedules" element={<SchedulesPage />} />
-          <Route path="/workspaces/:workspaceId/policy" element={<PolicyCenterPage />} />
+        <Route path="/run-builder/:workspaceId" element={<RunBuilderPage />} />
+        <Route path="/workspaces/:workspaceId/docs" element={<DocsPage />} />
 
-          {/* Governance + Agent Builder */}
-          <Route path="/workspaces/:workspaceId/governance" element={<GovernancePage />} />
-          <Route path="/workspaces/:workspaceId/agent-builder" element={<AgentBuilderPage />} />
+        <Route path="/workspaces/:workspaceId/pipelines" element={<PipelinesPage />} />
+        <Route path="/pipelines/runs/:pipelineRunId" element={<PipelineRunDetailPage />} />
 
-          {/* Run Builder */}
-          <Route path="/run-builder/:workspaceId" element={<RunBuilderPage />} />
+        <Route path="/runs/:runId" element={<RunDetailPage />} />
+        <Route path="/artifacts/:artifactId" element={<ArtifactDetailPage />} />
 
-          {/* Docs */}
-          <Route path="/workspaces/:workspaceId/docs" element={<DocsPage />} />
-
-          {/* Pipelines */}
-          <Route path="/workspaces/:workspaceId/pipelines" element={<PipelinesPage />} />
-          <Route path="/pipelines/runs/:pipelineRunId" element={<PipelineRunDetailPage />} />
-
-          {/* Runs/Artifacts */}
-          <Route path="/runs/:runId" element={<RunDetailPage />} />
-          <Route path="/artifacts/:artifactId" element={<ArtifactDetailPage />} />
-
-          {/* fallback */}
-          <Route path="*" element={<WorkspacesPage />} />
-        </Routes>
-      </AppShell.Main>
-    </AppShell>
+        <Route path="*" element={<Navigate to="/workspaces" replace />} />
+      </Route>
+    </Routes>
   );
 }

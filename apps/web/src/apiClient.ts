@@ -1,11 +1,13 @@
+// apps/web/src/apiClient.ts
 const API_BASE = import.meta.env.VITE_API_BASE_URL as string;
 
 let refreshInFlight: Promise<boolean> | null = null;
 
 function redirectToLogin() {
-  const path = window.location.pathname;
-  if (!path.startsWith("/login") && !path.startsWith("/register")) {
-    window.location.href = "/login";
+  const path = window.location.pathname + window.location.search;
+  if (!window.location.pathname.startsWith("/login") && !window.location.pathname.startsWith("/register")) {
+    const next = encodeURIComponent(path);
+    window.location.href = `/login?next=${next}`;
   }
 }
 
@@ -39,12 +41,10 @@ async function parseErrorResponse(r: Response): Promise<string> {
   try {
     const contentType = r.headers.get("content-type") || "";
 
-    // FastAPI typically returns {"detail": "..."}
     if (contentType.includes("application/json")) {
       const j: any = await r.json();
       if (j && typeof j === "object") {
         if (typeof j.detail === "string") return j.detail;
-        // sometimes detail can be list/dict
         if (j.detail != null) return JSON.stringify(j.detail);
         return JSON.stringify(j);
       }
@@ -75,7 +75,6 @@ export async function apiFetch<T>(
   try {
     let r = await doFetch();
 
-    // If unauthorized, attempt refresh once then retry request once
     if (r.status === 401) {
       const refreshed = await refreshOnce();
       if (refreshed) {

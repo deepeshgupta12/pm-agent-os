@@ -1,7 +1,9 @@
 // apps/web/src/pages/Register.tsx
 import { useState } from "react";
-import { Card, Stack, Text, TextInput, Button, Title } from "@mantine/core";
+import { Button, Group, PasswordInput, Text, TextInput } from "@mantine/core";
 import { apiFetch } from "../apiClient";
+import GlassCard from "../components/Glass/GlassCard";
+import GlassPage from "../components/Glass/GlassPage";
 
 type UserOut = { id: string; email: string };
 
@@ -24,36 +26,57 @@ export default function Register() {
       return;
     }
 
-    setMsg(`Registered: ${res.data.email}. Now login.`);
+    setMsg(`Registered: ${res.data.email}. Now sign in.`);
   }
 
   return (
-    <div style={{ maxWidth: 520, margin: "24px auto" }}>
-      <Title order={2}>Register</Title>
-      <Card withBorder mt="md">
-        <form onSubmit={onRegister}>
-          <Stack gap="sm">
-            <TextInput
-              label="Email"
-              value={email}
-              onChange={(e) => setEmail(e.currentTarget.value)}
-              type="email"
-              required
-            />
-            <TextInput
-              label="Password (8–72 chars)"
-              value={password}
-              onChange={(e) => setPassword(e.currentTarget.value)}
-              type="password"
-              required
-              minLength={8}
-              maxLength={72}
-            />
-            <Button type="submit">Register</Button>
-            {msg ? <Text>{msg}</Text> : null}
-          </Stack>
-        </form>
-      </Card>
-    </div>
+    <GlassPage
+      title="Create account"
+      subtitle="Set up your account to access PM Agent OS."
+      right={
+        <Group>
+          <Button variant="light" component="a" href="/login">
+            Sign in
+          </Button>
+          <Button variant="light" component="a" href="/workspaces">
+            Workspaces
+          </Button>
+        </Group>
+      }
+    >
+      <div style={{ maxWidth: 560 }}>
+        <GlassCard>
+          <form onSubmit={onRegister}>
+            <Group grow>
+              <TextInput
+                label="Email"
+                value={email}
+                onChange={(e) => setEmail(e.currentTarget.value)}
+                type="email"
+                required
+              />
+              <PasswordInput
+                label="Password (8–72 chars)"
+                value={password}
+                onChange={(e) => setPassword(e.currentTarget.value)}
+                required
+                minLength={8}
+                maxLength={72}
+              />
+            </Group>
+
+            <Group mt="md">
+              <Button type="submit">Create account</Button>
+            </Group>
+
+            {msg ? (
+              <Text mt="sm" c={msg.startsWith("Register failed") ? "red" : undefined}>
+                {msg}
+              </Text>
+            ) : null}
+          </form>
+        </GlassCard>
+      </div>
+    </GlassPage>
   );
 }
