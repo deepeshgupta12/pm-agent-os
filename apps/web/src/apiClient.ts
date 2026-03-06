@@ -35,6 +35,29 @@ async function refreshOnce(): Promise<boolean> {
   return refreshInFlight;
 }
 
+async function parseErrorResponse(r: Response): Promise<string> {
+  try {
+    const contentType = r.headers.get("content-type") || "";
+
+    // FastAPI typically returns {"detail": "..."}
+    if (contentType.includes("application/json")) {
+      const j: any = await r.json();
+      if (j && typeof j === "object") {
+        if (typeof j.detail === "string") return j.detail;
+        // sometimes detail can be list/dict
+        if (j.detail != null) return JSON.stringify(j.detail);
+        return JSON.stringify(j);
+      }
+    }
+
+    const text = await r.text();
+    if (text && text.trim()) return text.trim();
+  } catch {
+    // ignore
+  }
+  return `HTTP ${r.status}`;
+}
+
 export async function apiFetch<T>(
   path: string,
   opts?: RequestInit
@@ -62,8 +85,8 @@ export async function apiFetch<T>(
 
     if (!r.ok) {
       if (r.status === 401) redirectToLogin();
-      const text = await r.text();
-      return { ok: false, error: text || `HTTP ${r.status}`, status: r.status };
+      const msg = await parseErrorResponse(r);
+      return { ok: false, error: msg, status: r.status };
     }
 
     const contentType = r.headers.get("content-type") || "";

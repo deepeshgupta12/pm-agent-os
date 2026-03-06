@@ -16,6 +16,7 @@ import ActionCenterPage from "./pages/ActionCenterPage";
 import SchedulesPage from "./pages/SchedulesPage";
 import GovernancePage from "./pages/GovernancePage";
 import AgentBuilderPage from "./pages/AgentBuilderPage";
+import PolicyCenterPage from "./pages/PolicyCenterPage";
 
 function TopNav() {
   const loc = useLocation();
@@ -65,6 +66,7 @@ export default function App() {
           <Route path="/workspaces/:workspaceId" element={<WorkspaceDetailPage />} />
           <Route path="/workspaces/:workspaceId/actions" element={<ActionCenterPage />} />
           <Route path="/workspaces/:workspaceId/schedules" element={<SchedulesPage />} />
+          <Route path="/workspaces/:workspaceId/policy" element={<PolicyCenterPage />} />
 
           {/* New: Governance + Agent Builder */}
           <Route path="/workspaces/:workspaceId/governance" element={<GovernancePage />} />

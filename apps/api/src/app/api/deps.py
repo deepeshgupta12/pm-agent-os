@@ -20,7 +20,7 @@ def require_user(request: Request, db: Session = Depends(get_db)) -> User:
 
 def get_workspace_role(db: Session, ws: Workspace, user: User) -> str | None:
     # Owner is always admin
-    if ws.owner_user_id == user.id:
+    if str(ws.owner_user_id) == str(user.id):
         return "admin"
 
     role = db.execute(
@@ -30,7 +30,11 @@ def get_workspace_role(db: Session, ws: Workspace, user: User) -> str | None:
         )
     ).scalar_one_or_none()
 
-    return str(role) if role else None
+    if not role:
+        return None
+
+    r = str(role).strip().lower()
+    return r or "viewer"
 
 
 def require_workspace_access(workspace_id: str, db: Session, user: User) -> tuple[Workspace, str]:

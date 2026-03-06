@@ -23,10 +23,17 @@ from app.core.governance import (
     policy_allowed_source_types,
     audit_policy_check,
     audit_rbac_check,
+    policy_internal_only,
+    audit_internal_only_check,
+    rbac_assert,
+    rbac_allowed_connectors_read_roles,
+    rbac_allowed_connectors_create_roles,
+    rbac_allowed_connectors_update_roles,
+    rbac_allowed_connectors_trigger_sync_roles,
 )
 from app.db.session import get_db
 from app.db.models import Connector, IngestionJob, User, Workspace
-from app.db.retrieval_models import Document, Source, Chunk, Embedding
+from app.db.retrieval_models import Document, Source
 from app.schemas.connectors import (
     ConnectorCreateIn,
     ConnectorUpdateIn,
@@ -133,6 +140,38 @@ def _enforce_rbac(
     raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
 
+def _enforce_internal_only(
+    db: Session,
+    ws: Workspace,
+    user: User,
+    *,
+    action: str,
+) -> None:
+    """
+    V1 Policy Center:
+    - If workspace.policy.internal_only == True, block connector operations
+    - Always audit allow/deny
+    """
+    if policy_internal_only(ws):
+        audit_internal_only_check(
+            db,
+            ws=ws,
+            user=user,
+            action=action,
+            decision="deny",
+            reason="Workspace is internal-only; connectors are disabled.",
+        )
+        raise HTTPException(status_code=403, detail="Workspace is internal-only; connectors are disabled.")
+    audit_internal_only_check(
+        db,
+        ws=ws,
+        user=user,
+        action=action,
+        decision="allow",
+        reason="ok",
+    )
+
+
 def _iso(dt: Optional[datetime]) -> Optional[str]:
     if not dt:
         return None
@@ -218,6 +257,16 @@ def list_connectors(
     user: User = Depends(require_user),
 ):
     ws, _role = require_workspace_access(workspace_id, db, user)  # viewer+ can read
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.connectors.read",
+            allowed_roles=rbac_allowed_connectors_read_roles(ws),
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
     items = (
         db.execute(select(Connector).where(Connector.workspace_id == ws.id).order_by(Connector.created_at.desc()))
         .scalars()
@@ -235,11 +284,19 @@ def create_connector(
 ):
     ws, _role = require_workspace_role_min(workspace_id, "admin", db, user)  # admin config
 
-    # Step 0.4 RBAC enforcement + audit
-    allowed_roles = (ws.rbac_json or {}).get("connectors", {}).get("can_create_connector_roles", ["admin"])
-    if not isinstance(allowed_roles, list) or not allowed_roles:
-        allowed_roles = ["admin"]
-    _enforce_rbac(db, ws, user, allowed_roles=[str(x) for x in allowed_roles], action="rbac.connectors.create")
+    # V1 Policy: internal-only blocks connectors
+    _enforce_internal_only(db, ws, user, action="policy.internal_only.connectors.create")
+
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.connectors.read",
+            allowed_roles=rbac_allowed_connectors_read_roles(ws),
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
     ctype = payload.type.strip().lower()
     name = payload.name.strip()
@@ -293,6 +350,19 @@ def update_connector(
         raise HTTPException(status_code=404, detail="Connector not found")
 
     ws, _role = require_workspace_role_min(str(c.workspace_id), "admin", db, user)
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.connectors.update",
+            allowed_roles=rbac_allowed_connectors_update_roles(ws),
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
+
+    # V1 Policy: internal-only blocks connectors
+    _enforce_internal_only(db, ws, user, action="policy.internal_only.connectors.update")
 
     # Step 0.4 Policy audit: ensure the connector's type itself is allowed if allowlist exists.
     _enforce_policy_sources(db, ws, user, [str(c.type or "").strip().lower()], "policy.allowlist.connectors.update")
@@ -326,6 +396,7 @@ def trigger_sync(
     member+ can trigger; admin configures.
 
     Step 0.4: RBAC + policy enforcement + audit logging.
+    V1: internal-only blocks connector operations.
     """
     try:
         cid = uuid.UUID(connector_id)
@@ -341,6 +412,25 @@ def trigger_sync(
         raise HTTPException(status_code=404, detail="Workspace not found")
 
     require_workspace_role_min(str(ws.id), "member", db, user)
+
+    allowed = rbac_allowed_connectors_trigger_sync_roles(
+    ws,
+    connector_type=str(c.type or "").strip().lower(),
+    connector_id=str(c.id),
+    )
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.connectors.trigger_sync",
+            allowed_roles=allowed,
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
+
+    # V1 Policy: internal-only blocks connectors
+    _enforce_internal_only(db, ws, user, action="policy.internal_only.connectors.trigger_sync")
 
     # Step 0.4 RBAC enforcement + audit
     allowed_roles = (ws.rbac_json or {}).get("connectors", {}).get("can_trigger_sync_roles", ["admin", "member"])
@@ -392,7 +482,7 @@ def list_ingestion_jobs(
 
 
 # -------------------------
-# V1 Docs ingestion job (already working) + V2.5 embed_after default
+# V1 Docs ingestion job + V2.5 embed_after default
 # -------------------------
 @router.post(
     "/workspaces/{workspace_id}/connectors/{connector_id}/ingestion-jobs/docs",
@@ -407,8 +497,27 @@ def create_docs_ingestion_job(
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
+    # V1 Policy: internal-only blocks connectors/ingestion
+    _enforce_internal_only(db, ws, user, action="policy.internal_only.ingestion.docs")
+
     # Policy enforcement + audit
     _enforce_policy_sources(db, ws, user, ["docs"], "policy.allowlist.connectors.ingestion_jobs.docs")
+
+    allowed = rbac_allowed_connectors_trigger_sync_roles(
+        ws,
+        connector_type="<docs>",
+        connector_id=str(c.id),
+    )
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.connectors.ingestion",
+            allowed_roles=allowed,
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
     try:
         cid = uuid.UUID(connector_id)
@@ -525,8 +634,27 @@ def create_github_ingestion_job(
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
+    # V1 Policy: internal-only blocks connectors/ingestion
+    _enforce_internal_only(db, ws, user, action="policy.internal_only.ingestion.github")
+
     # Policy enforcement + audit
     _enforce_policy_sources(db, ws, user, ["github"], "policy.allowlist.connectors.ingestion_jobs.github")
+
+    allowed = rbac_allowed_connectors_trigger_sync_roles(
+        ws,
+        connector_type="<github>",
+        connector_id=str(c.id),
+    )
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.connectors.ingestion",
+            allowed_roles=allowed,
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
     try:
         cid = uuid.UUID(connector_id)
@@ -828,8 +956,27 @@ def create_google_docs_ingestion_job(
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
+    # V1 Policy: internal-only blocks connectors/ingestion
+    _enforce_internal_only(db, ws, user, action="policy.internal_only.ingestion.gdocs")
+
     # Policy enforcement + audit
     _enforce_policy_sources(db, ws, user, ["docs"], "policy.allowlist.connectors.ingestion_jobs.gdocs")
+
+    allowed = rbac_allowed_connectors_trigger_sync_roles(
+        ws,
+        connector_type="<docs>",
+        connector_id=str(c.id),
+    )
+    try:
+        rbac_assert(
+            db,
+            ws=ws,
+            user=user,
+            action="rbac.connectors.ingestion",
+            allowed_roles=allowed,
+        )
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
     try:
         cid = uuid.UUID(connector_id)
@@ -1035,8 +1182,17 @@ def embeddings_run_once(
     """
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
+    # V1 Policy: internal-only blocks connector-like retrieval/embedding operations
+    _enforce_internal_only(db, ws, user, action="policy.internal_only.embeddings.run_once")
+
     if source_type:
-        _enforce_policy_sources(db, ws, user, [source_type.strip().lower()], "policy.allowlist.connectors.embeddings.run_once")
+        _enforce_policy_sources(
+            db,
+            ws,
+            user,
+            [source_type.strip().lower()],
+            "policy.allowlist.connectors.embeddings.run_once",
+        )
 
     lim = int(limit_docs)
     max_chunks = int(max_total_chunks)
@@ -1067,10 +1223,10 @@ def embeddings_run_once(
                 FROM chunks c
                 WHERE c.document_id = :doc_id
                 AND NOT EXISTS (
-                    SELECT 1
-                    FROM embeddings e
-                    WHERE e.chunk_id = c.id
-                    AND e.model = :model
+                  SELECT 1
+                  FROM embeddings e
+                  WHERE e.chunk_id = c.id
+                  AND e.model = :model
                 )
                 """
             ),

@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from typing import Any, Dict
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, delete
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
 from app.db.session import get_db
-from app.db.models import Workspace, WorkspaceMember, User
+from app.db.models import (
+    Workspace,
+    WorkspaceMember,
+    User,
+    Evidence,
+    RunLog,
+)
 from app.schemas.core import WorkspaceCreateIn, WorkspaceOut
 from app.schemas.workspaces import WorkspaceMemberInviteIn, WorkspaceMemberOut, WorkspaceRoleOut
 from app.schemas.workspaces import TemplateAdminOut, TemplateAdminUpdateIn
@@ -16,8 +25,9 @@ from app.schemas.workspaces import (
     WorkspacePolicyUpdateIn,
     WorkspaceRBACOut,
     WorkspaceRBACUpdateIn,
+    WorkspacePolicyPurgeOut,
 )
-from app.core.governance import safe_audit
+from app.core.governance import safe_audit, normalize_policy_json, retention_cutoff_ts
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -250,7 +260,9 @@ def update_policy(
     ws, _role = require_workspace_role_min(workspace_id, "admin", db, user)
 
     before = ws.policy_json or {}
-    after = payload.policy_json or {}
+    after_in = payload.policy_json or {}
+
+    after = normalize_policy_json(after_in)
 
     ws.policy_json = after
     db.add(ws)
@@ -268,6 +280,93 @@ def update_policy(
     )
 
     return WorkspacePolicyOut(workspace_id=str(ws.id), policy_json=ws.policy_json or {})
+
+
+@router.post("/{workspace_id}/policy/purge", response_model=WorkspacePolicyPurgeOut)
+def purge_by_retention_policy(
+    workspace_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    """
+    Policy Center v1:
+    Manual purge endpoint driven by policy.retrieval.retention_days.
+
+    Deletes:
+    - evidence.created_at older than cutoff
+    - run_logs.created_at older than cutoff
+
+    (Artifacts are NOT deleted in v1.)
+    """
+    ws, _role = require_workspace_role_min(workspace_id, "admin", db, user)
+
+    cutoff = retention_cutoff_ts(ws)
+    if cutoff is None:
+        raise HTTPException(status_code=400, detail="retention_days is not set in policy; nothing to purge")
+
+    # count + delete evidence by workspace via run join
+    # NOTE: Evidence has run_id; Run has workspace_id, but we avoid importing Run model here to keep file small.
+    # We'll delete via subquery in SQLAlchemy ORM by selecting run_ids.
+    # Minimal approach: fetch run ids then delete.
+    run_ids = db.execute(
+        select(Evidence.run_id)
+        .distinct()
+    ).scalars().all()
+
+    # Safer: delete by created_at first, then rely on FK cascade? Evidence is keyed by run_id not workspace.
+    # We'll do explicit deletes filtered by run.workspace_id in raw SQL style using session.execute(text).
+    # However, to keep dependencies minimal, we delete by created_at only AND rely on per-workspace DB separation? Not true.
+    # So we must scope properly.
+    # We will scope by checking each evidence's run->workspace via EXISTS using ORM select on Run table.
+    from app.db.models import Run  # local import to avoid circulars
+
+    ev_q = (
+        select(Evidence.id)
+        .join(Run, Run.id == Evidence.run_id)
+        .where(Run.workspace_id == ws.id)
+        .where(Evidence.created_at < cutoff)
+    )
+    ev_ids = db.execute(ev_q).scalars().all()
+    deleted_evidence = 0
+    if ev_ids:
+        db.execute(delete(Evidence).where(Evidence.id.in_(ev_ids)))
+        db.commit()
+        deleted_evidence = len(ev_ids)
+
+    log_q = (
+        select(RunLog.id)
+        .join(Run, Run.id == RunLog.run_id)
+        .where(Run.workspace_id == ws.id)
+        .where(RunLog.created_at < cutoff)
+    )
+    log_ids = db.execute(log_q).scalars().all()
+    deleted_logs = 0
+    if log_ids:
+        db.execute(delete(RunLog).where(RunLog.id.in_(log_ids)))
+        db.commit()
+        deleted_logs = len(log_ids)
+
+    safe_audit(
+        db,
+        ws=ws,
+        user=user,
+        action="policy.retention.purge",
+        decision="allow",
+        reason="Retention purge executed",
+        meta={
+            "cutoff": cutoff.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "deleted_evidence": deleted_evidence,
+            "deleted_logs": deleted_logs,
+        },
+    )
+
+    return WorkspacePolicyPurgeOut(
+        ok=True,
+        workspace_id=str(ws.id),
+        cutoff=cutoff.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        deleted_evidence=deleted_evidence,
+        deleted_logs=deleted_logs,
+    )
 
 
 @router.get("/{workspace_id}/rbac", response_model=WorkspaceRBACOut)

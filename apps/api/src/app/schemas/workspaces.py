@@ -48,3 +48,14 @@ class WorkspaceRBACOut(BaseModel):
 
 class WorkspaceRBACUpdateIn(BaseModel):
     rbac_json: Dict[str, Any] = Field(default_factory=dict)
+
+
+# -------------------------
+# Policy Center v1: Retention Purge
+# -------------------------
+class WorkspacePolicyPurgeOut(BaseModel):
+    ok: bool = True
+    workspace_id: str
+    cutoff: str  # RFC3339 string (UTC)
+    deleted_evidence: int = 0
+    deleted_logs: int = 0
