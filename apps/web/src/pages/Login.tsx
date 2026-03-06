@@ -1,6 +1,6 @@
 // apps/web/src/pages/Login.tsx
 import { useMemo, useState } from "react";
-import { Button, Group, PasswordInput, Text, TextInput } from "@mantine/core";
+import { Badge, Button, Divider, Group, List, PasswordInput, Text, TextInput } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import GlassCard from "../components/Glass/GlassCard";
 import GlassPage from "../components/Glass/GlassPage";
@@ -31,7 +31,6 @@ export default function Login() {
       return;
     }
 
-    setMsg(`Logged in as ${res.data.email}`);
     window.location.href = next;
   }
 
@@ -50,38 +49,70 @@ export default function Login() {
         </Group>
       }
     >
-      <div style={{ maxWidth: 560 }}>
-        <GlassCard>
-          <form onSubmit={onLogin}>
-            <Group grow>
-              <TextInput
-                label="Email"
-                value={email}
-                onChange={(e) => setEmail(e.currentTarget.value)}
-                type="email"
-                required
-              />
-              <PasswordInput
-                label="Password"
-                value={password}
-                onChange={(e) => setPassword(e.currentTarget.value)}
-                required
-                minLength={8}
-                maxLength={72}
-              />
+      <div className="auth-wrap">
+        <div className="auth-grid">
+          <GlassCard>
+            <form onSubmit={onLogin}>
+              <Group grow>
+                <TextInput
+                  label="Email"
+                  value={email}
+                  onChange={(e) => setEmail(e.currentTarget.value)}
+                  type="email"
+                  required
+                />
+                <PasswordInput
+                  label="Password"
+                  value={password}
+                  onChange={(e) => setPassword(e.currentTarget.value)}
+                  required
+                  minLength={8}
+                  maxLength={72}
+                />
+              </Group>
+
+              <Group mt="md">
+                <Button type="submit">Sign in</Button>
+              </Group>
+
+              {msg ? (
+                <Text mt="sm" c={msg.startsWith("Login failed") ? "red" : undefined}>
+                  {msg}
+                </Text>
+              ) : (
+                <Text mt="sm" c="dimmed">
+                  Tip: if you hit 401, refresh will auto-run once and retry.
+                </Text>
+              )}
+            </form>
+          </GlassCard>
+
+          <GlassCard>
+            <Group justify="space-between" align="flex-start">
+              <Text fw={700}>What you get</Text>
+              <Badge variant="light">Enterprise</Badge>
             </Group>
 
-            <Group mt="md">
-              <Button type="submit">Sign in</Button>
-            </Group>
+            <Text mt="xs" size="sm" c="dimmed">
+              Calm workspace console for runs, approvals, and governance—designed for teams.
+            </Text>
 
-            {msg ? (
-              <Text mt="sm" c={msg.startsWith("Login failed") ? "red" : undefined}>
-                {msg}
-              </Text>
-            ) : null}
-          </form>
-        </GlassCard>
+            <Divider my="md" />
+
+            <List spacing="xs" size="sm">
+              <List.Item>Workspace-scoped access control (admin / member / viewer)</List.Item>
+              <List.Item>Approval workflows and audit log</List.Item>
+              <List.Item>RAG console with evidence + regeneration loop</List.Item>
+              <List.Item>Policy center for internal-only and allowlists</List.Item>
+            </List>
+
+            <Divider my="md" />
+
+            <Text size="sm" c="dimmed">
+              If your workspace is internal-only, connectors are blocked by policy.
+            </Text>
+          </GlassCard>
+        </div>
       </div>
     </GlassPage>
   );
