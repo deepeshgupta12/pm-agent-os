@@ -3,6 +3,7 @@ import { AppShell, Group, Anchor, Text } from "@mantine/core";
 import { Link, Route, Routes, useLocation } from "react-router-dom";
 import WorkspacesPage from "./pages/WorkspacesPage";
 import WorkspaceDetailPage from "./pages/WorkspaceDetailPage";
+import WorkspaceOverviewPage from "./pages/WorkspaceOverviewPage";
 import RunDetailPage from "./pages/RunDetailPage";
 import ArtifactDetailPage from "./pages/ArtifactDetailPage";
 import PipelinesPage from "./pages/PipelinesPage";
@@ -28,6 +29,7 @@ function TopNav() {
           Workspaces
         </Anchor>
       </Group>
+
       <Group gap="md">
         <Anchor component={Link} to="/register">
           Register
@@ -38,6 +40,7 @@ function TopNav() {
         <Anchor component={Link} to="/me">
           Me
         </Anchor>
+
         <Text size="xs" c="dimmed">
           {loc.pathname}
         </Text>
@@ -52,6 +55,7 @@ export default function App() {
       <AppShell.Header>
         <TopNav />
       </AppShell.Header>
+
       <AppShell.Main>
         <Routes>
           <Route path="/" element={<WorkspacesPage />} />
@@ -63,12 +67,18 @@ export default function App() {
 
           {/* Platform */}
           <Route path="/workspaces" element={<WorkspacesPage />} />
-          <Route path="/workspaces/:workspaceId" element={<WorkspaceDetailPage />} />
+
+          {/* Commit 11: workspace overview is the default landing */}
+          <Route path="/workspaces/:workspaceId" element={<WorkspaceOverviewPage />} />
+
+          {/* Keep old page reachable if needed (not linked) */}
+          <Route path="/workspaces/:workspaceId/_legacy" element={<WorkspaceDetailPage />} />
+
           <Route path="/workspaces/:workspaceId/actions" element={<ActionCenterPage />} />
           <Route path="/workspaces/:workspaceId/schedules" element={<SchedulesPage />} />
           <Route path="/workspaces/:workspaceId/policy" element={<PolicyCenterPage />} />
 
-          {/* New: Governance + Agent Builder */}
+          {/* Governance + Agent Builder */}
           <Route path="/workspaces/:workspaceId/governance" element={<GovernancePage />} />
           <Route path="/workspaces/:workspaceId/agent-builder" element={<AgentBuilderPage />} />
 
