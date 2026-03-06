@@ -22,6 +22,8 @@ _DEFAULT_POLICY: Dict[str, Any] = {
         "allowed_source_types": [],
         # None => do not enforce retention (yet)
         "retention_days": None,
+        # v1 toggle used in UI/policy payloads
+        "block_external_links": False,
     },
     "privacy": {
         "pii_masking": {
@@ -48,15 +50,15 @@ _DEFAULT_RBAC: Dict[str, Any] = {
         "can_update_connector_roles": ["admin"],
         "can_trigger_sync_roles": ["admin", "member"],
         # optional overrides
-        "per_type": {},       # e.g. {"github": {"can_trigger_sync_roles": ["admin"]}}
+        "per_type": {},  # e.g. {"github": {"can_trigger_sync_roles": ["admin"]}}
         "per_connector": {},  # e.g. {"<connector_uuid>": {"can_trigger_sync_roles": ["admin"]}}
     },
     "action_center": {
         # workspace-wide defaults
         "can_list_actions_roles": ["admin", "member", "viewer"],
         "can_create_action_roles": ["admin", "member"],
-        "can_review_action_roles": ["admin"],   # default: only admins review
-        "can_cancel_action_roles": ["admin"],   # default: only admins cancel (you still allow creator cancel in route)
+        "can_review_action_roles": ["admin"],  # default: only admins review
+        "can_cancel_action_roles": ["admin"],  # default: only admins cancel (you still allow creator cancel in route)
         "can_execute_action_roles": ["admin"],  # default: only admins execute side-effects
         # optional overrides by action type
         "per_type": {},  # e.g. {"decision_log_create": {"can_review_action_roles": ["admin","member"]}}
@@ -85,6 +87,7 @@ def load_policy(ws: Workspace) -> Dict[str, Any]:
         raw = {}
     return _deep_merge(_DEFAULT_POLICY, raw)
 
+
 def normalize_policy_json(raw: Any) -> Dict[str, Any]:
     """
     Normalizes incoming policy JSON into a safe, deterministic shape.
@@ -92,18 +95,22 @@ def normalize_policy_json(raw: Any) -> Dict[str, Any]:
 
     Expected v1 shape:
     {
+      "internal_only": <bool>,
       "retrieval": {
         "allowed_source_types": [..],
         "retention_days": <int|null>,
         "block_external_links": <bool>
       },
       "privacy": {
-        "pii_masking": { "enabled": <bool>, "mode": "none" | ... }
+        "pii_masking": { "enabled": <bool>, "mode": "none" | "write_time" | "export_time" | "both" }
       }
     }
     """
     if not isinstance(raw, dict):
         raw = {}
+
+    # IMPORTANT (Commit 10): preserve internal_only toggle
+    internal_only = bool(raw.get("internal_only", False))
 
     retrieval = raw.get("retrieval")
     if not isinstance(retrieval, dict):
@@ -157,8 +164,11 @@ def normalize_policy_json(raw: Any) -> Dict[str, Any]:
     # pii_masking.enabled/mode (keep permissive, but deterministic)
     enabled = bool(pii.get("enabled", False))
     mode = str(pii.get("mode", "none") or "none").strip().lower() or "none"
+    if mode not in {"none", "write_time", "export_time", "both"}:
+        mode = "none"
 
     normalized: Dict[str, Any] = {
+        "internal_only": internal_only,
         "retrieval": {
             "allowed_source_types": allowed_source_types,
             "retention_days": retention_days,
@@ -308,18 +318,12 @@ def policy_pii_masking_config(ws: Workspace) -> Dict[str, Any]:
 
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _PHONE_RE = re.compile(r"\b(?:\+?\d{1,3}[- ]?)?(?:\(?\d{3,5}\)?[- ]?)?\d{6,10}\b")
-# Very light “ID-ish” masking; avoid breaking normal numbers too aggressively.
 _LONG_NUM_RE = re.compile(r"\b\d{9,16}\b")
 
 
 def _mask_pii_basic(text: str) -> str:
-    """
-    Deterministic, best-effort PII masking.
-    V1: email, phone-ish patterns, long numeric tokens.
-    """
     if not text:
         return ""
-
     out = text
     out = _EMAIL_RE.sub("[REDACTED_EMAIL]", out)
     out = _PHONE_RE.sub("[REDACTED_PHONE]", out)
@@ -331,10 +335,10 @@ def policy_apply_pii_masking(ws: Workspace, text: str, *, phase: str) -> str:
     """
     phase: "write" | "export"
     mode mapping:
-      - none        => no masking
-      - write_time  => mask only at write
-      - export_time => mask only at export
-      - both        => mask both
+    - none => no masking
+    - write_time => mask only at write
+    - export_time => mask only at export
+    - both => mask both
     """
     cfg = policy_pii_masking_config(ws)
     if not cfg.get("enabled"):
@@ -345,14 +349,11 @@ def policy_apply_pii_masking(ws: Workspace, text: str, *, phase: str) -> str:
 
     if mode == "none":
         return text or ""
-
     if mode == "write_time" and phase != "write":
         return text or ""
-
     if mode == "export_time" and phase != "export":
         return text or ""
 
-    # both OR matching phase
     return _mask_pii_basic(text or "")
 
 
@@ -390,10 +391,6 @@ def safe_audit(
     reason: str,
     meta: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """
-    Primary helper used across API modules.
-    Never breaks request flow if audit insert fails.
-    """
     ev = _mk_event(ws=ws, user=user, action=action, decision=decision, reason=reason, meta=meta)
     try:
         db.add(ev)
@@ -470,10 +467,6 @@ def _normalize_role(role: Optional[str]) -> Optional[str]:
 
 
 def _get_user_workspace_role(db: Session, ws: Workspace, user: Optional[User]) -> Optional[str]:
-    """
-    Returns one of: admin|member|viewer or None if no access.
-    Owner => admin.
-    """
     if not user:
         return None
 
@@ -497,10 +490,6 @@ def _get_user_workspace_role(db: Session, ws: Workspace, user: Optional[User]) -
 
 
 def _rbac_allowed_roles(ws: Workspace, path: Tuple[str, ...], default: List[str]) -> List[str]:
-    """
-    Read allowed roles from effective RBAC at a given path.
-    Example: ("connectors","can_trigger_sync_roles")
-    """
     eff = load_rbac(ws)
     cur: Any = eff
     for p in path:
@@ -517,7 +506,6 @@ def _rbac_allowed_roles(ws: Workspace, path: Tuple[str, ...], default: List[str]
         if s:
             out.append(s)
 
-    # stable de-dupe
     seen = set()
     uniq: List[str] = []
     for s in out:
@@ -570,10 +558,8 @@ def rbac_allowed_connectors_trigger_sync_roles(
     connector_type: Optional[str] = None,
     connector_id: Optional[str] = None,
 ) -> List[str]:
-    # 1) start with workspace default
     base = _rbac_get_list(ws, ("connectors", "can_trigger_sync_roles"), ["admin", "member"])
 
-    # 2) per_type override
     ctype = (connector_type or "").strip().lower()
     if ctype:
         per_type = _rbac_get_dict(ws, ("connectors", "per_type")) or {}
@@ -581,7 +567,6 @@ def rbac_allowed_connectors_trigger_sync_roles(
         if isinstance(rule, dict) and isinstance(rule.get("can_trigger_sync_roles"), list):
             return _rbac_allowed_roles(ws, ("connectors", "per_type", ctype, "can_trigger_sync_roles"), base)
 
-    # 3) per_connector override
     cid = _normalize_uuid_str(connector_id)
     if cid:
         per_conn = _rbac_get_dict(ws, ("connectors", "per_connector")) or {}
@@ -662,12 +647,6 @@ def rbac_assert(
     action: str,
     allowed_roles: List[str],
 ) -> None:
-    """
-    Single RBAC enforcement helper with auditing.
-    - Resolves role deterministically
-    - Audits allow/deny
-    - Raises ValueError if denied (caller converts to HTTP 403)
-    """
     role = _get_user_workspace_role(db, ws, user)
     ok = _is_role_allowed(role, allowed_roles)
 
@@ -746,10 +725,6 @@ def rbac_allowed_run_roles(ws: Workspace) -> List[str]:
 # Policy enforcement helper for agent definitions
 # -------------------------
 def extract_definition_source_types(definition_json: Dict[str, Any]) -> List[str]:
-    """
-    Canonical extraction: definition_json.retrieval.source_types => list[str]
-    Stable de-dupe + normalization.
-    """
     r = definition_json.get("retrieval") or {}
     if not isinstance(r, dict):
         return []
@@ -781,12 +756,6 @@ def enforce_policy_for_definition(
     definition_json: Dict[str, Any],
     action: str,
 ) -> None:
-    """
-    Single policy enforcement path for agents_v2 save/publish.
-    - Enforces allowlist (if configured)
-    - Audits allow/deny
-    - Raises ValueError when disallowed
-    """
     requested = extract_definition_source_types(definition_json)
     allowlist = policy_allowed_source_types(ws)
     try:

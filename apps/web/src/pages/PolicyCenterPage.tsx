@@ -349,7 +349,7 @@ export default function PolicyCenterPage() {
             <NumberInput
               label="retention_days"
               description="Optional. If set (>0), you can run purge to delete evidence + run logs older than cutoff."
-              value={retentionDays}
+              value={retentionDays ?? undefined}
               onChange={(v) => {
                 const n = typeof v === "number" && Number.isFinite(v) ? v : null;
                 setRetentionDays(n && n > 0 ? Math.floor(n) : null);
