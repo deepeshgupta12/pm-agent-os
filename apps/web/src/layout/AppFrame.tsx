@@ -5,11 +5,9 @@ import HeaderBar from "./HeaderBar";
 import SideNav from "./SideNav";
 
 function extractWorkspaceIdFromPath(pathname: string): string | null {
-  // /workspaces/:workspaceId/...
   const m1 = pathname.match(/^\/workspaces\/([0-9a-fA-F-]{36})(\/|$)/);
   if (m1?.[1]) return m1[1];
 
-  // /run-builder/:workspaceId
   const m2 = pathname.match(/^\/run-builder\/([0-9a-fA-F-]{36})(\/|$)/);
   if (m2?.[1]) return m2[1];
 
@@ -22,11 +20,7 @@ export default function AppFrame() {
 
   return (
     <div className="app-shell-bg">
-      <AppShell
-        header={{ height: 56 }}
-        navbar={{ width: 260, breakpoint: "sm" }}
-        padding={0}
-      >
+      <AppShell header={{ height: 56 }} navbar={{ width: 260, breakpoint: "sm" }} padding={0}>
         <AppShell.Header>
           <HeaderBar workspaceId={workspaceId} />
         </AppShell.Header>
@@ -36,7 +30,9 @@ export default function AppFrame() {
         </AppShell.Navbar>
 
         <AppShell.Main>
-          <Outlet />
+          <div className="page-wrap">
+            <Outlet />
+          </div>
         </AppShell.Main>
       </AppShell>
     </div>

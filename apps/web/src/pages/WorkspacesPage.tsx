@@ -1,6 +1,6 @@
 // apps/web/src/pages/WorkspacesPage.tsx
 import { useEffect, useState } from "react";
-import { Button, Group, Stack, Text, TextInput } from "@mantine/core";
+import { Badge, Button, Group, Stack, Text, TextInput } from "@mantine/core";
 import { Link } from "react-router-dom";
 import { apiFetch } from "../apiClient";
 import type { Workspace } from "../types";
@@ -63,65 +63,71 @@ export default function WorkspacesPage() {
         </Group>
       }
     >
-      <GlassCard>
-        <Stack gap="sm">
-          <Text fw={700}>Create workspace</Text>
+      <Stack gap="md">
+        <GlassCard>
+          <Stack gap="sm">
+            <Group justify="space-between" align="center">
+              <Text fw={700}>Create workspace</Text>
+              <Badge variant="light">Console</Badge>
+            </Group>
 
-          <Group align="end">
-            <TextInput
-              label="Workspace name"
-              value={name}
-              onChange={(e) => setName(e.currentTarget.value)}
-              placeholder="e.g., Growth Team"
-              style={{ flex: 1 }}
-            />
-            <Button onClick={createWorkspace} loading={loading} disabled={!name.trim()}>
-              Create
-            </Button>
-          </Group>
+            <Group align="end">
+              <TextInput
+                label="Workspace name"
+                value={name}
+                onChange={(e) => setName(e.currentTarget.value)}
+                placeholder="e.g., Growth Team"
+                style={{ flex: 1 }}
+              />
+              <Button onClick={createWorkspace} loading={loading} disabled={!name.trim()}>
+                Create
+              </Button>
+            </Group>
 
-          {err ? <Text c="red">{err}</Text> : null}
-        </Stack>
-      </GlassCard>
+            {err ? <Text c="red">{err}</Text> : null}
+          </Stack>
+        </GlassCard>
 
-      <GlassCard>
-        <Stack gap="sm">
-          <Group justify="space-between">
-            <Text fw={700}>Your workspaces</Text>
-          </Group>
+        <GlassCard>
+          <Stack gap="sm">
+            <Group justify="space-between" align="center">
+              <Text fw={700}>Your workspaces</Text>
+              <Badge variant="light">{workspaces.length}</Badge>
+            </Group>
 
-          {workspaces.length === 0 ? (
-            <Text c="dimmed">No workspaces yet.</Text>
-          ) : (
-            <Stack gap="xs">
-              {workspaces.map((w) => (
-                <GlassCard key={w.id} p="md">
-                  <Group justify="space-between" align="flex-start">
-                    <Stack gap={2}>
-                      <Text fw={600}>{w.name}</Text>
-                      <Text size="xs" c="dimmed">
-                        {w.id}
-                      </Text>
-                    </Stack>
+            {workspaces.length === 0 ? (
+              <Text c="dimmed">No workspaces yet.</Text>
+            ) : (
+              <Stack gap="xs">
+                {workspaces.map((w) => (
+                  <GlassCard key={w.id} p="md">
+                    <Group justify="space-between" align="flex-start">
+                      <Stack gap={2}>
+                        <Text fw={600}>{w.name}</Text>
+                        <Text size="xs" c="dimmed">
+                          {w.id}
+                        </Text>
+                      </Stack>
 
-                    <Group>
-                      <Button component={Link} to={`/workspaces/${w.id}`}>
-                        Open
-                      </Button>
-                      <Button component={Link} to={`/run-builder/${w.id}`} variant="light">
-                        Run Builder
-                      </Button>
-                      <Button component={Link} to={`/workspaces/${w.id}/docs`} variant="light">
-                        Docs
-                      </Button>
+                      <Group>
+                        <Button component={Link} to={`/workspaces/${w.id}`}>
+                          Open
+                        </Button>
+                        <Button component={Link} to={`/run-builder/${w.id}`} variant="light">
+                          Run Builder
+                        </Button>
+                        <Button component={Link} to={`/workspaces/${w.id}/docs`} variant="light">
+                          Docs
+                        </Button>
+                      </Group>
                     </Group>
-                  </Group>
-                </GlassCard>
-              ))}
-            </Stack>
-          )}
-        </Stack>
-      </GlassCard>
+                  </GlassCard>
+                ))}
+              </Stack>
+            )}
+          </Stack>
+        </GlassCard>
+      </Stack>
     </GlassPage>
   );
 }
