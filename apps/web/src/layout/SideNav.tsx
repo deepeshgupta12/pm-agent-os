@@ -49,7 +49,7 @@ export default function SideNav({ workspaceId }: { workspaceId: string | null })
   const hasWs = !!workspaceId;
   const wid = workspaceId || "";
 
-  const isActive = (prefix: string) => loc.pathname.startsWith(prefix);
+  const isActive = (prefix: string) => loc.pathname === prefix || loc.pathname.startsWith(`${prefix}/`);
 
   const wsBase = hasWs ? `/workspaces/${wid}` : "/workspaces";
   const runBuilder = hasWs ? `/run-builder/${wid}` : "/workspaces";
@@ -57,46 +57,46 @@ export default function SideNav({ workspaceId }: { workspaceId: string | null })
   return (
     <div style={{ height: "100%" }} className="glass-surface-strong">
       <Stack gap="sm" p="md">
+        {/* Global navigation */}
         <Stack gap={6}>
           <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
-            Workspace
+            Global
           </Text>
-          <NavItem label="Overview" to={wsBase} disabled={!hasWs} active={hasWs && isActive(wsBase)} />
-          <NavItem
-            label="Run Builder"
-            to={runBuilder}
-            disabled={!hasWs}
-            active={hasWs && isActive(`/run-builder/${wid}`)}
-          />
-          <NavItem label="Docs" to={`${wsBase}/docs`} disabled={!hasWs} active={hasWs && isActive(`${wsBase}/docs`)} />
-          <NavItem
-            label="Pipelines"
-            to={`${wsBase}/pipelines`}
-            disabled={!hasWs}
-            active={hasWs && isActive(`${wsBase}/pipelines`)}
-          />
-          <NavItem
-            label="Schedules"
-            to={`${wsBase}/schedules`}
-            disabled={!hasWs}
-            active={hasWs && isActive(`${wsBase}/schedules`)}
-          />
+          <NavItem label="Workspaces" to="/workspaces" active={isActive("/workspaces") && !loc.pathname.match(/^\/workspaces\/[0-9a-fA-F-]{36}/)} />
+          <NavItem label="Runs" to="/runs" active={isActive("/runs")} />
+          <NavItem label="Outputs" to="/outputs" active={isActive("/outputs")} />
+          <NavItem label="Approvals" to="/approvals" active={isActive("/approvals")} />
+          <NavItem label="Docs" to="/docs" active={isActive("/docs")} />
+          <NavItem label="Schedules" to="/schedules" active={isActive("/schedules")} />
+          <NavItem label="Settings" to="/settings" active={isActive("/settings")} />
         </Stack>
 
         <Divider />
 
+        {/* Workspace navigation */}
         <Stack gap={6}>
           <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
-            Governance
+            Workspace
           </Text>
+
+          <NavItem label="Overview" to={wsBase} disabled={!hasWs} active={hasWs && isActive(wsBase)} />
+          <NavItem label="Create Run" to={runBuilder} disabled={!hasWs} active={hasWs && isActive(`/run-builder/${wid}`)} />
+          <NavItem label="Outputs" to="/outputs" disabled={!hasWs} active={hasWs && isActive("/outputs")} />
+          <NavItem label="Approvals" to="/approvals" disabled={!hasWs} active={hasWs && isActive("/approvals")} />
+          <NavItem label="Docs" to="/docs" disabled={!hasWs} active={hasWs && isActive("/docs")} />
+          <NavItem label="Schedules" to="/schedules" disabled={!hasWs} active={hasWs && isActive("/schedules")} />
+        </Stack>
+
+        <Divider />
+
+        {/* Workspace Settings grouping */}
+        <Stack gap={6}>
+          <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
+            Workspace Settings
+          </Text>
+
           <NavItem
-            label="Approvals"
-            to={`${wsBase}/actions`}
-            disabled={!hasWs}
-            active={hasWs && isActive(`${wsBase}/actions`)}
-          />
-          <NavItem
-            label="Policy Center"
+            label="Workspace Rules"
             to={`${wsBase}/policy`}
             disabled={!hasWs}
             active={hasWs && isActive(`${wsBase}/policy`)}
@@ -113,6 +113,12 @@ export default function SideNav({ workspaceId }: { workspaceId: string | null })
             disabled={!hasWs}
             active={hasWs && isActive(`${wsBase}/agent-builder`)}
           />
+          <NavItem
+            label="Members (Legacy)"
+            to={`${wsBase}/_legacy`}
+            disabled={!hasWs}
+            active={hasWs && isActive(`${wsBase}/_legacy`)}
+          />
         </Stack>
 
         {!hasWs ? (
@@ -120,7 +126,7 @@ export default function SideNav({ workspaceId }: { workspaceId: string | null })
             <Divider />
             <Group>
               <Text size="sm" c="dimmed">
-                Select a workspace to unlock navigation.
+                Select a workspace to unlock workspace tools.
               </Text>
             </Group>
           </>
