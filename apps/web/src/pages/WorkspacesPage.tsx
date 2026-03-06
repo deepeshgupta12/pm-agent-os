@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import { Button, Card, Group, Stack, Text, TextInput, Title } from "@mantine/core";
+import { Button, Card, Group, Stack, Text, TextInput, Title, Badge } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import type { Workspace } from "../types";
 import { Link } from "react-router-dom";
 
 export default function WorkspacesPage() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [name, setName] = useState("My First Workspace");
+  const [name, setName] = useState("My Workspace");
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -40,15 +40,33 @@ export default function WorkspacesPage() {
   }
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, []);
 
   return (
     <Stack gap="md">
-      <Title order={2}>Workspaces</Title>
+      <Group justify="space-between" align="flex-start">
+        <Stack gap={2}>
+          <Title order={2}>Workspaces</Title>
+          <Text size="sm" c="dimmed">
+            Pick a workspace to run agents, review approvals, and manage policy.
+          </Text>
+        </Stack>
+        <Button variant="light" onClick={load}>
+          Refresh
+        </Button>
+      </Group>
+
       <Card withBorder>
         <Stack gap="sm">
-          <Text fw={600}>Create workspace</Text>
+          <Group justify="space-between">
+            <Group gap="sm">
+              <Text fw={700}>Create workspace</Text>
+              <Badge variant="light">V0</Badge>
+            </Group>
+          </Group>
+
           <Group align="end">
             <TextInput
               label="Workspace name"
@@ -57,25 +75,18 @@ export default function WorkspacesPage() {
               placeholder="e.g., Growth Team"
               style={{ flex: 1 }}
             />
-            <Button onClick={createWorkspace} loading={loading}>
+            <Button onClick={createWorkspace} loading={loading} disabled={!name.trim()}>
               Create
             </Button>
           </Group>
-          <Text size="sm" c="dimmed">
-            Note: You must be logged in (Me → Login) to use platform features.
-          </Text>
+
           {err && <Text c="red">{err}</Text>}
         </Stack>
       </Card>
 
       <Card withBorder>
         <Stack gap="sm">
-          <Group justify="space-between">
-            <Text fw={600}>Your workspaces</Text>
-            <Button variant="light" onClick={load}>
-              Refresh
-            </Button>
-          </Group>
+          <Text fw={700}>Your workspaces</Text>
 
           {workspaces.length === 0 ? (
             <Text c="dimmed">No workspaces yet.</Text>
@@ -83,34 +94,23 @@ export default function WorkspacesPage() {
             <Stack gap="xs">
               {workspaces.map((w) => (
                 <Card key={w.id} withBorder>
-                  <Group justify="space-between">
+                  <Group justify="space-between" align="flex-start">
                     <Stack gap={2}>
                       <Text fw={600}>{w.name}</Text>
                       <Text size="xs" c="dimmed">
                         {w.id}
                       </Text>
                     </Stack>
+
                     <Group>
+                      <Button component={Link} to={`/workspaces/${w.id}`}>
+                        Open
+                      </Button>
                       <Button component={Link} to={`/run-builder/${w.id}`} variant="light">
                         Run Builder
                       </Button>
                       <Button component={Link} to={`/workspaces/${w.id}/docs`} variant="light">
                         Docs
-                      </Button>
-                      <Button component={Link} to={`/workspaces/${w.id}/pipelines`} variant="light">
-                        Pipelines
-                      </Button>
-
-                      {/* Commit 6 */}
-                      <Button component={Link} to={`/workspaces/${w.id}/agent-builder`} variant="light">
-                        Agent Builder
-                      </Button>
-                      <Button component={Link} to={`/workspaces/${w.id}/governance`} variant="light">
-                        Governance
-                      </Button>
-
-                      <Button component={Link} to={`/workspaces/${w.id}`}>
-                        Open
                       </Button>
                     </Group>
                   </Group>
