@@ -8,14 +8,8 @@ export default function HeaderBar({ workspaceId }: { workspaceId: string | null 
   return (
     <Group justify="space-between" px="md" h="100%" className="glass-surface-strong">
       <Group gap="sm">
-        <Text fw={700} className="header-title">
-          PM Agent OS
-        </Text>
-        {wsShort ? (
-          <Badge variant="light" className="ws-badge">
-            WS: {wsShort}…
-          </Badge>
-        ) : null}
+        <Text fw={700}>PM Agent OS</Text>
+        {wsShort ? <Badge variant="light">WS: {wsShort}…</Badge> : null}
       </Group>
 
       <Group gap="md">
@@ -23,7 +17,7 @@ export default function HeaderBar({ workspaceId }: { workspaceId: string | null 
           Workspaces
         </Anchor>
         <Anchor component={Link} to="/me">
-          Account
+          Me
         </Anchor>
       </Group>
     </Group>

@@ -1,52 +1,31 @@
 /* apps/web/src/styles/glass.css */
 
-/* =========================================================
-   PM Agent OS — Premium Enterprise (Graphite + Subtle Blue)
-   Goals:
-   - Calm, low-saturation background
-   - Consistent glass surfaces (3 levels)
-   - Consistent spacing + readable widths
-   - Navigation + header look like a console (not a demo)
-   ========================================================= */
-
+/* App background */
 :root {
-  /* Background palette (graphite) */
-  --app-bg-0: #070a12;  /* near-black graphite */
-  --app-bg-1: #0a1020;  /* deep navy graphite */
-  --app-bg-2: #0d1628;  /* slightly brighter */
-
-  /* Subtle enterprise blue highlight */
-  --accent-blue: rgba(110, 170, 255, 0.18);
-  --accent-blue-strong: rgba(110, 170, 255, 0.28);
-
-  /* Glass system */
-  --glass-blur: 14px;
-
-  /* Base surface: standard cards */
+  /* slightly less “frosty”, more “material” */
   --glass-bg: rgba(255, 255, 255, 0.055);
-  --glass-border: rgba(255, 255, 255, 0.10);
-  --glass-shadow: 0 14px 34px rgba(0, 0, 0, 0.35);
-
-  /* Raised surface: header/nav */
   --glass-bg-strong: rgba(255, 255, 255, 0.075);
-  --glass-border-strong: rgba(255, 255, 255, 0.12);
-  --glass-shadow-strong: 0 18px 44px rgba(0, 0, 0, 0.42);
 
-  /* Interactive surface: hover */
-  --glass-bg-hover: rgba(255, 255, 255, 0.085);
-  --glass-border-hover: rgba(255, 255, 255, 0.16);
+  /* stronger border for enterprise crispness */
+  --glass-border: rgba(255, 255, 255, 0.14);
 
-  /* Spacing rhythm */
-  --page-max: 1180px;
-  --page-pad-x: 22px;
-  --page-pad-y: 22px;
+  /* calmer shadow */
+  --glass-shadow: 0 10px 26px rgba(0, 0, 0, 0.22);
 
-  /* Typography tweaks */
-  --muted: rgba(255, 255, 255, 0.62);
-  --muted-2: rgba(255, 255, 255, 0.48);
+  /* reduced blur */
+  --glass-blur: 12px;
+
+  /* enterprise graphite base */
+  --app-bg-0: #0a0f1a;
+  --app-bg-1: #0b1321;
+  --app-bg-2: #0c1726;
+
+  /* subtle blue accent */
+  --accent-blue: rgba(120, 170, 255, 0.85);
+  --accent-blue-soft: rgba(120, 170, 255, 0.18);
 }
 
-/* full-height document */
+/* Remove demo feel: full-height document */
 html,
 body {
   height: 100%;
@@ -54,15 +33,14 @@ body {
 
 body {
   margin: 0;
-
-  /* Calm graphite gradient + subtle blue glow */
   background:
-    radial-gradient(1100px 700px at 20% 18%, var(--accent-blue), transparent 62%),
-    radial-gradient(900px 620px at 85% 30%, rgba(255, 255, 255, 0.05), transparent 65%),
+    radial-gradient(1200px 700px at 18% 22%, rgba(120, 170, 255, 0.14), transparent 55%),
+    radial-gradient(900px 600px at 82% 28%, rgba(255, 255, 255, 0.06), transparent 62%),
+    radial-gradient(900px 700px at 42% 92%, rgba(120, 255, 220, 0.06), transparent 62%),
     linear-gradient(180deg, var(--app-bg-0), var(--app-bg-2));
 }
 
-/* Grain to avoid “flat demo gradient” */
+/* A subtle grain to stop flat gradients looking cheap */
 .app-shell-bg {
   position: relative;
   min-height: 100%;
@@ -75,12 +53,10 @@ body {
   pointer-events: none;
   opacity: 0.055;
   mix-blend-mode: overlay;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)' opacity='.35'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)' opacity='.35'/%3E%3C/svg%3E");
 }
 
-/* =========================================================
-   Glass utilities
-   ========================================================= */
+/* Glass surface utility */
 .glass-surface {
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
@@ -89,83 +65,52 @@ body {
   -webkit-backdrop-filter: blur(var(--glass-blur));
 }
 
+/* Slightly stronger for headers/nav */
 .glass-surface-strong {
   background: var(--glass-bg-strong);
-  border: 1px solid var(--glass-border-strong);
-  box-shadow: var(--glass-shadow-strong);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.20);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
 }
 
-.glass-surface:hover {
-  background: var(--glass-bg-hover);
-  border-color: var(--glass-border-hover);
-}
-
-/* =========================================================
-   Layout primitives
-   ========================================================= */
+/* Page wrapper: consistent spacing for "console" */
 .page-wrap {
   width: 100%;
-  max-width: var(--page-max);
+  max-width: 1180px;
   margin: 0 auto;
-  padding: var(--page-pad-y) var(--page-pad-x) calc(var(--page-pad-y) + 10px) var(--page-pad-x);
+  padding: 16px 18px 28px 18px;
 }
 
-/* Slightly wider on huge screens */
+/* Keep content readable on very wide screens */
 @media (min-width: 1400px) {
-  :root {
-    --page-max: 1240px;
+  .page-wrap {
+    max-width: 1240px;
   }
 }
 
-/* =========================================================
-   Header + Nav polish
-   ========================================================= */
-.header-title {
-  letter-spacing: 0.2px;
+/* Small stat pill (for counts) */
+.glass-stat {
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.045);
 }
 
-.ws-badge {
-  color: rgba(255, 255, 255, 0.78);
+/* SideNav active indicator */
+.sidenav-item {
+  position: relative;
 }
 
-.nav-group-title {
-  color: rgba(255, 255, 255, 0.52);
-  letter-spacing: 0.6px;
-}
-
-.nav-item {
-  height: 38px;
-  border-radius: 10px;
-  transition: background 140ms ease, border-color 140ms ease;
-}
-
-.nav-item-active {
-  background: rgba(110, 170, 255, 0.16);
-  border: 1px solid rgba(110, 170, 255, 0.18);
-}
-
-.nav-item-inactive:hover {
-  background: rgba(255, 255, 255, 0.06);
-}
-
-/* Reduce “empty screen” feeling on auth pages */
-.auth-wrap {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 28px var(--page-pad-x);
-}
-
-.auth-grid {
-  display: grid;
-  grid-template-columns: 1.05fr 0.95fr;
-  gap: 18px;
-  align-items: start;
-}
-
-@media (max-width: 860px) {
-  .auth-grid {
-    grid-template-columns: 1fr;
-  }
+.sidenav-item[data-active="true"]::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent-blue);
+  box-shadow: 0 0 0 6px var(--accent-blue-soft);
+  opacity: 0.95;
 }
