@@ -4,19 +4,23 @@ import { useParams, Link } from "react-router-dom";
 import {
   Badge,
   Button,
-  Card,
   Group,
   Select,
   Stack,
   Text,
   Textarea,
   TextInput,
-  Title,
   Divider,
   Code,
+  Tooltip,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import type { Agent, Run, Workspace, WorkspaceMember, WorkspaceRole, TemplateAdmin } from "../types";
+
+import GlassPage from "../components/Glass/GlassPage";
+import GlassCard from "../components/Glass/GlassCard";
+import GlassSection from "../components/Glass/GlassSection";
+import GlassStat from "../components/Glass/GlassStat";
 
 function safeJsonParse(s: string): { ok: boolean; value: any; error?: string } {
   try {
@@ -281,115 +285,127 @@ export default function WorkspaceDetailPage() {
 
   const tplAdminParsed = useMemo(() => safeJsonParse(tplAdminJson), [tplAdminJson]);
 
+  const headerRight = (
+    <Group>
+      <Button component={Link} to={`/workspaces/${wid}`} variant="light" size="sm">
+        Overview
+      </Button>
+      <Button component={Link} to={`/run-builder/${wid}`} size="sm">
+        Create run
+      </Button>
+      <Button variant="light" onClick={loadAll} size="sm">
+        Refresh
+      </Button>
+    </Group>
+  );
+
   return (
-    <Stack gap="md">
-      <Group justify="space-between">
-        <Title order={2}>Workspace</Title>
-        <Group>
-          <Button component={Link} to="/workspaces" variant="light">
-            Back
-          </Button>
-          <Button component={Link} to={`/workspaces/${wid}/actions`} variant="light">
-            Action Center
-          </Button>
-          <Button component={Link} to={`/workspaces/${wid}/schedules`} variant="light">
-            Schedules
-          </Button>
-          <Button component={Link} to={`/workspaces/${wid}/agent-builder`} variant="light">
-            Agent Builder
-          </Button>
-          <Button component={Link} to={`/workspaces/${wid}/governance`} variant="light">
-            Governance
-          </Button>
-          <Button component={Link} to={`/workspaces/${wid}/policy`} variant="light">
-            Policy Center
-          </Button>
-        </Group>
-      </Group>
+    <GlassPage
+      title={ws?.name ? `Workspace · ${ws.name}` : "Workspace"}
+      subtitle="Legacy admin panel (members, template config, and quick run creation)."
+      right={headerRight}
+    >
+      <Stack gap="md">
+        {err ? (
+          <GlassCard>
+            <Text c="red">{err}</Text>
+          </GlassCard>
+        ) : null}
 
-      {ws ? (
-        <Card withBorder>
-          <Group justify="space-between">
-            <Stack gap={2}>
-              <Text fw={700}>{ws.name}</Text>
-              <Text size="xs" c="dimmed">
-                {ws.id}
-              </Text>
-            </Stack>
-            {myRole ? <Badge variant="light">role: {myRole.role}</Badge> : null}
-          </Group>
-        </Card>
-      ) : (
-        <Text c="dimmed">Loading workspace…</Text>
-      )}
+        <GlassSection
+          title={ws?.name || "Loading…"}
+          description={ws?.id || wid}
+          right={
+            <Group gap="sm" wrap="wrap">
+              <GlassStat label="Access" value={isAdmin ? "Admin" : "Read-only"} />
+              <GlassStat label="Members" value={members.length} />
+              <GlassStat label="Runs" value={runs.length} />
+            </Group>
+          }
+        >
+          <Text size="sm" c="dimmed">
+            This page stays available for advanced controls. Most day-to-day work happens in the Overview.
+          </Text>
+        </GlassSection>
 
-      <Card withBorder>
-        <Stack gap="sm">
-          <Group justify="space-between">
+        {/* Template Admin */}
+        <GlassSection
+          title="Template Admin"
+          description="Workspace-scoped JSON configuration used by agents and templates."
+          right={
+            <Group>
+              <Button variant="light" onClick={loadTemplateAdmin} loading={tplAdminLoading} size="sm">
+                Refresh
+              </Button>
+              <Tooltip
+                withArrow
+                label={isAdmin ? "Saves template_admin_json for this workspace." : "Admin only."}
+              >
+                <span>
+                  <Button
+                    onClick={saveTemplateAdmin}
+                    loading={tplAdminSaving}
+                    disabled={!isAdmin || tplAdminLoading || !tplAdminDirty}
+                    size="sm"
+                  >
+                    Save
+                  </Button>
+                </span>
+              </Tooltip>
+            </Group>
+          }
+        >
+          <Stack gap="sm">
             <Group gap="sm">
-              <Text fw={700}>Template Admin</Text>
               <Badge variant="light">V1</Badge>
               <Badge variant="light" color={isAdmin ? "grape" : "gray"}>
                 {isAdmin ? "admin can edit" : "read-only"}
               </Badge>
-            </Group>
-
-            <Group>
-              <Button variant="light" onClick={loadTemplateAdmin} loading={tplAdminLoading}>
-                Refresh
-              </Button>
-              <Button
-                onClick={saveTemplateAdmin}
-                loading={tplAdminSaving}
-                disabled={!isAdmin || tplAdminLoading || !tplAdminDirty}
+              <Tooltip
+                withArrow
+                label="Stored at workspaces.template_admin_json. New workspaces default to {} until saved."
               >
-                Save
-              </Button>
+                <Badge variant="light">Stored JSON</Badge>
+              </Tooltip>
             </Group>
-          </Group>
 
-          <Text size="sm" c="dimmed">
-            Workspace-scoped configuration stored as JSON at <Code>workspaces.template_admin_json</Code>. A brand new
-            workspace will default to <Code>{`{}`}</Code> until you save values.
-          </Text>
+            {tplAdminErr ? (
+              <GlassCard>
+                <Text c="red">{tplAdminErr}</Text>
+              </GlassCard>
+            ) : null}
 
-          {tplAdminErr ? (
-            <Card withBorder>
-              <Text c="red">{tplAdminErr}</Text>
-            </Card>
-          ) : null}
+            <Textarea
+              label="template_admin_json"
+              description={
+                tplAdminLoading
+                  ? "Loading…"
+                  : isAdmin
+                    ? "Edit JSON and click Save."
+                    : "Viewer/Member: read-only. Ask an admin to update."
+              }
+              autosize
+              minRows={10}
+              value={tplAdminJson}
+              onChange={(e) => {
+                setTplAdminJson(e.currentTarget.value);
+                setTplAdminDirty(true);
+                setTplAdminErr(null);
+              }}
+              disabled={!isAdmin || tplAdminLoading}
+            />
 
-          <Textarea
-            label="template_admin_json"
-            description={
-              tplAdminLoading
-                ? "Loading…"
-                : isAdmin
-                ? "Edit JSON and click Save."
-                : "Viewer/Member: read-only. Ask an admin to update."
-            }
-            autosize
-            minRows={10}
-            value={tplAdminJson}
-            onChange={(e) => {
-              setTplAdminJson(e.currentTarget.value);
-              setTplAdminDirty(true);
-              setTplAdminErr(null);
-            }}
-            disabled={!isAdmin || tplAdminLoading}
-          />
+            {!tplAdminParsed.ok ? (
+              <Text c="red" size="sm">
+                JSON error: {tplAdminParsed.error}
+              </Text>
+            ) : null}
 
-          {!tplAdminParsed.ok ? (
-            <Text c="red" size="sm">
-              JSON error: {tplAdminParsed.error}
-            </Text>
-          ) : null}
+            <Divider />
 
-          <Divider />
-
-          <Text fw={600}>Suggested JSON shape (example)</Text>
-          <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-            {`{
+            <Text fw={600}>Suggested shape (example)</Text>
+            <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+              {`{
   "prd_fields": {
     "required": ["Summary", "Problem", "Users / Segments", "Success Metrics", "Scope", "Requirements"],
     "optional": ["Risks", "Assumptions", "Open Questions", "Next Actions"]
@@ -403,200 +419,220 @@ export default function WorkspaceDetailPage() {
     "personas": ["new_user", "power_user", "admin"]
   }
 }`}
-          </pre>
+            </pre>
 
-          {tplAdmin ? (
-            <Text size="xs" c="dimmed">
-              Loaded for workspace: <Code>{tplAdmin.workspace_id}</Code>
-            </Text>
-          ) : null}
-        </Stack>
-      </Card>
+            {tplAdmin ? (
+              <Text size="xs" c="dimmed">
+                Loaded for workspace: <Code>{tplAdmin.workspace_id}</Code>
+              </Text>
+            ) : null}
+          </Stack>
+        </GlassSection>
 
-      <Card withBorder>
-        <Stack gap="sm">
-          <Group justify="space-between">
-            <Text fw={700}>Members</Text>
-            <Button variant="light" onClick={loadMembers} loading={membersLoading}>
+        {/* Members */}
+        <GlassSection
+          title="Members"
+          description="Manage workspace access (admin / member / viewer)."
+          right={
+            <Button variant="light" onClick={loadMembers} loading={membersLoading} size="sm">
               Refresh
             </Button>
-          </Group>
-
-          {isAdmin ? (
-            <Card withBorder>
-              <Stack gap="sm">
-                <Text fw={600}>Invite member</Text>
-                <Group align="end">
-                  <TextInput
-                    label="Email"
-                    value={inviteEmail}
-                    onChange={(e) => setInviteEmail(e.currentTarget.value)}
-                    placeholder="name@company.com"
-                    style={{ flex: 1 }}
-                  />
-                  <Select
-                    label="Role"
-                    data={[
-                      { value: "admin", label: "admin" },
-                      { value: "member", label: "member" },
-                      { value: "viewer", label: "viewer" },
-                    ]}
-                    value={inviteRole}
-                    onChange={(v) => setInviteRole((v as any) || "member")}
-                    style={{ width: 160 }}
-                  />
-                  <Button onClick={inviteMember} disabled={!inviteEmail.trim()} loading={membersLoading}>
-                    Invite
-                  </Button>
-                </Group>
-                <Text size="xs" c="dimmed">
-                  Note: users must already exist in the system (registered) for invite-by-email in V0.
-                </Text>
-              </Stack>
-            </Card>
-          ) : (
-            <Text size="sm" c="dimmed">
-              You are not an admin — member management is disabled.
-            </Text>
-          )}
-
-          {members.length === 0 ? (
-            <Text c="dimmed">No members found.</Text>
-          ) : (
-            <Stack gap="xs">
-              {members.map((m) => (
-                <Card key={m.user_id} withBorder>
+          }
+        >
+          <Stack gap="sm">
+            {!isAdmin ? (
+              <Text size="sm" c="dimmed">
+                You are not an admin — member management is disabled.
+              </Text>
+            ) : (
+              <GlassCard p="md">
+                <Stack gap="sm">
                   <Group justify="space-between" align="center">
-                    <Stack gap={2}>
-                      <Text fw={600}>{m.email}</Text>
-                      <Text size="xs" c="dimmed">
-                        {m.user_id}
-                      </Text>
-                    </Stack>
-
-                    <Group>
-                      <Badge variant="light">{m.role}</Badge>
-
-                      {isAdmin && m.role !== "admin" ? (
-                        <Select
-                          data={[
-                            { value: "admin", label: "admin" },
-                            { value: "member", label: "member" },
-                            { value: "viewer", label: "viewer" },
-                          ]}
-                          value={m.role}
-                          onChange={(v) => v && updateMemberRole(m.user_id, v as any)}
-                          style={{ width: 140 }}
-                        />
-                      ) : null}
-
-                      {isAdmin && m.role !== "admin" ? (
-                        <Button variant="light" color="red" onClick={() => removeMember(m.user_id)}>
-                          Remove
-                        </Button>
-                      ) : null}
-                    </Group>
+                    <Text fw={700}>Invite member</Text>
+                    <Tooltip withArrow label="In V0, the user must already be registered in the system.">
+                      <Badge variant="light">V0 constraint</Badge>
+                    </Tooltip>
                   </Group>
-                </Card>
-              ))}
-            </Stack>
-          )}
-        </Stack>
-      </Card>
 
-      <Card withBorder>
-        <Stack gap="sm">
-          <Text fw={700}>Create Run</Text>
-          <Select
-            label="Pick an agent"
-            data={agentOptions}
-            value={agentId}
-            onChange={setAgentId}
-            searchable
-            nothingFoundMessage="No agents"
-          />
+                  <Group align="end">
+                    <TextInput
+                      label="Email"
+                      value={inviteEmail}
+                      onChange={(e) => setInviteEmail(e.currentTarget.value)}
+                      placeholder="name@company.com"
+                      style={{ flex: 1 }}
+                    />
+                    <Select
+                      label="Role"
+                      data={[
+                        { value: "admin", label: "admin" },
+                        { value: "member", label: "member" },
+                        { value: "viewer", label: "viewer" },
+                      ]}
+                      value={inviteRole}
+                      onChange={(v) => setInviteRole((v as any) || "member")}
+                      style={{ width: 160 }}
+                    />
+                    <Button onClick={inviteMember} disabled={!inviteEmail.trim()} loading={membersLoading} size="sm">
+                      Invite
+                    </Button>
+                  </Group>
+                </Stack>
+              </GlassCard>
+            )}
 
-          {selectedAgent ? (
-            <Card withBorder>
-              <Stack gap={4}>
-                <Group gap="sm">
-                  <Badge>{selectedAgent.id}</Badge>
-                  <Badge variant="light">{selectedAgent.version}</Badge>
-                  <Text fw={600}>{selectedAgent.name}</Text>
-                </Group>
-                <Text size="sm" c="dimmed">
-                  {selectedAgent.description}
-                </Text>
-                <Text size="sm">
-                  This run will auto-create a draft artifact of type:{" "}
-                  <Text span fw={700}>
-                    {selectedAgent.default_artifact_type}
-                  </Text>
-                </Text>
+            {members.length === 0 ? (
+              <Text c="dimmed">No members found.</Text>
+            ) : (
+              <Stack gap="xs">
+                {members.map((m) => (
+                  <GlassCard key={m.user_id} p="md">
+                    <Group justify="space-between" align="center">
+                      <Stack gap={2}>
+                        <Text fw={700}>{m.email}</Text>
+                        <Text size="xs" c="dimmed">
+                          {m.user_id}
+                        </Text>
+                      </Stack>
+
+                      <Group>
+                        <Badge variant="light">{m.role}</Badge>
+
+                        {isAdmin && m.role !== "admin" ? (
+                          <Select
+                            data={[
+                              { value: "admin", label: "admin" },
+                              { value: "member", label: "member" },
+                              { value: "viewer", label: "viewer" },
+                            ]}
+                            value={m.role}
+                            onChange={(v) => v && updateMemberRole(m.user_id, v as any)}
+                            style={{ width: 140 }}
+                          />
+                        ) : null}
+
+                        {isAdmin && m.role !== "admin" ? (
+                          <Button variant="light" color="red" onClick={() => removeMember(m.user_id)} size="sm">
+                            Remove
+                          </Button>
+                        ) : null}
+                      </Group>
+                    </Group>
+                  </GlassCard>
+                ))}
               </Stack>
-            </Card>
-          ) : null}
+            )}
+          </Stack>
+        </GlassSection>
 
-          <Textarea
-            label="Input payload (JSON)"
-            autosize
-            minRows={6}
-            value={inputJson}
-            onChange={(e) => setInputJson(e.currentTarget.value)}
-          />
-          <Group>
-            <Button onClick={createRun} loading={creating}>
-              Create Run
-            </Button>
-            <Button variant="light" onClick={loadAll}>
-              Refresh
-            </Button>
-          </Group>
+        {/* Quick run creation */}
+        <GlassSection
+          title="Quick run (legacy)"
+          description="Create a run directly from an agent with a raw JSON payload."
+          right={
+            <Tooltip withArrow label="Prefer Run Builder for a guided flow. This is a fast admin shortcut.">
+              <Badge variant="light">Advanced</Badge>
+            </Tooltip>
+          }
+        >
+          <Stack gap="sm">
+            <Select
+              label="Agent"
+              data={agentOptions}
+              value={agentId}
+              onChange={setAgentId}
+              searchable
+              nothingFoundMessage="No agents"
+            />
 
-          {err && <Text c="red">{err}</Text>}
-        </Stack>
-      </Card>
+            {selectedAgent ? (
+              <GlassCard p="md">
+                <Stack gap={4}>
+                  <Group gap="sm">
+                    <Badge variant="light">{selectedAgent.id}</Badge>
+                    <Badge variant="light">{selectedAgent.version}</Badge>
+                    <Text fw={700}>{selectedAgent.name}</Text>
+                  </Group>
+                  <Text size="sm" c="dimmed">
+                    {selectedAgent.description}
+                  </Text>
+                  <Text size="sm">
+                    Default artifact type:{" "}
+                    <Text span fw={700}>
+                      {selectedAgent.default_artifact_type}
+                    </Text>
+                  </Text>
+                </Stack>
+              </GlassCard>
+            ) : null}
 
-      <Card withBorder>
-        <Stack gap="sm">
-          <Group justify="space-between">
-            <Text fw={700}>Runs</Text>
-            <Button variant="light" onClick={loadAll}>
-              Refresh
-            </Button>
-          </Group>
+            <Textarea
+              label="Input payload (JSON)"
+              description={
+                <Tooltip
+                  withArrow
+                  label="This is sent as input_payload. Keep it small and well-formed. Invalid JSON will fail fast."
+                >
+                  <span>Raw JSON input for the agent.</span>
+                </Tooltip>
+              }
+              autosize
+              minRows={6}
+              value={inputJson}
+              onChange={(e) => setInputJson(e.currentTarget.value)}
+            />
 
+            <Group>
+              <Button onClick={createRun} loading={creating} size="sm">
+                Create run
+              </Button>
+              <Button variant="light" onClick={loadAll} size="sm">
+                Refresh
+              </Button>
+            </Group>
+          </Stack>
+        </GlassSection>
+
+        {/* Runs list */}
+        <GlassSection
+          title="Runs"
+          description="Latest runs in this workspace (newest first)."
+          right={<GlassStat label="Total" value={runs.length} />}
+        >
           {runs.length === 0 ? (
             <Text c="dimmed">No runs yet.</Text>
           ) : (
             <Stack gap="xs">
-              {runs.map((r) => (
-                <Card key={r.id} withBorder>
+              {runs.slice(0, 15).map((r) => (
+                <GlassCard key={r.id} p="md">
                   <Group justify="space-between" align="flex-start">
-                    <Stack gap={4}>
+                    <Stack gap={6}>
                       <Group gap="sm">
-                        <Badge>{r.status}</Badge>
-                        <Text fw={600}>{r.agent_id}</Text>
+                        <Badge variant="light">{r.status}</Badge>
+                        <Text fw={700}>{r.agent_id}</Text>
                       </Group>
+
                       {r.output_summary ? (
                         <Text size="sm" c="dimmed">
                           {r.output_summary}
                         </Text>
                       ) : null}
+
                       <Text size="xs" c="dimmed">
                         {r.id}
                       </Text>
                     </Stack>
-                    <Button component={Link} to={`/runs/${r.id}`}>
+
+                    <Button component={Link} to={`/runs/${r.id}`} variant="light" size="sm">
                       Open
                     </Button>
                   </Group>
-                </Card>
+                </GlassCard>
               ))}
             </Stack>
           )}
-        </Stack>
-      </Card>
-    </Stack>
+        </GlassSection>
+      </Stack>
+    </GlassPage>
   );
 }

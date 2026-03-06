@@ -4,7 +4,6 @@ import { Link, useParams } from "react-router-dom";
 import {
   Badge,
   Button,
-  Card,
   Code,
   Group,
   MultiSelect,
@@ -13,11 +12,16 @@ import {
   Stack,
   Switch,
   Text,
-  Title,
   Divider,
+  Tooltip,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import type { WorkspacePolicyOut, WorkspacePolicyPurgeOut, WorkspaceRole } from "../types";
+
+import GlassPage from "../components/Glass/GlassPage";
+import GlassCard from "../components/Glass/GlassCard";
+import GlassSection from "../components/Glass/GlassSection";
+import GlassStat from "../components/Glass/GlassStat";
 
 type PiiMode = "none" | "write_time" | "export_time" | "both";
 
@@ -30,7 +34,6 @@ function safeJson(v: any): string {
 }
 
 function normalizeLocalPolicy(raw: any): Record<string, any> {
-  // Keep local normalization aligned with backend intent (defensive).
   const r = raw && typeof raw === "object" ? raw : {};
   const retrieval = r.retrieval && typeof r.retrieval === "object" ? r.retrieval : {};
   const privacy = r.privacy && typeof r.privacy === "object" ? r.privacy : {};
@@ -44,9 +47,8 @@ function normalizeLocalPolicy(raw: any): Record<string, any> {
 
   const rdRaw = retrieval.retention_days;
   let retention_days: number | null = null;
-  if (rdRaw === null || rdRaw === undefined || rdRaw === "") {
-    retention_days = null;
-  } else {
+  if (rdRaw === null || rdRaw === undefined || rdRaw === "") retention_days = null;
+  else {
     const n = Number(rdRaw);
     retention_days = Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
   }
@@ -122,7 +124,7 @@ export default function PolicyCenterPage() {
   );
 
   const effectiveJson = useMemo(() => {
-    const obj = normalizeLocalPolicy({
+    return normalizeLocalPolicy({
       internal_only: internalOnly,
       retrieval: {
         allowed_source_types: allowedSourceTypes,
@@ -136,7 +138,6 @@ export default function PolicyCenterPage() {
         },
       },
     });
-    return obj;
   }, [internalOnly, allowedSourceTypes, retentionDays, blockExternalLinks, piiEnabled, piiMode]);
 
   async function loadRole() {
@@ -144,7 +145,6 @@ export default function PolicyCenterPage() {
     const roleRes = await apiFetch<WorkspaceRole>(`/workspaces/${wid}/my-role`, { method: "GET" });
     if (!roleRes.ok) {
       setMyRole(null);
-      // don't hard fail page; show read-only by default
       return;
     }
     setMyRole(roleRes.data);
@@ -169,15 +169,10 @@ export default function PolicyCenterPage() {
     const normalized = normalizeLocalPolicy(res.data.policy_json || {});
     setPolicy(normalized);
 
-    // hydrate form state
     setInternalOnly(!!normalized.internal_only);
 
-    setAllowedSourceTypes(
-      Array.isArray(normalized?.retrieval?.allowed_source_types) ? normalized.retrieval.allowed_source_types : []
-    );
-    setRetentionDays(
-      typeof normalized?.retrieval?.retention_days === "number" ? normalized.retrieval.retention_days : null
-    );
+    setAllowedSourceTypes(Array.isArray(normalized?.retrieval?.allowed_source_types) ? normalized.retrieval.allowed_source_types : []);
+    setRetentionDays(typeof normalized?.retrieval?.retention_days === "number" ? normalized.retrieval.retention_days : null);
     setBlockExternalLinks(!!normalized?.retrieval?.block_external_links);
 
     setPiiEnabled(!!normalized?.privacy?.pii_masking?.enabled);
@@ -214,14 +209,9 @@ export default function PolicyCenterPage() {
     const normalized = normalizeLocalPolicy(res.data.policy_json || {});
     setPolicy(normalized);
 
-    // rehydrate from server (source of truth)
     setInternalOnly(!!normalized.internal_only);
-    setAllowedSourceTypes(
-      Array.isArray(normalized?.retrieval?.allowed_source_types) ? normalized.retrieval.allowed_source_types : []
-    );
-    setRetentionDays(
-      typeof normalized?.retrieval?.retention_days === "number" ? normalized.retrieval.retention_days : null
-    );
+    setAllowedSourceTypes(Array.isArray(normalized?.retrieval?.allowed_source_types) ? normalized.retrieval.allowed_source_types : []);
+    setRetentionDays(typeof normalized?.retrieval?.retention_days === "number" ? normalized.retrieval.retention_days : null);
     setBlockExternalLinks(!!normalized?.retrieval?.block_external_links);
 
     setPiiEnabled(!!normalized?.privacy?.pii_masking?.enabled);
@@ -268,193 +258,211 @@ export default function PolicyCenterPage() {
     setErr(null);
   }
 
-  return (
-    <Stack gap="md">
-      <Group justify="space-between">
-        <Title order={2}>Policy Center</Title>
-        <Group>
-          <Button component={Link} to={`/workspaces/${wid}`} variant="light">
-            Back
-          </Button>
-          <Button variant="light" onClick={loadPolicy} loading={loading}>
-            Refresh
-          </Button>
-          <Button onClick={savePolicy} loading={saving} disabled={!isAdmin || !dirty || loading}>
+  const headerRight = (
+    <Group>
+      <Button component={Link} to={`/workspaces/${wid}`} variant="light" size="sm">
+        Back
+      </Button>
+      <Button variant="light" onClick={loadPolicy} loading={loading} size="sm">
+        Refresh
+      </Button>
+      <Tooltip withArrow label={isAdmin ? "Saves policy_json for this workspace." : "Admin only."}>
+        <span>
+          <Button onClick={savePolicy} loading={saving} disabled={!isAdmin || !dirty || loading} size="sm">
             Save
           </Button>
-        </Group>
-      </Group>
+        </span>
+      </Tooltip>
+    </Group>
+  );
 
-      {err ? (
-        <Card withBorder>
-          <Text c="red">{err}</Text>
-        </Card>
-      ) : null}
+  return (
+    <GlassPage title="Policy Center" subtitle="Workspace governance for retrieval, privacy, and retention." right={headerRight}>
+      <Stack gap="md">
+        {err ? (
+          <GlassCard>
+            <Text c="red">{err}</Text>
+          </GlassCard>
+        ) : null}
 
-      <Card withBorder>
-        <Stack gap="sm">
-          <Group justify="space-between">
-            <Group gap="sm">
-              <Text fw={700}>Workspace Policy</Text>
+        <GlassSection
+          title="Workspace policy"
+          description="Stored as JSON at workspaces.policy_json."
+          right={
+            <Group gap="sm" wrap="wrap">
+              <GlassStat label="Access" value={isAdmin ? "Admin" : "Read-only"} />
+              <GlassStat label="Dirty" value={dirty ? "Yes" : "No"} />
               <Badge variant="light">V1</Badge>
-              <Badge variant="light" color={isAdmin ? "grape" : "gray"}>
-                {isAdmin ? "admin can edit" : "read-only"}
-              </Badge>
             </Group>
-            <Text size="xs" c="dimmed">
-              writes to <Code>workspaces.policy_json</Code>
-            </Text>
-          </Group>
+          }
+        >
+          <Stack gap="md">
+            <Divider />
 
-          <Divider />
+            <Stack gap="xs">
+              <Group gap="sm" align="center">
+                <Text fw={700}>Internal-only</Text>
+                <Tooltip withArrow label="If enabled: exports are blocked and connector operations are disabled.">
+                  <Badge variant="light">?</Badge>
+                </Tooltip>
+              </Group>
 
-          <Stack gap="xs">
-            <Text fw={600}>Internal-only</Text>
-            <Text size="sm" c="dimmed">
-              If enabled: exports are blocked and connector operations are disabled.
-            </Text>
-            <Switch
-              checked={internalOnly}
-              onChange={(e) => {
-                setInternalOnly(e.currentTarget.checked);
-                markDirty();
-              }}
-              disabled={!isAdmin}
-              label="internal_only"
-            />
-          </Stack>
+              <Switch
+                checked={internalOnly}
+                onChange={(e) => {
+                  setInternalOnly(e.currentTarget.checked);
+                  markDirty();
+                }}
+                disabled={!isAdmin}
+                label="internal_only"
+              />
+            </Stack>
 
-          <Divider />
+            <Divider />
 
-          <Stack gap="xs">
-            <Text fw={600}>Retrieval Controls</Text>
-            <Text size="sm" c="dimmed">
-              Allowed source types acts as an allowlist. If empty, everything is allowed.
-            </Text>
+            <Stack gap="xs">
+              <Group gap="sm" align="center">
+                <Text fw={700}>Retrieval controls</Text>
+                <Tooltip
+                  withArrow
+                  label="Use allowed_source_types as an allowlist. If empty, all sources are allowed."
+                >
+                  <Badge variant="light">?</Badge>
+                </Tooltip>
+              </Group>
 
-            <MultiSelect
-              label="allowed_source_types"
-              data={sourceOptions}
-              value={allowedSourceTypes}
-              onChange={(v) => {
-                setAllowedSourceTypes(v);
-                markDirty();
-              }}
-              disabled={!isAdmin}
-              searchable
-              clearable
-              placeholder="Select allowed sources (leave empty to allow all)"
-            />
+              <MultiSelect
+                label="allowed_source_types"
+                data={sourceOptions}
+                value={allowedSourceTypes}
+                onChange={(v) => {
+                  setAllowedSourceTypes(v);
+                  markDirty();
+                }}
+                disabled={!isAdmin}
+                searchable
+                clearable
+                placeholder="Select allowed sources (leave empty to allow all)"
+              />
 
-            <NumberInput
-              label="retention_days"
-              description="Optional. If set (>0), you can run purge to delete evidence + run logs older than cutoff."
-              value={retentionDays ?? undefined}
-              onChange={(v) => {
-                const n = typeof v === "number" && Number.isFinite(v) ? v : null;
-                setRetentionDays(n && n > 0 ? Math.floor(n) : null);
-                markDirty();
-              }}
-              disabled={!isAdmin}
-              min={1}
-              placeholder="e.g., 30"
-            />
+              <NumberInput
+                label="retention_days"
+                description="Optional. If set (>0), you can run purge to delete evidence + run logs older than cutoff."
+                value={retentionDays ?? undefined}
+                onChange={(v) => {
+                  const n = typeof v === "number" && Number.isFinite(v) ? v : null;
+                  setRetentionDays(n && n > 0 ? Math.floor(n) : null);
+                  markDirty();
+                }}
+                disabled={!isAdmin}
+                min={1}
+                placeholder="e.g., 30"
+              />
 
-            <Switch
-              checked={blockExternalLinks}
-              onChange={(e) => {
-                setBlockExternalLinks(e.currentTarget.checked);
-                markDirty();
-              }}
-              disabled={!isAdmin}
-              label="block_external_links"
-              description="Stored in policy_json. Enforcement can be wired in later (V1 stores it)."
-            />
-          </Stack>
+              <Switch
+                checked={blockExternalLinks}
+                onChange={(e) => {
+                  setBlockExternalLinks(e.currentTarget.checked);
+                  markDirty();
+                }}
+                disabled={!isAdmin}
+                label="block_external_links"
+                description="Stored in policy_json. Enforcement can be wired in later (V1 stores it)."
+              />
+            </Stack>
 
-          <Divider />
+            <Divider />
 
-          <Stack gap="xs">
-            <Text fw={600}>PII Masking</Text>
-            <Text size="sm" c="dimmed">
-              Basic masking for email/phone/long IDs. Mode controls when masking is applied.
-            </Text>
+            <Stack gap="xs">
+              <Group gap="sm" align="center">
+                <Text fw={700}>PII masking</Text>
+                <Tooltip withArrow label="Basic masking for email/phone/long IDs. Mode controls when masking is applied.">
+                  <Badge variant="light">?</Badge>
+                </Tooltip>
+              </Group>
 
-            <Switch
-              checked={piiEnabled}
-              onChange={(e) => {
-                setPiiEnabled(e.currentTarget.checked);
-                markDirty();
-              }}
-              disabled={!isAdmin}
-              label="pii_masking.enabled"
-            />
+              <Switch
+                checked={piiEnabled}
+                onChange={(e) => {
+                  setPiiEnabled(e.currentTarget.checked);
+                  markDirty();
+                }}
+                disabled={!isAdmin}
+                label="pii_masking.enabled"
+              />
 
-            <Select
-              label="pii_masking.mode"
-              data={[
-                { value: "none", label: "none" },
-                { value: "write_time", label: "write_time" },
-                { value: "export_time", label: "export_time" },
-                { value: "both", label: "both" },
-              ]}
-              value={piiMode}
-              onChange={(v) => {
-                const nv = (v as PiiMode) || "none";
-                setPiiMode(nv);
-                markDirty();
-              }}
-              disabled={!isAdmin || !piiEnabled}
-            />
-          </Stack>
+              <Select
+                label="pii_masking.mode"
+                data={[
+                  { value: "none", label: "none" },
+                  { value: "write_time", label: "write_time" },
+                  { value: "export_time", label: "export_time" },
+                  { value: "both", label: "both" },
+                ]}
+                value={piiMode}
+                onChange={(v) => {
+                  const nv = (v as PiiMode) || "none";
+                  setPiiMode(nv);
+                  markDirty();
+                }}
+                disabled={!isAdmin || !piiEnabled}
+              />
+            </Stack>
 
-          <Divider />
+            <Divider />
 
-          <Stack gap="xs">
-            <Group justify="space-between">
-              <Text fw={600}>Retention Purge</Text>
-              <Button onClick={runPurge} loading={purging} disabled={!isAdmin || purging || loading}>
-                Run purge now
-              </Button>
-            </Group>
+            <Stack gap="xs">
+              <Group justify="space-between" align="center">
+                <Group gap="sm" align="center">
+                  <Text fw={700}>Retention purge</Text>
+                  <Tooltip withArrow label="Deletes evidence + run logs older than cutoff (based on retention_days).">
+                    <Badge variant="light">?</Badge>
+                  </Tooltip>
+                </Group>
 
-            <Text size="sm" c="dimmed">
-              Uses <Code>POST /workspaces/:id/policy/purge</Code>. Requires <Code>retention_days</Code> to be set.
-            </Text>
+                <Button onClick={runPurge} loading={purging} disabled={!isAdmin || purging || loading} size="sm">
+                  Run purge now
+                </Button>
+              </Group>
 
-            {purgeResult ? (
-              <Card withBorder>
-                <Stack gap={6}>
-                  <Text fw={600}>Purge result</Text>
-                  <Text size="sm">
-                    cutoff: <Code>{purgeResult.cutoff}</Code>
-                  </Text>
-                  <Text size="sm">
-                    deleted_evidence: <Code>{purgeResult.deleted_evidence}</Code> · deleted_logs:{" "}
-                    <Code>{purgeResult.deleted_logs}</Code>
-                  </Text>
-                </Stack>
-              </Card>
-            ) : null}
-          </Stack>
-
-          <Divider />
-
-          <Stack gap="xs">
-            <Text fw={600}>Normalized Policy JSON (preview)</Text>
-            <Text size="sm" c="dimmed">
-              This is what will be sent to the backend on Save.
-            </Text>
-            <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(effectiveJson)}</pre>
-
-            {policy ? (
-              <Text size="xs" c="dimmed">
-                Loaded from server: <Code>{wid}</Code>
+              <Text size="sm" c="dimmed">
+                Uses <Code>POST /workspaces/:id/policy/purge</Code>. Requires <Code>retention_days</Code>.
               </Text>
-            ) : null}
+
+              {purgeResult ? (
+                <GlassCard p="md">
+                  <Stack gap={6}>
+                    <Text fw={700}>Purge result</Text>
+                    <Text size="sm">
+                      cutoff: <Code>{purgeResult.cutoff}</Code>
+                    </Text>
+                    <Text size="sm">
+                      deleted_evidence: <Code>{purgeResult.deleted_evidence}</Code> · deleted_logs:{" "}
+                      <Code>{purgeResult.deleted_logs}</Code>
+                    </Text>
+                  </Stack>
+                </GlassCard>
+              ) : null}
+            </Stack>
+
+            <Divider />
+
+            <Stack gap="xs">
+              <Text fw={700}>Normalized policy (preview)</Text>
+              <Text size="sm" c="dimmed">
+                This is what will be sent to the backend on Save.
+              </Text>
+              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(effectiveJson)}</pre>
+
+              {policy ? (
+                <Text size="xs" c="dimmed">
+                  Loaded from server: <Code>{wid}</Code>
+                </Text>
+              ) : null}
+            </Stack>
           </Stack>
-        </Stack>
-      </Card>
-    </Stack>
+        </GlassSection>
+      </Stack>
+    </GlassPage>
   );
 }

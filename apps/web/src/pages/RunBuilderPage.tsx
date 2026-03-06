@@ -1,10 +1,11 @@
+// apps/web/src/pages/RunBuilderPage.tsx
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   Badge,
   Button,
-  Card,
   Checkbox,
+  Code,
   Divider,
   Group,
   NumberInput,
@@ -14,10 +15,15 @@ import {
   Text,
   TextInput,
   Textarea,
-  Title,
+  Tooltip,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import type { Agent, PipelineTemplate, Run, PipelineRun } from "../types";
+
+import GlassPage from "../components/Glass/GlassPage";
+import GlassCard from "../components/Glass/GlassCard";
+import GlassSection from "../components/Glass/GlassSection";
+import GlassStat from "../components/Glass/GlassStat";
 
 type WorkspaceRole = {
   workspace_id: string;
@@ -54,6 +60,14 @@ function normalizeTemplates(res: TemplateListResponse): PipelineTemplate[] {
 
 type TimeframePreset = "7d" | "30d" | "90d" | "custom";
 
+function HelpPill({ label }: { label: string }) {
+  return (
+    <Tooltip label={label} withArrow>
+      <Badge variant="light">?</Badge>
+    </Tooltip>
+  );
+}
+
 export default function RunBuilderPage() {
   const { workspaceId } = useParams();
   const wid = workspaceId || "";
@@ -63,7 +77,8 @@ export default function RunBuilderPage() {
 
   // Role
   const [myRole, setMyRole] = useState<WorkspaceRole | null>(null);
-  const canWrite = (myRole?.role || "").toLowerCase() !== "viewer";
+  const roleStr = (myRole?.role || "").toLowerCase();
+  const canWrite = roleStr !== "viewer";
 
   // Mode: single agent run vs pipeline run
   const [mode, setMode] = useState<"agent" | "pipeline">("agent");
@@ -72,7 +87,7 @@ export default function RunBuilderPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [agentId, setAgentId] = useState<string | null>(null);
 
-  // Pipelines templates
+  // Pipeline templates
   const [templates, setTemplates] = useState<PipelineTemplate[]>([]);
   const [templateId, setTemplateId] = useState<string | null>(null);
   const [loadingTemplates, setLoadingTemplates] = useState(false);
@@ -97,7 +112,7 @@ export default function RunBuilderPage() {
   // Create
   const [creating, setCreating] = useState(false);
 
-  // Retrieval test
+  // Retrieval test + run retrieval config
   const [rq, setRq] = useState("retrieval later");
   const [rk, setRk] = useState<number>(5);
   const [ralpha, setRalpha] = useState<number>(0.65);
@@ -114,7 +129,10 @@ export default function RunBuilderPage() {
     [templates]
   );
 
-  const selectedAgent = useMemo(() => agents.find((a) => a.id === agentId) || null, [agents, agentId]);
+  const selectedAgent = useMemo(
+    () => agents.find((a) => a.id === agentId) || null,
+    [agents, agentId]
+  );
 
   const selectedSources = useMemo(() => {
     const out: string[] = [];
@@ -184,7 +202,7 @@ export default function RunBuilderPage() {
     if (!wid) return;
 
     if (!canWrite) {
-      setErr("You are a viewer. Creating runs/pipelines is disabled.");
+      setErr("Viewer role: creating runs/pipelines is disabled.");
       return;
     }
 
@@ -264,7 +282,6 @@ export default function RunBuilderPage() {
     params.set("k", String(rk || 5));
     params.set("alpha", String(ralpha ?? 0.65));
 
-    // backend supports source_types as comma-separated
     if (selectedSources.length > 0) {
       params.set("source_types", selectedSources.join(","));
     }
@@ -293,275 +310,347 @@ export default function RunBuilderPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wid]);
 
+  const headerRight = (
+    <Group>
+      <Button component={Link} to={`/workspaces/${wid}`} variant="light" size="sm">
+        Back
+      </Button>
+      <Button component={Link} to={`/workspaces/${wid}/docs`} variant="light" size="sm">
+        Docs
+      </Button>
+    </Group>
+  );
+
+  const accessRight = myRole ? (
+    <Group gap="sm" wrap="wrap">
+      <Badge variant="light">{myRole.role}</Badge>
+      <GlassStat label="Mode" value={mode === "agent" ? "Agent" : "Pipeline"} />
+      <GlassStat label="Write" value={canWrite ? "Enabled" : "Disabled"} />
+    </Group>
+  ) : undefined;
+
   return (
-    <Stack gap="md">
-      <Group justify="space-between">
-        <Title order={2}>Run Builder</Title>
-        <Group>
-          <Button component={Link} to={`/workspaces/${wid}`} variant="light">
-            Back to Workspace
-          </Button>
-          <Button component={Link} to={`/workspaces/${wid}/docs`} variant="default">
-            Docs
-          </Button>
-        </Group>
-      </Group>
+    <GlassPage
+      title="Run Builder"
+      subtitle="Create a run (agent) or a pipeline run. Preview retrieval to validate evidence coverage."
+      right={headerRight}
+    >
+      <Stack gap="md">
+        {err ? (
+          <GlassCard>
+            <Text c="red">{err}</Text>
+          </GlassCard>
+        ) : null}
 
-      {myRole ? (
-        <Card withBorder>
-          <Group justify="space-between">
-            <Text fw={700}>Workspace role</Text>
-            <Badge variant="light">{myRole.role}</Badge>
-          </Group>
-          <Text size="sm" c="dimmed">
-            Viewer can test retrieval. Member/Admin can create runs and pipeline runs.
-          </Text>
-        </Card>
-      ) : null}
-
-      {err ? (
-        <Card withBorder>
-          <Text c="red">{err}</Text>
-        </Card>
-      ) : null}
-
-      <Card withBorder>
-        <Stack gap="sm">
-          <Text fw={700}>Mode</Text>
-          <Radio.Group value={mode} onChange={(v) => setMode(v as any)}>
-            <Group>
-              <Radio value="agent" label="Single agent run" />
-              <Radio value="pipeline" label="Pipeline run" />
-            </Group>
-          </Radio.Group>
-
-          {mode === "agent" ? (
-            <Select
-              label="Pick agent"
-              data={agentOptions}
-              value={agentId}
-              onChange={setAgentId}
-              searchable
-              nothingFoundMessage="No agents"
-              disabled={!canWrite}
-            />
+        <GlassSection
+          title="Access"
+          description="Viewer can preview retrieval. Member/Admin can create runs and pipeline runs."
+          right={accessRight}
+        >
+          {!canWrite ? (
+            <Text size="sm" c="dimmed">
+              Viewer role: creation is disabled. You can still use “Test retrieval” below.
+            </Text>
           ) : (
-            <Stack gap="xs">
-              <Group justify="space-between" align="flex-end">
+            <Text size="sm" c="dimmed">
+              You can create runs and pipelines. Retrieval config is stored on the run payload (V0).
+            </Text>
+          )}
+        </GlassSection>
+
+        <GlassSection
+          title="Create"
+          description="Pick a mode, set your input payload, and create a run."
+          right={
+            <Group gap="sm">
+              <Button variant="light" onClick={loadTemplates} loading={loadingTemplates} disabled={!canWrite} size="sm">
+                Refresh templates
+              </Button>
+            </Group>
+          }
+        >
+          <Stack gap="sm">
+            <Group justify="space-between" align="center">
+              <Group gap="sm">
+                <Text fw={700}>Mode</Text>
+                <HelpPill label="Agent creates a single run. Pipeline executes a template workflow." />
+              </Group>
+            </Group>
+
+            <Radio.Group value={mode} onChange={(v) => setMode(v as any)}>
+              <Group>
+                <Radio value="agent" label="Single agent run" />
+                <Radio value="pipeline" label="Pipeline run" />
+              </Group>
+            </Radio.Group>
+
+            {mode === "agent" ? (
+              <Select
+                label="Agent"
+                data={agentOptions}
+                value={agentId}
+                onChange={setAgentId}
+                searchable
+                nothingFoundMessage="No agents"
+                disabled={!canWrite}
+              />
+            ) : (
+              <Stack gap="xs">
                 <Select
-                  label="Pick pipeline template"
+                  label="Pipeline template"
                   data={templateOptions}
                   value={templateId}
                   onChange={setTemplateId}
                   searchable
                   nothingFoundMessage="No templates"
-                  style={{ flex: 1 }}
                   disabled={!canWrite}
                 />
-                <Button variant="light" onClick={loadTemplates} loading={loadingTemplates} disabled={!canWrite}>
-                  Refresh templates
-                </Button>
-              </Group>
-
-              {templates.length === 0 ? (
-                <TextInput
-                  label="Template ID (manual)"
-                  value={templateId ?? ""}
-                  onChange={(e) => setTemplateId(e.currentTarget.value)}
-                  placeholder="Paste template UUID"
-                  disabled={!canWrite}
-                />
-              ) : null}
-            </Stack>
-          )}
-
-          {!canWrite ? (
-            <Text size="sm" c="dimmed">
-              You are a viewer — creating runs/pipelines is disabled.
-            </Text>
-          ) : null}
-
-          {mode === "agent" && selectedAgent ? (
-            <Card withBorder>
-              <Stack gap={4}>
-                <Group gap="sm">
-                  <Badge>{selectedAgent.id}</Badge>
-                  <Badge variant="light">{selectedAgent.version}</Badge>
-                  <Text fw={600}>{selectedAgent.name}</Text>
-                </Group>
-                <Text size="sm" c="dimmed">
-                  {selectedAgent.description}
-                </Text>
-                <Text size="sm">
-                  Default artifact type:{" "}
-                  <Text span fw={700}>
-                    {selectedAgent.default_artifact_type}
-                  </Text>
-                </Text>
+                {templates.length === 0 ? (
+                  <TextInput
+                    label="Template ID (manual)"
+                    value={templateId ?? ""}
+                    onChange={(e) => setTemplateId(e.currentTarget.value)}
+                    placeholder="Paste template UUID"
+                    disabled={!canWrite}
+                  />
+                ) : null}
               </Stack>
-            </Card>
-          ) : null}
+            )}
 
-          <Divider />
+            {mode === "agent" && selectedAgent ? (
+              <GlassCard p="md">
+                <Stack gap={6}>
+                  <Group gap="sm">
+                    <Badge variant="light">{selectedAgent.id}</Badge>
+                    <Badge variant="light">{selectedAgent.version}</Badge>
+                    <Text fw={700}>{selectedAgent.name}</Text>
+                  </Group>
+                  <Text size="sm" c="dimmed">
+                    {selectedAgent.description}
+                  </Text>
+                  <Text size="sm" c="dimmed">
+                    Default artifact type: <Code>{selectedAgent.default_artifact_type}</Code>
+                  </Text>
+                </Stack>
+              </GlassCard>
+            ) : null}
 
-          <Text fw={700}>Payload</Text>
-          <Group grow>
-            <TextInput label="Goal" value={goal} onChange={(e) => setGoal(e.currentTarget.value)} disabled={!canWrite} />
-            <TextInput
-              label="Context"
-              value={context}
-              onChange={(e) => setContext(e.currentTarget.value)}
-              disabled={!canWrite}
-            />
-          </Group>
-          <TextInput
-            label="Constraints (optional)"
-            value={constraints}
-            onChange={(e) => setConstraints(e.currentTarget.value)}
-            disabled={!canWrite}
-          />
+            <Divider />
 
-          <Divider />
+            <Group gap="sm" align="center">
+              <Text fw={700}>Input</Text>
+              <HelpPill label="This is the high-level context the agent/pipeline receives as input_payload." />
+            </Group>
 
-          <Text fw={700}>Timeframe</Text>
-          <Select
-            label="Preset"
-            value={preset}
-            onChange={(v) => setPreset((v as any) || "30d")}
-            data={[
-              { value: "7d", label: "Last 7 days" },
-              { value: "30d", label: "Last 30 days" },
-              { value: "90d", label: "Last 90 days" },
-              { value: "custom", label: "Custom" },
-            ]}
-            style={{ maxWidth: 280 }}
-            disabled={!canWrite}
-          />
-          {preset === "custom" ? (
             <Group grow>
               <TextInput
-                label="Start date (YYYY-MM-DD)"
-                value={startDate}
-                onChange={(e) => setStartDate(e.currentTarget.value)}
+                label="Goal"
+                value={goal}
+                onChange={(e) => setGoal(e.currentTarget.value)}
                 disabled={!canWrite}
               />
               <TextInput
-                label="End date (YYYY-MM-DD)"
-                value={endDate}
-                onChange={(e) => setEndDate(e.currentTarget.value)}
+                label="Context"
+                value={context}
+                onChange={(e) => setContext(e.currentTarget.value)}
                 disabled={!canWrite}
               />
             </Group>
-          ) : null}
 
-          <Divider />
-
-          <Text fw={700}>Sources (stored in payload)</Text>
-          <Group>
-            <Checkbox checked={srcDocs} onChange={(e) => setSrcDocs(e.currentTarget.checked)} label="Docs" />
-            <Checkbox checked={srcManual} onChange={(e) => setSrcManual(e.currentTarget.checked)} label="Manual" />
-            <Checkbox checked={srcGithub} onChange={(e) => setSrcGithub(e.currentTarget.checked)} label="GitHub" />
-            <Checkbox checked={srcJira} onChange={(e) => setSrcJira(e.currentTarget.checked)} label="Jira" />
-            <Checkbox checked={srcSlack} onChange={(e) => setSrcSlack(e.currentTarget.checked)} label="Slack" />
-          </Group>
-          <Text size="sm" c="dimmed">
-            In V0, these are stored on the run/pipeline payload and used for retrieval test. Real connector sync comes in V1.
-          </Text>
-
-          <Divider />
-
-          <Text fw={700}>Preview payload</Text>
-          <Textarea
-            autosize
-            minRows={6}
-            value={JSON.stringify(inputPayload, null, 2)}
-            onChange={() => {}}
-            readOnly
-          />
-
-          <Group>
-            <Button onClick={create} loading={creating} disabled={!canWrite}>
-              Create {mode === "agent" ? "Run" : "Pipeline Run"}
-            </Button>
-          </Group>
-        </Stack>
-      </Card>
-
-      {/* Retrieval test */}
-      <Card withBorder>
-        <Stack gap="sm">
-          <Text fw={700}>Test Retrieval (viewer+)</Text>
-          <Text size="sm" c="dimmed">
-            Uses your selected sources (source_types) and current query parameters. Timeframe is stored in payload only (V0).
-          </Text>
-
-          <TextInput
-            label="Query"
-            value={rq}
-            onChange={(e) => setRq(e.currentTarget.value)}
-            placeholder='e.g., "retrieval later"'
-          />
-
-          <Group grow>
-            <NumberInput label="Top K" value={rk} min={1} max={50} onChange={(v) => setRk(Number(v) || 5)} />
-            <NumberInput
-              label="Alpha (vector weight)"
-              value={ralpha}
-              min={0}
-              max={1}
-              step={0.05}
-              onChange={(v) => setRalpha(Number(v) || 0.65)}
+            <TextInput
+              label="Constraints (optional)"
+              value={constraints}
+              onChange={(e) => setConstraints(e.currentTarget.value)}
+              disabled={!canWrite}
             />
-          </Group>
 
-          <Group>
-            <Button onClick={testRetrieve} loading={rloading}>
-              Search
-            </Button>
-            <Badge variant="light">source_types: {selectedSources.length ? selectedSources.join(",") : "none"}</Badge>
-          </Group>
+            <Divider />
 
-          {rres ? (
-            <Card withBorder>
-              <Stack gap="xs">
-                <Group justify="space-between">
-                  <Text fw={600}>Results</Text>
-                  <Badge variant="light">items: {rres.items?.length ?? 0}</Badge>
-                </Group>
+            <Group gap="sm" align="center">
+              <Text fw={700}>Timeframe</Text>
+              <HelpPill label="Used by retrieval config on run creation. In V0, timeframe is also stored in payload for reference." />
+            </Group>
 
-                {(rres.items || []).length === 0 ? (
-                  <Text size="sm" c="dimmed">
-                    No matches.
-                  </Text>
-                ) : (
-                  <Stack gap="xs">
-                    {rres.items.map((it) => (
-                      <Card key={it.chunk_id} withBorder>
-                        <Stack gap={4}>
-                          <Group gap="sm">
-                            <Badge variant="light">score: {Number(it.score_hybrid).toFixed(3)}</Badge>
-                            <Text fw={600}>{it.document_title}</Text>
-                          </Group>
-                          <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
-                            {it.snippet}
-                          </Text>
-                          <Text size="xs" c="dimmed">
-                            doc={it.document_id} · chunk={it.chunk_id} · source={it.source_id}
-                          </Text>
-                        </Stack>
-                      </Card>
-                    ))}
-                  </Stack>
-                )}
-              </Stack>
-            </Card>
-          ) : (
+            <Select
+              label="Preset"
+              value={preset}
+              onChange={(v) => setPreset((v as any) || "30d")}
+              data={[
+                { value: "7d", label: "Last 7 days" },
+                { value: "30d", label: "Last 30 days" },
+                { value: "90d", label: "Last 90 days" },
+                { value: "custom", label: "Custom" },
+              ]}
+              style={{ maxWidth: 320 }}
+              disabled={!canWrite}
+            />
+
+            {preset === "custom" ? (
+              <Group grow>
+                <TextInput
+                  label="Start date (YYYY-MM-DD)"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.currentTarget.value)}
+                  disabled={!canWrite}
+                />
+                <TextInput
+                  label="End date (YYYY-MM-DD)"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.currentTarget.value)}
+                  disabled={!canWrite}
+                />
+              </Group>
+            ) : null}
+
+            <Divider />
+
+            <Group gap="sm" align="center">
+              <Text fw={700}>Sources</Text>
+              <HelpPill label="Selected source types are stored in payload and also used for retrieval preview." />
+            </Group>
+
+            <Group>
+              <Checkbox checked={srcDocs} onChange={(e) => setSrcDocs(e.currentTarget.checked)} label="Docs" />
+              <Checkbox checked={srcManual} onChange={(e) => setSrcManual(e.currentTarget.checked)} label="Manual" />
+              <Checkbox checked={srcGithub} onChange={(e) => setSrcGithub(e.currentTarget.checked)} label="GitHub" />
+              <Checkbox checked={srcJira} onChange={(e) => setSrcJira(e.currentTarget.checked)} label="Jira" />
+              <Checkbox checked={srcSlack} onChange={(e) => setSrcSlack(e.currentTarget.checked)} label="Slack" />
+            </Group>
+
             <Text size="sm" c="dimmed">
-              Run a retrieval search to validate your docs ingestion + source filters.
+              In V0, these are stored on the run/pipeline payload and used for retrieval preview. Connector ingestion comes later.
             </Text>
-          )}
-        </Stack>
-      </Card>
-    </Stack>
+
+            <Divider />
+
+            <Group gap="sm" align="center">
+              <Text fw={700}>Retrieval config (for this run)</Text>
+              <HelpPill label="These parameters are sent when creating an agent run. Use 'Test retrieval' to validate results first." />
+            </Group>
+
+            <TextInput
+              label="Query"
+              value={rq}
+              onChange={(e) => setRq(e.currentTarget.value)}
+              placeholder='e.g., "how to name events"'
+              disabled={!canWrite && mode === "agent"}
+            />
+
+            <Group grow>
+              <NumberInput
+                label="k"
+                value={rk}
+                min={1}
+                max={50}
+                onChange={(v) => setRk(Number(v) || 5)}
+                disabled={!canWrite && mode === "agent"}
+              />
+              <NumberInput
+                label="alpha"
+                value={ralpha}
+                min={0}
+                max={1}
+                step={0.05}
+                onChange={(v) => setRalpha(Number(v) || 0.65)}
+                disabled={!canWrite && mode === "agent"}
+              />
+            </Group>
+
+            <Divider />
+
+            <Text fw={700}>Preview payload</Text>
+            <Textarea autosize minRows={6} value={JSON.stringify(inputPayload, null, 2)} readOnly />
+
+            <Group>
+              <Tooltip withArrow label={canWrite ? "Creates the run and redirects to Run detail." : "Viewer role cannot create runs."}>
+                <span>
+                  <Button onClick={create} loading={creating} disabled={!canWrite} size="sm">
+                    Create {mode === "agent" ? "run" : "pipeline run"}
+                  </Button>
+                </span>
+              </Tooltip>
+            </Group>
+          </Stack>
+        </GlassSection>
+
+        <GlassSection
+          title="Test retrieval"
+          description="Preview what retrieval would return with your current query and source types."
+          right={<GlassStat label="Sources" value={selectedSources.length ? selectedSources.join(", ") : "none"} />}
+        >
+          <Stack gap="sm">
+            <Text size="sm" c="dimmed">
+              Uses <Code>GET /workspaces/:id/retrieve</Code>. Viewer+ allowed.
+            </Text>
+
+            <TextInput
+              label="Query"
+              value={rq}
+              onChange={(e) => setRq(e.currentTarget.value)}
+              placeholder='e.g., "refresh tokens"'
+            />
+
+            <Group grow>
+              <NumberInput label="Top K" value={rk} min={1} max={50} onChange={(v) => setRk(Number(v) || 5)} />
+              <NumberInput
+                label="Alpha (vector weight)"
+                value={ralpha}
+                min={0}
+                max={1}
+                step={0.05}
+                onChange={(v) => setRalpha(Number(v) || 0.65)}
+              />
+            </Group>
+
+            <Group>
+              <Button onClick={testRetrieve} loading={rloading} size="sm">
+                Search
+              </Button>
+              <Badge variant="light">source_types: {selectedSources.length ? selectedSources.join(",") : "none"}</Badge>
+            </Group>
+
+            {rres ? (
+              <GlassCard p="md">
+                <Stack gap="xs">
+                  <Group justify="space-between">
+                    <Text fw={700}>Results</Text>
+                    <Badge variant="light">items: {rres.items?.length ?? 0}</Badge>
+                  </Group>
+
+                  {(rres.items || []).length === 0 ? (
+                    <Text size="sm" c="dimmed">
+                      No matches.
+                    </Text>
+                  ) : (
+                    <Stack gap="xs">
+                      {rres.items.map((it) => (
+                        <GlassCard key={it.chunk_id} p="md">
+                          <Stack gap={6}>
+                            <Group gap="sm">
+                              <Badge variant="light">score: {Number(it.score_hybrid).toFixed(3)}</Badge>
+                              <Text fw={700}>{it.document_title}</Text>
+                            </Group>
+                            <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
+                              {it.snippet}
+                            </Text>
+                            <Text size="xs" c="dimmed">
+                              doc={it.document_id} · chunk={it.chunk_id} · source={it.source_id}
+                            </Text>
+                          </Stack>
+                        </GlassCard>
+                      ))}
+                    </Stack>
+                  )}
+                </Stack>
+              </GlassCard>
+            ) : (
+              <Text size="sm" c="dimmed">
+                Run a retrieval search to validate docs ingestion and filters before you create a run.
+              </Text>
+            )}
+          </Stack>
+        </GlassSection>
+      </Stack>
+    </GlassPage>
   );
 }

@@ -4,20 +4,19 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   Badge,
   Button,
-  Card,
   Code,
   Group,
   Select,
   Stack,
   Text,
   Textarea,
-  Title,
   Divider,
   TextInput,
   NumberInput,
   Checkbox,
   MultiSelect,
   Collapse,
+  Tooltip,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import type {
@@ -33,6 +32,11 @@ import type {
   AgentDefinitionJson,
   PromptBlock,
 } from "../types";
+
+import GlassPage from "../components/Glass/GlassPage";
+import GlassCard from "../components/Glass/GlassCard";
+import GlassSection from "../components/Glass/GlassSection";
+import GlassStat from "../components/Glass/GlassStat";
 
 function safeJsonParse(s: string): { ok: boolean; value: any; error?: string } {
   try {
@@ -63,6 +67,14 @@ function isRoleAllowed(myRole: string | null, allowed: string[]): boolean {
   if (!r) return false;
   const set = new Set((allowed || []).map((x) => String(x || "").toLowerCase()).filter(Boolean));
   return set.has(r);
+}
+
+function HelpPill({ label }: { label: string }) {
+  return (
+    <Tooltip label={label} withArrow>
+      <Badge variant="light">?</Badge>
+    </Tooltip>
+  );
 }
 
 type TimeframePreset = "7d" | "30d" | "90d" | "custom";
@@ -99,7 +111,11 @@ function clamp(n: number, min: number, max: number): number {
 function formToDefinitionJson(f: DefinitionForm): AgentDefinitionJson {
   const timeframe: Record<string, unknown> =
     f.preset === "custom"
-      ? { preset: "custom", ...(f.startDate ? { start_date: f.startDate } : {}), ...(f.endDate ? { end_date: f.endDate } : {}) }
+      ? {
+          preset: "custom",
+          ...(f.startDate ? { start_date: f.startDate } : {}),
+          ...(f.endDate ? { end_date: f.endDate } : {}),
+        }
       : { preset: f.preset };
 
   const out: AgentDefinitionJson = {
@@ -121,26 +137,26 @@ function formToDefinitionJson(f: DefinitionForm): AgentDefinitionJson {
   return out;
 }
 
-function definitionJsonToForm(
-  dj: AgentDefinitionJson,
-  fallbackArtifactTypes: string[]
-): DefinitionForm {
-  const artType = String(dj?.artifact?.type || "").trim() || (fallbackArtifactTypes[0] || "strategy_memo");
+function definitionJsonToForm(dj: AgentDefinitionJson, fallbackArtifactTypes: string[]): DefinitionForm {
+  const artType =
+    String((dj as any)?.artifact?.type || "").trim() || (fallbackArtifactTypes[0] || "strategy_memo");
 
-  const r: any = dj?.retrieval || {};
+  const r: any = (dj as any)?.retrieval || {};
   const tf: any = r?.timeframe || {};
 
   const presetRaw = String(tf?.preset || "30d").toLowerCase();
   const preset: TimeframePreset =
-    presetRaw === "7d" || presetRaw === "30d" || presetRaw === "90d" || presetRaw === "custom" ? presetRaw : "30d";
+    presetRaw === "7d" || presetRaw === "30d" || presetRaw === "90d" || presetRaw === "custom"
+      ? (presetRaw as TimeframePreset)
+      : "30d";
 
-  const pb: PromptBlock[] = Array.isArray(dj?.prompt_blocks)
-    ? dj.prompt_blocks
+  const pb: PromptBlock[] = Array.isArray((dj as any)?.prompt_blocks)
+    ? (dj as any).prompt_blocks
         .map((x: any) => ({
           kind: String(x?.kind || "instruction"),
           text: String(x?.text || ""),
         }))
-        .filter((x) => x.kind.trim() || x.text.trim())
+        .filter((x: any) => x.kind.trim() || x.text.trim())
     : [];
 
   return {
@@ -150,11 +166,13 @@ function definitionJsonToForm(
     retrievalQuery: String(r?.query || ""),
     k: Number(r?.k ?? 6),
     alpha: Number(r?.alpha ?? 0.65),
-    minScore: Number(r?.min_score ?? 0.15),
-    overfetchK: Number(r?.overfetch_k ?? 3),
+    minScore: Number(r?.min_score ?? r?.minScore ?? 0.15),
+    overfetchK: Number(r?.overfetch_k ?? r?.overfetchK ?? 3),
     rerank: Boolean(r?.rerank ?? false),
 
-    sourceTypes: Array.isArray(r?.source_types) ? r.source_types.map((x: any) => String(x).trim()).filter(Boolean) : [],
+    sourceTypes: Array.isArray(r?.source_types)
+      ? r.source_types.map((x: any) => String(x).trim()).filter(Boolean)
+      : [],
 
     preset,
     startDate: String(tf?.start_date || ""),
@@ -244,8 +262,7 @@ export default function AgentBuilderPage() {
 
   const timeframePresets = useMemo(() => {
     const p = meta?.timeframe_presets || [];
-    const out = p.length ? p : ["7d", "30d", "90d", "custom"];
-    return out;
+    return p.length ? p : ["7d", "30d", "90d", "custom"];
   }, [meta?.timeframe_presets]);
 
   // knobs bounds/defaults from meta.retrieval_knobs
@@ -298,13 +315,11 @@ export default function AgentBuilderPage() {
   const canArchive = isRoleAllowed(roleStr, rbacAgentBuilder?.can_archive_agent_roles || ["admin"]);
   const canPreview = isRoleAllowed(roleStr, rbacAgentBuilder?.can_preview_agent_roles || ["admin", "member"]);
   const canRun = isRoleAllowed(roleStr, rbacAgentBuilder?.can_run_agent_roles || ["admin", "member"]);
-  const canEditBase = canCreateBase; // same roles for now
-  const canEditVersion = canCreateBase; // same roles for now
+  const canEditBase = canCreateBase;
+  const canEditVersion = canCreateBase;
 
   // Guided form state
-  const [form, setForm] = useState<DefinitionForm>(() =>
-    definitionJsonToForm({}, ["prd", "strategy_memo"])
-  );
+  const [form, setForm] = useState<DefinitionForm>(() => definitionJsonToForm({}, ["prd", "strategy_memo"]));
 
   // Validate: if policy allowlist exists, selected sources must be subset
   const policyViolation = useMemo(() => {
@@ -430,7 +445,7 @@ export default function AgentBuilderPage() {
     const pick = latestDraft || list[0] || null;
     setVersionId(pick ? pick.id : null);
 
-    // initialize form/editor from picked version or default
+    // initialize editor from picked version or default
     const dj = (pick?.definition_json || {}) as AgentDefinitionJson;
     const nextForm = definitionJsonToForm(dj, artifactTypes);
     setForm(nextForm);
@@ -781,7 +796,6 @@ export default function AgentBuilderPage() {
     const v = versions.find((x) => x.id === versionId);
     if (!v?.definition_json) return;
 
-    // If user has unsaved changes, do not auto-overwrite.
     if (defDirty) return;
 
     const dj = (v.definition_json || {}) as AgentDefinitionJson;
@@ -802,196 +816,207 @@ export default function AgentBuilderPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [versions.length, artifactTypes.join("|")]);
 
+  const headerRight = (
+    <Group>
+      <Button component={Link} to={`/workspaces/${wid}`} variant="light" size="sm">
+        Back
+      </Button>
+      <Button onClick={loadAll} loading={metaLoading || basesLoading} size="sm" variant="light">
+        Refresh
+      </Button>
+    </Group>
+  );
+
+  const roleRight = myRole ? (
+    <Group gap="sm" wrap="wrap">
+      <Badge color={roleBadgeColor(roleStr)} variant="light">
+        {myRole.role}
+      </Badge>
+      <GlassStat label="Bases" value={bases.length} />
+      <GlassStat label="Versions" value={versions.length} />
+    </Group>
+  ) : undefined;
+
   return (
-    <Stack gap="md">
-      <Group justify="space-between">
-        <Title order={2}>Agent Builder</Title>
-        <Group>
-          <Button component={Link} to={`/workspaces/${wid}`} variant="light">
-            Back
-          </Button>
-          <Button onClick={loadAll} loading={metaLoading || basesLoading}>
-            Refresh
-          </Button>
-        </Group>
-      </Group>
+    <GlassPage
+      title="Agent Builder"
+      subtitle="Create agent bases, draft versions, and publish governed definitions."
+      right={headerRight}
+    >
+      <Stack gap="md">
+        {err ? (
+          <GlassCard>
+            <Text c="red">{err}</Text>
+          </GlassCard>
+        ) : null}
 
-      {myRole ? (
-        <Card withBorder>
-          <Group justify="space-between">
-            <Text fw={700}>Workspace role</Text>
-            <Badge color={roleBadgeColor(roleStr)} variant="light">
-              {myRole.role}
-            </Badge>
-          </Group>
-          <Text size="sm" c="dimmed">
-            RBAC is enforced by backend; UI controls are disabled based on effective RBAC (from builder meta).
-          </Text>
-        </Card>
-      ) : null}
+        <GlassSection
+          title="Access"
+          description="RBAC is enforced by backend; UI controls are disabled based on effective RBAC."
+          right={roleRight}
+        >
+          <Stack gap="xs">
+            <Text size="sm" c="dimmed">
+              Your role controls whether you can create bases, edit drafts, publish, or run agents.
+            </Text>
+          </Stack>
+        </GlassSection>
 
-      {err ? (
-        <Card withBorder>
-          <Text c="red">{err}</Text>
-        </Card>
-      ) : null}
-
-      {/* Meta */}
-      <Card withBorder>
-        <Stack gap="sm">
-          <Group justify="space-between">
+        <GlassSection
+          title="Builder meta"
+          description="Policy + RBAC metadata used to render allowed options."
+          right={
             <Group gap="sm">
-              <Text fw={700}>Builder Meta</Text>
+              <Button variant="light" onClick={loadMeta} loading={metaLoading} size="sm">
+                Refresh meta
+              </Button>
               <Badge variant="light">governance-aware</Badge>
             </Group>
-            <Button variant="light" onClick={loadMeta} loading={metaLoading}>
-              Refresh meta
-            </Button>
-          </Group>
-
+          }
+        >
           {!meta ? (
             <Text c="dimmed">{metaLoading ? "Loading…" : "No meta loaded."}</Text>
           ) : (
-            <>
+            <Stack gap="xs">
               <Text size="sm" c="dimmed">
-                policy.allowlist source_types:{" "}
+                policy allowlist (source_types):{" "}
                 <Code>{policyAllowedSourceTypes.length ? policyAllowedSourceTypes.join(",") : "none (no allowlist)"}</Code>
               </Text>
               <Text size="sm" c="dimmed">
-                artifact_types: <Code>{artifactTypes.join(",")}</Code>
+                artifact types: <Code>{artifactTypes.join(",")}</Code>
               </Text>
-            </>
+              <Text size="sm" c="dimmed">
+                timeframe presets: <Code>{timeframePresets.join(",")}</Code>
+              </Text>
+            </Stack>
           )}
-        </Stack>
-      </Card>
+        </GlassSection>
 
-      {/* Create base */}
-      <Card withBorder>
-        <Stack gap="sm">
-          <Group justify="space-between">
-            <Group gap="sm">
-              <Text fw={700}>Create Agent Base</Text>
+        <GlassSection
+          title="Create agent base"
+          description="A base is a logical agent (key + name). Versions store the governed prompt + retrieval config."
+          right={
+            <Group gap="sm" wrap="wrap">
               <Badge variant="light" color={canCreateBase ? "blue" : "gray"}>
                 {canCreateBase ? "allowed" : "blocked by RBAC"}
               </Badge>
             </Group>
-          </Group>
-
-          <Group grow>
-            <TextInput
-              label="key"
-              value={newKey}
-              onChange={(e) => setNewKey(e.currentTarget.value)}
-              placeholder="e.g. demo_prd"
-              disabled={!canCreateBase}
-            />
-            <TextInput
-              label="name"
-              value={newName}
-              onChange={(e) => setNewName(e.currentTarget.value)}
-              placeholder="e.g. Demo PRD Agent"
-              disabled={!canCreateBase}
-            />
-          </Group>
-          <TextInput
-            label="description"
-            value={newDesc}
-            onChange={(e) => setNewDesc(e.currentTarget.value)}
-            placeholder="Short description"
-            disabled={!canCreateBase}
-          />
-          <Group>
-            <Button onClick={createBase} loading={creatingBase} disabled={!canCreateBase}>
-              Create base
-            </Button>
-            <Button variant="light" onClick={loadBases} loading={basesLoading}>
-              Refresh bases
-            </Button>
-          </Group>
-        </Stack>
-      </Card>
-
-      {/* Bases */}
-      <Card withBorder>
-        <Stack gap="sm">
-          <Group justify="space-between">
-            <Group gap="sm">
-              <Text fw={700}>Agent Bases</Text>
-              <Badge variant="light">{bases.length} items</Badge>
+          }
+        >
+          <Stack gap="sm">
+            <Group grow>
+              <TextInput
+                label="Key"
+                value={newKey}
+                onChange={(e) => setNewKey(e.currentTarget.value)}
+                placeholder="e.g. demo_prd"
+                disabled={!canCreateBase}
+              />
+              <TextInput
+                label="Name"
+                value={newName}
+                onChange={(e) => setNewName(e.currentTarget.value)}
+                placeholder="e.g. Demo PRD Agent"
+                disabled={!canCreateBase}
+              />
             </Group>
-            <Button variant="light" onClick={loadBases} loading={basesLoading}>
-              Refresh
-            </Button>
-          </Group>
 
+            <TextInput
+              label="Description"
+              value={newDesc}
+              onChange={(e) => setNewDesc(e.currentTarget.value)}
+              placeholder="Short description"
+              disabled={!canCreateBase}
+            />
+
+            <Group>
+              <Button onClick={createBase} loading={creatingBase} disabled={!canCreateBase} size="sm">
+                Create base
+              </Button>
+              <Button variant="light" onClick={loadBases} loading={basesLoading} size="sm">
+                Refresh bases
+              </Button>
+            </Group>
+          </Stack>
+        </GlassSection>
+
+        <GlassSection
+          title="Agent bases"
+          description="Select a base to manage versions, publishing, and runs."
+          right={<GlassStat label="Total" value={bases.length} />}
+        >
           {bases.length === 0 ? (
             <Text c="dimmed">No agent bases in this workspace yet.</Text>
           ) : (
-            <Select
-              label="Select agent base"
-              data={baseOptions}
-              value={baseId}
-              onChange={(v) => setBaseId(v)}
-              searchable
-              nothingFoundMessage="No agent bases"
-            />
+            <Stack gap="sm">
+              <Select
+                label="Select agent base"
+                data={baseOptions}
+                value={baseId}
+                onChange={(v) => setBaseId(v)}
+                searchable
+                nothingFoundMessage="No agent bases"
+              />
+
+              {selectedBase ? (
+                <GlassCard p="md">
+                  <Stack gap="sm">
+                    <Group justify="space-between" align="center">
+                      <Text fw={700}>Edit base</Text>
+                      <Badge variant="light" color={canEditBase ? "blue" : "gray"}>
+                        {canEditBase ? "editable" : "read-only"}
+                      </Badge>
+                    </Group>
+
+                    <Group grow>
+                      <TextInput
+                        label="Name"
+                        value={editBaseName}
+                        onChange={(e) => setEditBaseName(e.currentTarget.value)}
+                        disabled={!canEditBase}
+                      />
+                      <TextInput
+                        label="Description"
+                        value={editBaseDesc}
+                        onChange={(e) => setEditBaseDesc(e.currentTarget.value)}
+                        disabled={!canEditBase}
+                      />
+                    </Group>
+
+                    <Group>
+                      <Button onClick={saveBaseEdits} loading={savingBase} disabled={!canEditBase || !baseId} size="sm">
+                        Save base
+                      </Button>
+                    </Group>
+                  </Stack>
+                </GlassCard>
+              ) : null}
+            </Stack>
           )}
+        </GlassSection>
 
-          {selectedBase ? (
-            <>
-              <Divider />
-              <Group justify="space-between">
-                <Text fw={700}>Edit selected base</Text>
-                <Badge variant="light" color={canEditBase ? "blue" : "gray"}>
-                  {canEditBase ? "editable" : "read-only"}
-                </Badge>
-              </Group>
-              <Group grow>
-                <TextInput
-                  label="name"
-                  value={editBaseName}
-                  onChange={(e) => setEditBaseName(e.currentTarget.value)}
-                  disabled={!canEditBase}
-                />
-                <TextInput
-                  label="description"
-                  value={editBaseDesc}
-                  onChange={(e) => setEditBaseDesc(e.currentTarget.value)}
-                  disabled={!canEditBase}
-                />
-              </Group>
-              <Group>
-                <Button onClick={saveBaseEdits} loading={savingBase} disabled={!canEditBase || !baseId}>
-                  Save base
-                </Button>
-              </Group>
-            </>
-          ) : null}
-        </Stack>
-      </Card>
-
-      {/* Versions */}
-      <Card withBorder>
-        <Stack gap="sm">
-          <Group justify="space-between">
+        <GlassSection
+          title="Versions"
+          description="Draft versions are editable. Publish locks a definition as the active version."
+          right={
             <Group gap="sm">
-              <Text fw={700}>Versions</Text>
-              <Badge variant="light">{versions.length} items</Badge>
+              <GlassStat label="Count" value={versions.length} />
+              <Button
+                variant="light"
+                onClick={() => (baseId ? loadVersions(baseId) : null)}
+                loading={versionsLoading}
+                disabled={!baseId}
+                size="sm"
+              >
+                Refresh
+              </Button>
             </Group>
-            <Button
-              variant="light"
-              onClick={() => (baseId ? loadVersions(baseId) : null)}
-              loading={versionsLoading}
-              disabled={!baseId}
-            >
-              Refresh versions
-            </Button>
-          </Group>
-
+          }
+        >
           {!baseId ? (
             <Text c="dimmed">Pick an agent base to manage versions.</Text>
           ) : (
-            <>
+            <Stack gap="sm">
               <Select
                 label="Select version"
                 data={versionOptions}
@@ -1001,31 +1026,31 @@ export default function AgentBuilderPage() {
                 nothingFoundMessage="No versions"
               />
 
-              <Group justify="space-between">
+              <Group justify="space-between" align="center">
                 <Group gap="sm">
                   <Badge variant="light" color={canEditSelectedVersion ? "blue" : "gray"}>
                     selected: {selectedVersionStatus || "none"}
                   </Badge>
                   {defDirty ? <Badge variant="light" color="yellow">unsaved changes</Badge> : null}
                 </Group>
+
                 <Button variant="light" size="xs" onClick={() => setAdvancedOpen((x) => !x)}>
                   {advancedOpen ? "Hide advanced JSON" : "Show advanced JSON"}
                 </Button>
               </Group>
 
-              {/* Policy warning */}
               {policyViolation ? (
-                <Card withBorder>
+                <GlassCard>
                   <Text c="red">{policyViolation}</Text>
                   <Text size="sm" c="dimmed">
-                    Fix the source_types selection to match policy allowlist (from builder meta).
+                    Fix your source types to match the workspace policy allowlist (from meta).
                   </Text>
-                </Card>
+                </GlassCard>
               ) : null}
 
-              {/* Guided builder */}
               <Divider />
-              <Text fw={700}>Guided version builder</Text>
+
+              <Text fw={700}>Guided builder</Text>
 
               <Group grow>
                 <Select
@@ -1034,12 +1059,15 @@ export default function AgentBuilderPage() {
                   value={form.artifactType}
                   onChange={(v) => setFormAndSync({ artifactType: v || artifactTypes[0] || "strategy_memo" })}
                 />
-                <Select
-                  label="Timeframe preset"
-                  data={timeframePresets.map((p) => ({ value: p, label: p }))}
-                  value={form.preset}
-                  onChange={(v) => setFormAndSync({ preset: (v as any) || "30d" })}
-                />
+                <Group gap="xs" align="end" style={{ width: "100%" }}>
+                  <Select
+                    label="Timeframe preset"
+                    data={timeframePresets.map((p) => ({ value: p, label: p }))}
+                    value={form.preset}
+                    onChange={(v) => setFormAndSync({ preset: (v as any) || "30d" })}
+                  />
+                  <HelpPill label="Controls what time window retrieval should prioritize." />
+                </Group>
               </Group>
 
               {form.preset === "custom" ? (
@@ -1058,8 +1086,13 @@ export default function AgentBuilderPage() {
               ) : null}
 
               <Divider />
-              <Group justify="space-between">
-                <Text fw={700}>Retrieval</Text>
+
+              <Group justify="space-between" align="center">
+                <Group gap="sm">
+                  <Text fw={700}>Retrieval</Text>
+                  <HelpPill label="Retrieval pulls evidence into the agent context. Disable if you want pure prompting." />
+                </Group>
+
                 <Checkbox
                   label="enabled"
                   checked={form.retrievalEnabled}
@@ -1071,80 +1104,109 @@ export default function AgentBuilderPage() {
                 label="Query"
                 value={form.retrievalQuery}
                 onChange={(e) => setFormAndSync({ retrievalQuery: e.currentTarget.value })}
-                placeholder="e.g., demo"
+                placeholder='e.g., "pricing page events"'
               />
 
-              <MultiSelect
-                label="source_types"
-                data={sourceTypeOptions}
-                value={form.sourceTypes}
-                onChange={(v) => setFormAndSync({ sourceTypes: v })}
-                searchable
-                nothingFoundMessage="No options"
-                description={
-                  policyAllowedSourceTypes.length
-                    ? `Policy allowlist enforced: ${policyAllowedSourceTypes.join(", ")}`
-                    : "No policy allowlist: any source_types are allowed (backend will still validate if allowlist is later set)."
-                }
-              />
-
-              <Group grow>
-                <NumberInput
-                  label="k"
-                  value={form.k}
-                  min={knobBounds.kMin}
-                  max={knobBounds.kMax}
-                  onChange={(v) => setFormAndSync({ k: clamp(Number(v) || knobDefaults.k, knobBounds.kMin, knobBounds.kMax) })}
-                />
-                <NumberInput
-                  label="alpha"
-                  value={form.alpha}
-                  min={knobBounds.aMin}
-                  max={knobBounds.aMax}
-                  step={0.05}
-                  onChange={(v) => setFormAndSync({ alpha: clamp(Number(v) || knobDefaults.alpha, knobBounds.aMin, knobBounds.aMax) })}
-                />
-              </Group>
-
-              <Group grow>
-                <NumberInput
-                  label="min_score"
-                  value={form.minScore}
-                  min={knobBounds.msMin}
-                  max={knobBounds.msMax}
-                  step={0.05}
-                  onChange={(v) => setFormAndSync({ minScore: clamp(Number(v) || knobDefaults.minScore, knobBounds.msMin, knobBounds.msMax) })}
-                />
-                <NumberInput
-                  label="overfetch_k"
-                  value={form.overfetchK}
-                  min={knobBounds.ofkMin}
-                  max={knobBounds.ofkMax}
-                  onChange={(v) =>
-                    setFormAndSync({
-                      overfetchK: clamp(Number(v) || knobDefaults.overfetchK, knobBounds.ofkMin, knobBounds.ofkMax),
-                    })
+              <Group gap="xs" align="end">
+                <MultiSelect
+                  label="source_types"
+                  data={sourceTypeOptions}
+                  value={form.sourceTypes}
+                  onChange={(v) => setFormAndSync({ sourceTypes: v })}
+                  searchable
+                  nothingFoundMessage="No options"
+                  description={
+                    policyAllowedSourceTypes.length
+                      ? `Policy allowlist enforced: ${policyAllowedSourceTypes.join(", ")}`
+                      : "No policy allowlist set."
                   }
                 />
+                <HelpPill label="If policy allowlist exists, only those sources can be used." />
               </Group>
 
-              <Checkbox
-                label="rerank"
-                checked={form.rerank}
-                onChange={(e) => setFormAndSync({ rerank: e.currentTarget.checked })}
-              />
+              <Group grow>
+                <Group gap="xs" align="end" style={{ width: "100%" }}>
+                  <NumberInput
+                    label="k"
+                    value={form.k}
+                    min={knobBounds.kMin}
+                    max={knobBounds.kMax}
+                    onChange={(v) =>
+                      setFormAndSync({ k: clamp(Number(v) || knobDefaults.k, knobBounds.kMin, knobBounds.kMax) })
+                    }
+                  />
+                  <HelpPill label="How many chunks to fetch before scoring/filtering." />
+                </Group>
+
+                <Group gap="xs" align="end" style={{ width: "100%" }}>
+                  <NumberInput
+                    label="alpha"
+                    value={form.alpha}
+                    min={knobBounds.aMin}
+                    max={knobBounds.aMax}
+                    step={0.05}
+                    onChange={(v) =>
+                      setFormAndSync({ alpha: clamp(Number(v) || knobDefaults.alpha, knobBounds.aMin, knobBounds.aMax) })
+                    }
+                  />
+                  <HelpPill label="Hybrid weight: 0=keyword heavy, 1=vector heavy (implementation dependent)." />
+                </Group>
+              </Group>
+
+              <Group grow>
+                <Group gap="xs" align="end" style={{ width: "100%" }}>
+                  <NumberInput
+                    label="min_score"
+                    value={form.minScore}
+                    min={knobBounds.msMin}
+                    max={knobBounds.msMax}
+                    step={0.05}
+                    onChange={(v) =>
+                      setFormAndSync({
+                        minScore: clamp(Number(v) || knobDefaults.minScore, knobBounds.msMin, knobBounds.msMax),
+                      })
+                    }
+                  />
+                  <HelpPill label="Filters weak matches. Raise to improve precision; lower to improve recall." />
+                </Group>
+
+                <Group gap="xs" align="end" style={{ width: "100%" }}>
+                  <NumberInput
+                    label="overfetch_k"
+                    value={form.overfetchK}
+                    min={knobBounds.ofkMin}
+                    max={knobBounds.ofkMax}
+                    onChange={(v) =>
+                      setFormAndSync({
+                        overfetchK: clamp(Number(v) || knobDefaults.overfetchK, knobBounds.ofkMin, knobBounds.ofkMax),
+                      })
+                    }
+                  />
+                  <HelpPill label="Fetch extra candidates to improve final selection (useful with rerank)." />
+                </Group>
+              </Group>
+
+              <Group gap="xs" align="center">
+                <Checkbox label="rerank" checked={form.rerank} onChange={(e) => setFormAndSync({ rerank: e.currentTarget.checked })} />
+                <HelpPill label="When enabled, applies an extra reranking step (if available) to improve ordering." />
+              </Group>
 
               <Divider />
-              <Text fw={700}>Prompt blocks</Text>
+
+              <Group gap="sm" align="center">
+                <Text fw={700}>Prompt blocks</Text>
+                <HelpPill label="Blocks are applied in order. Use instruction/constraint/checklist/style to shape the agent." />
+              </Group>
+
               <Text size="sm" c="dimmed">
-                Minimal editor: add/remove blocks and choose kind + text. Order is preserved.
+                Minimal editor: add/remove blocks, pick a kind, and write text.
               </Text>
 
               <Stack gap="xs">
                 {form.promptBlocks.map((b, idx) => (
-                  <Card key={idx} withBorder>
+                  <GlassCard key={idx} p="md">
                     <Stack gap="xs">
-                      <Group grow>
+                      <Group grow align="end">
                         <Select
                           label="kind"
                           data={[
@@ -1163,6 +1225,7 @@ export default function AgentBuilderPage() {
                         <Button
                           variant="light"
                           color="red"
+                          size="sm"
                           onClick={() => {
                             const next = form.promptBlocks.filter((_, i) => i !== idx);
                             setFormAndSync({ promptBlocks: next.length ? next : DEFAULT_PROMPT_BLOCKS });
@@ -1184,13 +1247,14 @@ export default function AgentBuilderPage() {
                         }}
                       />
                     </Stack>
-                  </Card>
+                  </GlassCard>
                 ))}
               </Stack>
 
               <Group>
                 <Button
                   variant="light"
+                  size="sm"
                   onClick={() => setFormAndSync({ promptBlocks: [...form.promptBlocks, { kind: "instruction", text: "" }] })}
                 >
                   Add prompt block
@@ -1199,11 +1263,14 @@ export default function AgentBuilderPage() {
 
               <Divider />
 
-              {/* Advanced JSON */}
               <Collapse in={advancedOpen}>
+                <Group gap="sm" align="center" mb="xs">
+                  <Text fw={700}>definition_json (advanced)</Text>
+                  <HelpPill label="Advanced mode is for last-mile tweaks. Guided form does not auto-sync back from arbitrary JSON edits." />
+                </Group>
+
                 <Textarea
-                  label="definition_json (advanced)"
-                  description="If you edit JSON directly, guided form is not automatically synced back from arbitrary edits. Prefer guided form; use this for last-mile tweaks."
+                  label="definition_json"
                   autosize
                   minRows={10}
                   value={definitionJson}
@@ -1215,79 +1282,91 @@ export default function AgentBuilderPage() {
               </Collapse>
 
               <Group>
-                <Button onClick={createVersion} loading={creatingVersion} disabled={!baseId || !!policyViolation}>
-                  Create draft version
+                <Button onClick={createVersion} loading={creatingVersion} disabled={!baseId || !!policyViolation} size="sm">
+                  Create draft
                 </Button>
 
                 <Button
                   onClick={saveSelectedVersion}
                   loading={savingVersion}
                   disabled={!versionId || !canEditVersion || !canEditSelectedVersion || !defDirty || !!policyViolation}
+                  size="sm"
+                  variant="light"
                 >
-                  Save selected draft
+                  Save draft
                 </Button>
 
-                <Button onClick={publishSelected} loading={publishing} disabled={!versionId || !canPublish || !!policyViolation}>
-                  Publish selected
-                </Button>
+                <Tooltip withArrow label={canPublish ? "Publish makes this the active version for the base." : "Admin only."}>
+                  <span>
+                    <Button onClick={publishSelected} loading={publishing} disabled={!versionId || !canPublish || !!policyViolation} size="sm">
+                      Publish
+                    </Button>
+                  </span>
+                </Tooltip>
 
-                <Button onClick={archiveSelected} loading={archiving} disabled={!versionId || !canArchive} variant="light" color="red">
-                  Archive selected
-                </Button>
+                <Tooltip withArrow label={canArchive ? "Archive hides the version from normal selection." : "Admin only."}>
+                  <span>
+                    <Button
+                      onClick={archiveSelected}
+                      loading={archiving}
+                      disabled={!versionId || !canArchive}
+                      variant="light"
+                      color="red"
+                      size="sm"
+                    >
+                      Archive
+                    </Button>
+                  </span>
+                </Tooltip>
               </Group>
 
               <Text size="xs" c="dimmed">
-                Publish requires RBAC: <Code>can_publish_agent_roles</Code>. Archive requires{" "}
-                <Code>can_archive_agent_roles</Code>. Save draft requires selected version is <Code>draft</Code>.
+                Publish requires <Code>can_publish_agent_roles</Code>. Archive requires <Code>can_archive_agent_roles</Code>. Draft edits only work for{" "}
+                <Code>draft</Code> versions.
               </Text>
-            </>
+            </Stack>
           )}
-        </Stack>
-      </Card>
+        </GlassSection>
 
-      {/* Published */}
-      <Card withBorder>
-        <Stack gap="sm">
-          <Group justify="space-between">
+        <GlassSection
+          title="Published definition"
+          description="The latest published definition is what runs will use by default."
+          right={
             <Group gap="sm">
-              <Text fw={700}>Published Definition</Text>
-              <Badge variant="light">latest published</Badge>
+              <Button
+                variant="light"
+                onClick={() => (baseId ? loadPublished(baseId) : null)}
+                loading={publishedLoading}
+                disabled={!baseId}
+                size="sm"
+              >
+                Refresh
+              </Button>
+              <Badge variant="light">latest</Badge>
             </Group>
-            <Button
-              variant="light"
-              onClick={() => (baseId ? loadPublished(baseId) : null)}
-              loading={publishedLoading}
-              disabled={!baseId}
-            >
-              Refresh published
-            </Button>
-          </Group>
-
+          }
+        >
           {!baseId ? (
             <Text c="dimmed">Pick an agent base first.</Text>
           ) : !published ? (
             <Text c="dimmed">No published version exists (or not loaded).</Text>
           ) : (
-            <>
+            <Stack gap="xs">
               <Text size="sm" c="dimmed">
-                base_id: <Code>{published.agent_base_id}</Code> · published_version:{" "}
-                <Code>{published.published_version}</Code>
+                base_id: <Code>{published.agent_base_id}</Code> · published_version: <Code>{published.published_version}</Code>
               </Text>
-              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{stableJsonStringify(published.definition_json)}</pre>
-            </>
+              <GlassCard p="md">
+                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{stableJsonStringify(published.definition_json)}</pre>
+              </GlassCard>
+            </Stack>
           )}
-        </Stack>
-      </Card>
+        </GlassSection>
 
-      {/* Preview + Run */}
-      <Card withBorder>
-        <Stack gap="sm">
-          <Group justify="space-between">
-            <Group gap="sm">
-              <Text fw={700}>Preview + Run</Text>
-              <Badge variant="light">policy enforced</Badge>
-            </Group>
-            <Group gap="sm">
+        <GlassSection
+          title="Preview + run"
+          description="Validate prompt wiring and policy enforcement. Then run to create a real execution."
+          right={
+            <Group gap="sm" wrap="wrap">
               <Badge variant="light" color={canPreview ? "blue" : "gray"}>
                 preview: {canPreview ? "allowed" : "blocked"}
               </Badge>
@@ -1295,80 +1374,98 @@ export default function AgentBuilderPage() {
                 run: {canRun ? "allowed" : "blocked"}
               </Badge>
             </Group>
-          </Group>
-
-          <Text size="sm" c="dimmed">
-            Preview: <Code>POST /workspaces/:id/agent-bases/:baseId/preview</Code> · Run:{" "}
-            <Code>POST /workspaces/:id/agent-bases/:baseId/runs</Code>
-          </Text>
-
-          <Divider />
-
-          <Textarea
-            label="input_payload (JSON)"
-            autosize
-            minRows={6}
-            value={inputJson}
-            onChange={(e) => setInputJson(e.currentTarget.value)}
-          />
-
-          <Textarea
-            label="retrieval override (JSON, optional)"
-            description='If empty {}, published definition retrieval defaults are used.'
-            autosize
-            minRows={4}
-            value={retrievalOverrideJson}
-            onChange={(e) => setRetrievalOverrideJson(e.currentTarget.value)}
-          />
-
-          <Group>
-            <Button onClick={doPreview} loading={previewLoading} disabled={!baseId || !canPreview}>
-              Preview
-            </Button>
-            <Button onClick={doRun} loading={running} disabled={!baseId || !canRun}>
-              Run
-            </Button>
-          </Group>
-
-          {preview ? (
-            <Card withBorder>
-              <Stack gap="xs">
-                <Group justify="space-between">
-                  <Text fw={700}>Preview Output</Text>
-                  <Badge variant="light">{preview.llm_enabled ? "LLM enabled" : "LLM disabled"}</Badge>
-                </Group>
-
-                <Text size="sm" c="dimmed">
-                  artifact_type: <Code>{preview.artifact_type}</Code> · published_version:{" "}
-                  <Code>{preview.published_version}</Code>
-                </Text>
-
-                <Text fw={600}>retrieval_resolved</Text>
-                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                  {stableJsonStringify(preview.retrieval_resolved)}
-                </pre>
-
-                <Text fw={600}>system_prompt</Text>
-                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{preview.system_prompt}</pre>
-
-                <Text fw={600}>user_prompt</Text>
-                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{preview.user_prompt}</pre>
-
-                {preview.notes?.length ? (
-                  <>
-                    <Text fw={600}>notes</Text>
-                    <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{stableJsonStringify(preview.notes)}</pre>
-                  </>
-                ) : null}
-              </Stack>
-            </Card>
-          ) : (
+          }
+        >
+          <Stack gap="sm">
             <Text size="sm" c="dimmed">
-              Run preview to validate prompt wiring and policy enforcement.
+              Preview: <Code>POST /workspaces/:id/agent-bases/:baseId/preview</Code> · Run:{" "}
+              <Code>POST /workspaces/:id/agent-bases/:baseId/runs</Code>
             </Text>
-          )}
-        </Stack>
-      </Card>
-    </Stack>
+
+            <Divider />
+
+            <Textarea
+              label="input_payload (JSON)"
+              autosize
+              minRows={6}
+              value={inputJson}
+              onChange={(e) => setInputJson(e.currentTarget.value)}
+            />
+
+            <Group gap="xs" align="end">
+              <Textarea
+                label="retrieval override (JSON, optional)"
+                description='If empty {}, published definition retrieval defaults are used.'
+                autosize
+                minRows={4}
+                value={retrievalOverrideJson}
+                onChange={(e) => setRetrievalOverrideJson(e.currentTarget.value)}
+              />
+              <HelpPill label="Use this to override retrieval knobs for preview/run without changing the published definition." />
+            </Group>
+
+            <Group>
+              <Tooltip withArrow label={canPreview ? "Preview renders the resolved prompts without running." : "Blocked by RBAC."}>
+                <span>
+                  <Button onClick={doPreview} loading={previewLoading} disabled={!baseId || !canPreview} size="sm">
+                    Preview
+                  </Button>
+                </span>
+              </Tooltip>
+
+              <Tooltip withArrow label={canRun ? "Run executes and creates a new run record." : "Blocked by RBAC."}>
+                <span>
+                  <Button onClick={doRun} loading={running} disabled={!baseId || !canRun} size="sm">
+                    Run
+                  </Button>
+                </span>
+              </Tooltip>
+            </Group>
+
+            {preview ? (
+              <GlassCard p="md">
+                <Stack gap="xs">
+                  <Group justify="space-between">
+                    <Text fw={700}>Preview output</Text>
+                    <Badge variant="light">{preview.llm_enabled ? "LLM enabled" : "LLM disabled"}</Badge>
+                  </Group>
+
+                  <Text size="sm" c="dimmed">
+                    artifact_type: <Code>{preview.artifact_type}</Code> · published_version: <Code>{preview.published_version}</Code>
+                  </Text>
+
+                  <Divider />
+
+                  <Text fw={700}>retrieval_resolved</Text>
+                  <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{stableJsonStringify(preview.retrieval_resolved)}</pre>
+
+                  <Divider />
+
+                  <Text fw={700}>system_prompt</Text>
+                  <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{preview.system_prompt}</pre>
+
+                  <Divider />
+
+                  <Text fw={700}>user_prompt</Text>
+                  <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{preview.user_prompt}</pre>
+
+                  {preview.notes?.length ? (
+                    <>
+                      <Divider />
+                      <Text fw={700}>notes</Text>
+                      <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{stableJsonStringify(preview.notes)}</pre>
+                    </>
+                  ) : null}
+                </Stack>
+              </GlassCard>
+            ) : (
+              <Text size="sm" c="dimmed">
+                Run preview to validate prompt wiring and policy enforcement.
+              </Text>
+            )}
+          </Stack>
+        </GlassSection>
+      </Stack>
+    </GlassPage>
   );
 }
