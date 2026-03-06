@@ -32,7 +32,6 @@ export default function OutputsPage() {
   const wid = readLastWorkspaceId();
 
   const [ws, setWs] = useState<Workspace | null>(null);
-  const [runs, setRuns] = useState<Run[]>([]);
   const [rows, setRows] = useState<OutputRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -50,16 +49,14 @@ export default function OutputsPage() {
     const runsRes = await apiFetch<Run[]>(`/workspaces/${wid}/runs`, { method: "GET" });
     if (!runsRes.ok) {
       setLoading(false);
-      setRuns([]);
       setRows([]);
       setErr(`Failed to load runs: ${runsRes.status} ${runsRes.error}`);
       return;
     }
 
+    // For each recent run, fetch artifacts and take latest (index 0)
     const list = (runsRes.data || []).slice(0, 12);
-    setRuns(list);
 
-    // For each run, fetch artifacts and take latest (index 0)
     const out: OutputRow[] = await Promise.all(
       list.map(async (r) => {
         const aRes = await apiFetch<Artifact[]>(`/runs/${r.id}/artifacts`, { method: "GET" });
