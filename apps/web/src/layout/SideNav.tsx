@@ -52,6 +52,7 @@ export default function SideNav({ workspaceId }: { workspaceId: string | null })
   const isActive = (prefix: string) => loc.pathname === prefix || loc.pathname.startsWith(`${prefix}/`);
 
   const wsBase = hasWs ? `/workspaces/${wid}` : "/workspaces";
+  const wsGuided = hasWs ? `/workspaces/${wid}/guided` : "/workspaces";
   const runBuilder = hasWs ? `/run-builder/${wid}` : "/workspaces";
 
   return (
@@ -62,7 +63,11 @@ export default function SideNav({ workspaceId }: { workspaceId: string | null })
           <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
             Global
           </Text>
-          <NavItem label="Workspaces" to="/workspaces" active={isActive("/workspaces") && !loc.pathname.match(/^\/workspaces\/[0-9a-fA-F-]{36}/)} />
+          <NavItem
+            label="Workspaces"
+            to="/workspaces"
+            active={isActive("/workspaces") && !loc.pathname.match(/^\/workspaces\/[0-9a-fA-F-]{36}/)}
+          />
           <NavItem label="Runs" to="/runs" active={isActive("/runs")} />
           <NavItem label="Outputs" to="/outputs" active={isActive("/outputs")} />
           <NavItem label="Approvals" to="/approvals" active={isActive("/approvals")} />
@@ -79,8 +84,14 @@ export default function SideNav({ workspaceId }: { workspaceId: string | null })
             Workspace
           </Text>
 
+          <NavItem label="Guided mode" to={wsGuided} disabled={!hasWs} active={hasWs && isActive(wsGuided)} />
           <NavItem label="Overview" to={wsBase} disabled={!hasWs} active={hasWs && isActive(wsBase)} />
-          <NavItem label="Create Run" to={runBuilder} disabled={!hasWs} active={hasWs && isActive(`/run-builder/${wid}`)} />
+          <NavItem
+            label="Create Run"
+            to={runBuilder}
+            disabled={!hasWs}
+            active={hasWs && isActive(`/run-builder/${wid}`)}
+          />
           <NavItem label="Outputs" to="/outputs" disabled={!hasWs} active={hasWs && isActive("/outputs")} />
           <NavItem label="Approvals" to="/approvals" disabled={!hasWs} active={hasWs && isActive("/approvals")} />
           <NavItem label="Docs" to="/docs" disabled={!hasWs} active={hasWs && isActive("/docs")} />
