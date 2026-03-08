@@ -30,6 +30,9 @@ import DocsHomePage from "./pages/DocsHomePage";
 import SchedulesHomePage from "./pages/SchedulesHomePage";
 import SettingsHomePage from "./pages/SettingsHomePage";
 
+// Commit 17: Guided mode
+import WorkspaceGuidedPage from "./pages/WorkspaceGuidedPage";
+
 export default function App() {
   return (
     <Routes>
@@ -53,6 +56,7 @@ export default function App() {
 
         {/* Workspace scoped */}
         <Route path="/workspaces/:workspaceId" element={<WorkspaceOverviewPage />} />
+        <Route path="/workspaces/:workspaceId/guided" element={<WorkspaceGuidedPage />} />
         <Route path="/workspaces/:workspaceId/_legacy" element={<WorkspaceDetailPage />} />
 
         <Route path="/workspaces/:workspaceId/actions" element={<ActionCenterPage />} />
