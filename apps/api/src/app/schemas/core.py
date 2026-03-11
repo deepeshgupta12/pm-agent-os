@@ -1,3 +1,4 @@
+# apps/api/src/app/schemas/core.py
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -123,7 +124,9 @@ class EvidenceOut(BaseModel):
     source_ref: Optional[str]
     excerpt: str
     meta: Dict[str, Any]
-    fingerprint: str
+
+    # IMPORTANT: safe defaults so older/legacy rows never crash API responses
+    fingerprint: str = ""
     source_id: Optional[str] = None
     document_id: Optional[str] = None
     chunk_id: Optional[str] = None
@@ -173,6 +176,7 @@ class ArtifactReviewOut(BaseModel):
     decided_at: Optional[datetime] = None
     decision_comment: Optional[str] = None
 
+
 # -------- V2: Action Center --------
 class ActionItemCreateIn(BaseModel):
     type: str = Field(min_length=2, max_length=64)
@@ -217,6 +221,7 @@ class ActionItemOut(BaseModel):
     approvals_rejected_count: int = 0
     my_decision: Optional[str] = None  # approved|rejected|null
 
+
 class ApprovalsPolicyOut(BaseModel):
     workspace_id: str
     approvals_json: Dict[str, Any]
@@ -231,6 +236,7 @@ class ActionItemDecisionOut(BaseModel):
     decision: str
     comment: Optional[str] = None
     decided_at: datetime
+
 
 class ArtifactAssignIn(BaseModel):
     assigned_to_user_id: Optional[str] = None  # uuid string or null
@@ -253,6 +259,7 @@ class ArtifactCommentOut(BaseModel):
     body: str
     created_at: datetime
     mentions: List[ArtifactCommentMentionOut] = Field(default_factory=list)
+
 
 # -------- V2 Step 4: Scheduling --------
 class ScheduleCreateIn(BaseModel):

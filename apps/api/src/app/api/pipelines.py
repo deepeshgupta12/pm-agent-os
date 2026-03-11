@@ -22,7 +22,7 @@ from app.core.citations import (
 from app.core.evidence_format import format_evidence_for_prompt
 from app.core.evidence_store import evidence_fingerprint
 from app.core.generator import AGENT_TO_DEFAULT_ARTIFACT_TYPE, build_initial_artifact, build_run_summary
-from app.core.governance import policy_apply_pii_masking  # Commit 20B: match runs.py masking for pipeline retrieval
+from app.core.governance import policy_apply_pii_masking
 from app.core.retrieval_search import hybrid_retrieve
 from app.db.models import (
     AgentDefinition,
@@ -134,6 +134,37 @@ def _to_uuid(v: Any) -> Optional[uuid.UUID]:
 def _ensure_workspace_access(db: Session, workspace_id: str, user: User) -> Workspace:
     ws, _role = require_workspace_access(workspace_id, db, user)
     return ws
+
+
+def _inject_confidence_section(md: str, *, evidence_count: int) -> str:
+    """
+    Deterministic injector:
+    - If missing "## Confidence", add it.
+    - Place it before "## Sources" if sources exist, else append at end.
+    """
+    text = md or ""
+    if "## Confidence" in text:
+        return text
+
+    if evidence_count <= 0:
+        conf_lines = [
+            "## Confidence",
+            "- Low: no evidence was attached for this step, so claims cannot be grounded.",
+        ]
+    else:
+        conf_lines = [
+            "## Confidence",
+            f"- Medium (draft): {evidence_count} evidence snippet(s) attached; ensure all key claims include inline citations to improve confidence.",
+        ]
+    conf_block = "\n".join(conf_lines).strip() + "\n"
+
+    idx = text.find("## Sources")
+    if idx != -1:
+        body = text[:idx].rstrip()
+        sources = text[idx:].lstrip()
+        return (body + "\n\n" + conf_block + "\n" + sources).strip() + "\n"
+
+    return (text.rstrip() + "\n\n" + conf_block).strip() + "\n"
 
 
 def _template_to_out(t: PipelineTemplate) -> PipelineTemplateOut:
@@ -432,11 +463,18 @@ No evidence was found for the requested retrieval query, so this draft does **no
 3. Should retrieval broaden (higher k / overfetch / multiple source_types) or narrow (more precise query)?
 4. Should rerank be enabled and do we need embeddings for recall?
 
+## Unknowns / Assumptions
+- The required source documents are not available in retrieval for this pipeline step.
+
+## Confidence
+- Low: no evidence was attached for this step.
+
 ## Next Actions
 - Ingest/sync the missing documents into the workspace
 - Re-run retrieval with an updated query and confirm evidence_count > 0
 - Then regenerate the artifact grounded in evidence
 """
+    md = _inject_confidence_section(md, evidence_count=0)
     return artifact_type, title, md
 
 
@@ -481,7 +519,8 @@ Citation rules:
 Output requirements (MANDATORY):
 1) Start with a clear H1 title.
 2) Include a section "## Unknowns / Assumptions".
-3) Include a section "## Sources" at the end with the exact [n] references.
+3) Include a section "## Confidence".
+4) Include a section "## Sources" at the end with the exact [n] references.
 """.strip()
 
         evidence_pack = f"""
@@ -500,6 +539,8 @@ Evidence Pack (cite as [n]):
         if "## Unknowns / Assumptions" not in md:
             md = md.rstrip() + "\n\n## Unknowns / Assumptions\n- None stated.\n"
 
+        md = _inject_confidence_section(md, evidence_count=len(evidence_items))
+
         if "## Sources" not in md:
             md = md.rstrip() + "\n\n" + sources_section_md + "\n"
 
@@ -517,11 +558,13 @@ Evidence Pack (cite as [n]):
             patch = build_inline_citation_patch(normalized)
             md = md.rstrip() + "\n\n" + patch + "\n"
 
+        md = _inject_confidence_section(md, evidence_count=len(evidence_items))
         return artifact_type, title, md
 
     artifact_type2, title2, md2 = build_initial_artifact(agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text)
     if len(evidence_items) > 0 and "## Unknowns / Assumptions" not in md2:
         md2 = md2.rstrip() + "\n\n## Unknowns / Assumptions\n- Evidence attached, but citation-grounded generation requires LLM mode.\n"
+    md2 = _inject_confidence_section(md2, evidence_count=len(evidence_items))
     return artifact_type2, title2, md2
 
 
@@ -544,7 +587,6 @@ def _auto_attach_prev_artifact_as_evidence(
     source_ref = f"artifact:{artifact_id}"
     fp = evidence_fingerprint(source_ref, safe_excerpt)
 
-    # Commit 20A: dedupe inside new_run_id
     existing_fps = set(db.execute(select(Evidence.fingerprint).where(Evidence.run_id == new_run_id)).scalars().all())
     if fp in existing_fps:
         return
@@ -635,22 +677,18 @@ def _attach_retrieval_evidence_for_run(
     batch_id = str(uuid.uuid4())
     ev_items: List[Evidence] = []
 
-    # Commit 20B: apply same PII masking as runs.py
-    ws_obj: Optional[Workspace] = None
-    try:
-        ws_obj = db.get(Workspace, uuid.UUID(str(workspace_id)))
-    except Exception:
-        ws_obj = None
-
-    # Commit 20A: dedupe by fingerprint within run
     existing_fps = set(db.execute(select(Evidence.fingerprint).where(Evidence.run_id == run.id)).scalars().all())
 
     for rank, it in enumerate(items, start=1):
         doc_id = it.get("document_id")
         chunk_id = it.get("chunk_id")
         source_ref = f"doc:{doc_id}#chunk:{chunk_id}"
+
         excerpt_raw = str(it.get("snippet") or "").strip()
-        excerpt = policy_apply_pii_masking(ws_obj, excerpt_raw, phase="write")
+
+        # Ensure Workspace object for masking
+        ws_obj = db.get(Workspace, uuid.UUID(str(workspace_id)))
+        excerpt = policy_apply_pii_masking(ws_obj, excerpt_raw, phase="write") if ws_obj else excerpt_raw
 
         fp = evidence_fingerprint(source_ref, excerpt)
         if fp in existing_fps:
@@ -823,6 +861,8 @@ def _create_completed_run_with_artifact_and_step_retrieval(
             evidence_items=ev_items,
         )
 
+    md = _inject_confidence_section(md, evidence_count=len(ev_items))
+
     # V1 enforcement for pipeline step run (only when evidence exists)
     try:
         rep = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
@@ -915,7 +955,8 @@ Citation rules:
 Output requirements (MANDATORY):
 1) Start with a clear H1 title.
 2) Include a section "## Unknowns / Assumptions".
-3) Include a section "## Sources" at the end with the exact [n] references.
+3) Include a section "## Confidence".
+4) Include a section "## Sources" at the end with the exact [n] references.
 """.strip()
 
         evidence_pack = f"""
@@ -932,6 +973,8 @@ Evidence Pack (cite as [n]):
 
         if "## Unknowns / Assumptions" not in md:
             md = md.rstrip() + "\n\n## Unknowns / Assumptions\n- None stated.\n"
+
+        md = _inject_confidence_section(md, evidence_count=len(ev_items))
 
         if "## Sources" not in md:
             md = md.rstrip() + "\n\n" + sources_section_md + "\n"
@@ -957,6 +1000,8 @@ Evidence Pack (cite as [n]):
             md = md.rstrip() + "\n\n" + sources_section_md + "\n"
         if not body_has_inline_citations(md):
             md = md.rstrip() + "\n\n" + build_inline_citation_patch(normalized) + "\n"
+
+    md = _inject_confidence_section(md, evidence_count=len(ev_items))
 
     # V1 enforcement for internal regen
     try:

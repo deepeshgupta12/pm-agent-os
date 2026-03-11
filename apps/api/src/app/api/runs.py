@@ -195,6 +195,39 @@ def _timeframe_to_bounds(timeframe: Optional[Dict[str, Any]]) -> tuple[Optional[
     return None, None
 
 
+def _inject_confidence_section(md: str, *, evidence_count: int) -> str:
+    """
+    Deterministic injector:
+    - If missing "## Confidence", add it.
+    - Place it before "## Sources" if sources exist, else append at end.
+    """
+    text = md or ""
+    if "## Confidence" in text:
+        return text
+
+    # Deterministic, conservative wording (does not invent facts)
+    if evidence_count <= 0:
+        conf_lines = [
+            "## Confidence",
+            "- Low: no evidence was attached for this run, so requirements/claims cannot be grounded.",
+        ]
+    else:
+        conf_lines = [
+            "## Confidence",
+            f"- Medium (draft): {evidence_count} evidence snippet(s) attached, but citation density may still be insufficient until all key claims are explicitly cited.",
+        ]
+
+    conf_block = "\n".join(conf_lines).strip() + "\n"
+
+    idx = text.find("## Sources")
+    if idx != -1:
+        body = text[:idx].rstrip()
+        sources = text[idx:].lstrip()
+        return (body + "\n\n" + conf_block + "\n" + sources).strip() + "\n"
+
+    return (text.rstrip() + "\n\n" + conf_block).strip() + "\n"
+
+
 def _no_evidence_md(agent_id: str, input_payload: Dict[str, Any], retrieval_meta: Dict[str, Any]) -> Tuple[str, str, str]:
     artifact_type = AGENT_TO_DEFAULT_ARTIFACT_TYPE.get(agent_id, "strategy_memo")
     title = f"{artifact_type.replace('_', ' ').title()} — Draft"
@@ -238,11 +271,19 @@ No evidence was found for the requested retrieval query, so this draft does **no
 3. Should retrieval broaden (higher k / overfetch / multiple source_types) or narrow (more precise query)?
 4. Should rerank be enabled (rerank=true) and do we need embeddings (embed_after=true) for recall?
 
+## Unknowns / Assumptions
+- The required source documents are not yet available in retrieval for this workspace, so the PRD cannot be grounded.
+
+## Confidence
+- Low: no evidence was attached for this run.
+
 ## Next Actions
 - Ingest/sync the missing documents into the workspace
 - Re-run retrieval with an updated query and confirm evidence_count > 0
 - Then regenerate the artifact grounded in evidence
 """
+    # deterministic safety net
+    md = _inject_confidence_section(md, evidence_count=0)
     return artifact_type, title, md
 
 
@@ -287,7 +328,8 @@ Citation rules:
 Output requirements (MANDATORY):
 1) Start with a clear H1 title.
 2) Include a section "## Unknowns / Assumptions".
-3) Include a section "## Sources" at the end with the exact [n] references.
+3) Include a section "## Confidence".
+4) Include a section "## Sources" at the end with the exact [n] references.
 """.strip()
 
         evidence_pack = f"""
@@ -305,6 +347,9 @@ Evidence Pack (cite as [n]):
 
         if "## Unknowns / Assumptions" not in md:
             md = md.rstrip() + "\n\n## Unknowns / Assumptions\n- None stated.\n"
+
+        # deterministic confidence injector (Commit 20B)
+        md = _inject_confidence_section(md, evidence_count=len(evidence_items))
 
         if "## Sources" not in md:
             md = md.rstrip() + "\n\n" + sources_section_md + "\n"
@@ -332,12 +377,26 @@ Evidence Pack (cite as [n]):
                 evidence_count=len(evidence_items),
             )
 
+        # Final deterministic guarantee for confidence (even if anchors/patch reflowed)
+        md = _inject_confidence_section(md, evidence_count=len(evidence_items))
+
+        if len(evidence_items) > 0:
+            md = auto_inject_citation_anchors(
+                artifact_type=artifact_type,
+                md=md,
+                normalized_citations=normalized,
+                evidence_count=len(evidence_items),
+            )
+
         return artifact_type, title, md
 
     # Fallback deterministic template (V0 mode)
     artifact_type2, title2, md2 = build_initial_artifact(agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text)
+
     if len(evidence_items) > 0 and "## Unknowns / Assumptions" not in md2:
         md2 = md2.rstrip() + "\n\n## Unknowns / Assumptions\n- Evidence attached, but citation-grounded generation requires LLM mode.\n"
+
+    md2 = _inject_confidence_section(md2, evidence_count=len(evidence_items))
     return artifact_type2, title2, md2
 
 
@@ -421,8 +480,7 @@ def create_run(
             "min_score": min_score,
             "overfetch_k": overfetch_k,
             "rerank": rerank,
-            # Commit 20B: include batch_kind in retrieval meta for platform-wide debugging
-            "batch_kind": "create_run",
+            "batch_kind": "create_run",  # Commit 20B
         }
 
         _enforce_policy_sources(db, ws, user, source_types or None, "policy.allowlist.runs.create_run.retrieval")
@@ -472,7 +530,7 @@ def create_run(
                 "source_id": it.get("source_id", ""),
                 "chunk_index": int(it.get("chunk_index") or 0),
                 "retrieval": {
-                    "query": q,  # Commit 5 canonical
+                    "query": q,  # canonical
                     "q": q,  # legacy alias
                     "k": k,
                     "alpha": alpha,
@@ -540,6 +598,9 @@ def create_run(
             input_payload=r.input_payload,
             evidence_items=ev_items,
         )
+
+    # Final deterministic guarantee before enforcement
+    md = _inject_confidence_section(md, evidence_count=len(ev_items))
 
     # -------------------------
     # V1: Hard citation enforcement (only when evidence exists)
@@ -677,8 +738,7 @@ def regenerate_with_retrieval(
         "min_score": min_score,
         "overfetch_k": overfetch_k,
         "rerank": rerank,
-        # Commit 20B: include batch_kind in retrieval meta for platform-wide debugging
-        "batch_kind": "regenerate_with_retrieval",
+        "batch_kind": "regenerate_with_retrieval",  # Commit 20B
     }
 
     _enforce_policy_sources(db, ws, user, source_types or None, "policy.allowlist.runs.regenerate_with_retrieval")
@@ -791,6 +851,8 @@ def regenerate_with_retrieval(
             evidence_items=ev_items,
         )
         title = latest.title or _title
+
+    md = _inject_confidence_section(md, evidence_count=len(ev_items))
 
     # V1 enforcement (Commit 3: skip when LLM disabled)
     try:
