@@ -39,21 +39,22 @@ from app.core.governance import (
 router = APIRouter(tags=["action_center"])
 
 VALID_STATUSES = {"queued", "approved", "rejected", "cancelled"}
-
-# ---------------------------
-# Policy helpers
-# ---------------------------
+EXEC_STATUSES = {"not_started", "running", "succeeded", "failed"}
 
 DEFAULT_POLICY: Dict[str, Any] = {
-    # per action type: required approvals + allowed roles
     "rules": {
-        # default examples
         "decision_log_create": {
             "approvals_required": 1,
             "reviewer_roles": ["admin"],
             "creator_roles": ["member", "admin"],
         },
         "artifact_publish": {
+            "approvals_required": 1,
+            "reviewer_roles": ["admin"],
+            "creator_roles": ["member", "admin"],
+        },
+        # Commit 21: new write action
+        "docs_publish": {
             "approvals_required": 1,
             "reviewer_roles": ["admin"],
             "creator_roles": ["member", "admin"],
@@ -76,7 +77,6 @@ def _parse_uuid(id_str: str, *, label: str) -> uuid.UUID:
 
 
 def _load_policy(ws: Workspace) -> Dict[str, Any]:
-    # workspace.approvals_json overrides defaults; merge shallow
     pol = (ws.approvals_json or {}) if hasattr(ws, "approvals_json") else {}
     if not isinstance(pol, dict):
         pol = {}
@@ -100,16 +100,12 @@ def _policy_for_action(ws: Workspace, action_type: str) -> Dict[str, Any]:
     reviewer_roles = rule.get("reviewer_roles") or ["admin"]
     creator_roles = rule.get("creator_roles") or ["member", "admin"]
 
-    reviewer_user_ids = rule.get("reviewer_user_ids") or []  # optional allow-list
+    reviewer_user_ids = rule.get("reviewer_user_ids") or []
 
-    # normalize
     reviewer_roles_norm = [str(r).lower() for r in reviewer_roles]
     creator_roles_norm = [str(r).lower() for r in creator_roles]
-
     allow_users = [str(x) for x in reviewer_user_ids if str(x).strip()]
 
-    # If explicit allow-list exists, we treat it as "required reviewers".
-    # Snapshot approvals_required = len(allow_users) (min 1).
     if allow_users:
         approvals_required = max(1, len(allow_users))
 
@@ -209,6 +205,13 @@ def _to_out(a: ActionItem, *, db: Session, user: User) -> ActionItemOut:
         approvals_approved_count=approved,
         approvals_rejected_count=rejected,
         my_decision=mine,
+        execution_status=getattr(a, "execution_status", "not_started"),
+        execution_attempts=int(getattr(a, "execution_attempts", 0) or 0),
+        execution_started_at=getattr(a, "execution_started_at", None),
+        execution_finished_at=getattr(a, "execution_finished_at", None),
+        execution_last_error=getattr(a, "execution_last_error", None),
+        execution_idempotency_key=getattr(a, "execution_idempotency_key", None),
+        execution_result_json=getattr(a, "execution_result_json", {}) or {},
     )
 
 
@@ -225,16 +228,13 @@ def _decisions_to_out(rows: List[ActionItemDecision]) -> List[ActionItemDecision
         )
     return out
 
+
 def _rbac_or_403(db: Session, *, ws: Workspace, user: User, action: str, allowed_roles: List[str]) -> None:
     try:
         rbac_assert(db, ws=ws, user=user, action=action, allowed_roles=allowed_roles)
     except ValueError:
         raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
 
-
-# ---------------------------
-# Routes
-# ---------------------------
 
 @router.get("/workspaces/{workspace_id}/actions", response_model=list[ActionItemOut])
 def list_actions(
@@ -283,7 +283,6 @@ def create_action(
 ):
     ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
-    # ✅ define action_type BEFORE RBAC usage
     action_type = (payload.type or "").strip()
 
     _rbac_or_403(
@@ -296,7 +295,6 @@ def create_action(
 
     rule = _policy_for_action(ws, action_type)
 
-    # creator permission enforcement (approvals policy)
     if not _is_creator_allowed(ws, user, db, rule):
         raise HTTPException(status_code=403, detail="Not allowed to create this action type")
 
@@ -322,6 +320,13 @@ def create_action(
         decision_comment=None,
         decided_at=None,
         approvals_required=approvals_required,
+        execution_status="not_started",
+        execution_attempts=0,
+        execution_started_at=None,
+        execution_finished_at=None,
+        execution_last_error=None,
+        execution_idempotency_key=None,
+        execution_result_json={},
     )
     db.add(a)
     db.commit()
@@ -419,11 +424,9 @@ def cancel_action(
         allowed_roles=rbac_allowed_action_center_cancel_roles(ws, action_type=a.type),
     )
 
-    # Only queued actions can be cancelled
     if a.status != "queued":
         raise HTTPException(status_code=409, detail="Only queued actions can be cancelled")
 
-    # Cancel permissions: admin OR creator
     is_admin = (role or "").lower() == "admin"
     is_creator = a.created_by_user_id == user.id
     if not (is_admin or is_creator):
@@ -466,7 +469,6 @@ def decide_action(
     if a.status != "queued":
         raise HTTPException(status_code=409, detail="Action item is already decided")
 
-    # reviewer eligibility
     if not _is_reviewer_allowed(ws, user, db, rule):
         raise HTTPException(status_code=403, detail="Not allowed to review this action type")
 
@@ -474,7 +476,6 @@ def decide_action(
     if decision not in {"approved", "rejected"}:
         raise HTTPException(status_code=400, detail="Invalid decision (must be approved|rejected)")
 
-    # one decision per reviewer
     existing = db.execute(
         select(ActionItemDecision).where(
             ActionItemDecision.action_id == a.id,
@@ -507,28 +508,68 @@ def decide_action(
         db.commit()
         db.refresh(a)
 
-        # If approved, run executor (A: create NEW Run+Artifact)
-        if new_status == "approved":
-            try:
-                _rbac_or_403(
-                    db,
-                    ws=ws,
-                    user=user,
-                    action="rbac.action_center.execute",
-                    allowed_roles=rbac_allowed_action_center_execute_roles(ws, action_type=a.type),
-                )
-                execute_action_if_applicable(db=db, ws=ws, user=user, action=a)
-                db.refresh(a)
-            except Exception as e:
-                # Keep action approved, but store error in payload for audit
-                pj = a.payload_json or {}
-                if not isinstance(pj, dict):
-                    pj = {}
-                pj["executor_error"] = str(e)
-                pj["executor_error_at"] = _utcnow().isoformat()
-                a.payload_json = pj
-                db.add(a)
-                db.commit()
-                db.refresh(a)
-
+    # Commit 21: NO auto-execution here. Execution is a separate endpoint.
     return _to_out(a, db=db, user=user)
+
+
+@router.post("/actions/{action_id}/execute", response_model=ActionItemOut)
+def execute_action(
+    action_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    aid = _parse_uuid(action_id, label="Action item")
+    a = db.get(ActionItem, aid)
+    if not a:
+        raise HTTPException(status_code=404, detail="Action item not found")
+
+    ws, _role = require_workspace_access(str(a.workspace_id), db, user)
+
+    _rbac_or_403(
+        db,
+        ws=ws,
+        user=user,
+        action="rbac.action_center.execute",
+        allowed_roles=rbac_allowed_action_center_execute_roles(ws, action_type=a.type),
+    )
+
+    if a.status != "approved":
+        raise HTTPException(status_code=409, detail="Action must be approved before execution")
+
+    cur = (getattr(a, "execution_status", "not_started") or "not_started").strip().lower()
+    if cur == "succeeded":
+        return _to_out(a, db=db, user=user)
+    if cur == "running":
+        raise HTTPException(status_code=409, detail="Action execution is already running")
+
+    # mark running
+    a.execution_status = "running"
+    a.execution_attempts = int(getattr(a, "execution_attempts", 0) or 0) + 1
+    a.execution_started_at = _utcnow()
+    a.execution_finished_at = None
+    a.execution_last_error = None
+    db.add(a)
+    db.commit()
+    db.refresh(a)
+
+    try:
+        execute_action_if_applicable(db=db, ws=ws, user=user, action=a)
+        db.refresh(a)
+
+        a.execution_status = "succeeded"
+        a.execution_finished_at = _utcnow()
+        a.execution_last_error = None
+        db.add(a)
+        db.commit()
+        db.refresh(a)
+        return _to_out(a, db=db, user=user)
+
+    except Exception as e:
+        db.refresh(a)
+        a.execution_status = "failed"
+        a.execution_finished_at = _utcnow()
+        a.execution_last_error = str(e)
+        db.add(a)
+        db.commit()
+        db.refresh(a)
+        return _to_out(a, db=db, user=user)
