@@ -650,7 +650,7 @@ def _attach_retrieval_evidence_for_run(
         chunk_id = it.get("chunk_id")
         source_ref = f"doc:{doc_id}#chunk:{chunk_id}"
         excerpt_raw = str(it.get("snippet") or "").strip()
-        excerpt = policy_apply_pii_masking(ws_obj, excerpt_raw) if ws_obj else excerpt_raw
+        excerpt = policy_apply_pii_masking(ws_obj, excerpt_raw, phase="write")
 
         fp = evidence_fingerprint(source_ref, excerpt)
         if fp in existing_fps:

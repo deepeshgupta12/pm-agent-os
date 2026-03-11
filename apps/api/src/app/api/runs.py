@@ -452,7 +452,7 @@ def create_run(
 
             source_ref = f"doc:{doc_id}#chunk:{chunk_id}"
             excerpt_raw = str(it.get("snippet") or "")
-            excerpt = policy_apply_pii_masking(ws, excerpt_raw)
+            excerpt = policy_apply_pii_masking(ws, excerpt_raw, phase="write")
 
             fp = evidence_fingerprint(source_ref, excerpt)
             if fp in existing_fps:
@@ -709,7 +709,7 @@ def regenerate_with_retrieval(
 
         source_ref = f"doc:{doc_id}#chunk:{chunk_id}"
         excerpt_raw = str(it.get("snippet") or "")
-        excerpt = policy_apply_pii_masking(ws, excerpt_raw)
+        excerpt = policy_apply_pii_masking(ws, excerpt_raw, phase="write")
 
         fp = evidence_fingerprint(source_ref, excerpt)
         if fp in existing_fps:

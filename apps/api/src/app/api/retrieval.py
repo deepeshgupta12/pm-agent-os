@@ -464,7 +464,7 @@ def retrieve(
             chunk_id=_u(it.get("chunk_id")),
             document_id=_u(it.get("document_id")),
             source_id=_u(it.get("source_id")),
-            snippet=policy_apply_pii_masking(ws, str(it.get("snippet") or "")),
+            snippet=policy_apply_pii_masking(ws, str(it.get("snippet") or ""), phase="write"),
             meta=it.get("meta") or {},
             score_fts=float(it.get("score_fts") or 0.0),
             score_vec=float(it.get("score_vec") or 0.0),
@@ -473,6 +473,21 @@ def retrieve(
         db.add(ri)
 
     db.commit()
+
+    # Apply export-time masking to returned snippets (if enabled by policy - Commit 20 Fix)
+    try:
+        masked_items = []
+        for it in items:
+            if isinstance(it, dict) and "snippet" in it:
+                it2 = dict(it)
+                it2["snippet"] = policy_apply_pii_masking(ws, str(it.get("snippet") or ""), phase="export")
+                masked_items.append(it2)
+            else:
+                masked_items.append(it)
+        items = masked_items
+    except Exception:
+        pass
+
     return RetrieveResponse(
         ok=True,
         q=q,
