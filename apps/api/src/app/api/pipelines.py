@@ -1,3 +1,4 @@
+# apps/api/src/app/api/pipelines.py
 from __future__ import annotations
 
 import uuid
@@ -9,40 +10,42 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
-from app.core.generator import build_initial_artifact, build_run_summary, AGENT_TO_DEFAULT_ARTIFACT_TYPE
 from app.core.config import settings
-from app.core.evidence_format import format_evidence_for_prompt
 from app.core.citations import (
-    build_citation_pack,
-    output_has_any_citations,
     body_has_inline_citations,
+    build_citation_pack,
     build_inline_citation_patch,
     citation_enforcement_report,
+    output_has_any_citations,
     render_citation_compliance_md,
 )
+from app.core.evidence_format import format_evidence_for_prompt
+from app.core.evidence_store import evidence_fingerprint
+from app.core.generator import AGENT_TO_DEFAULT_ARTIFACT_TYPE, build_initial_artifact, build_run_summary
+from app.core.governance import policy_apply_pii_masking  # Commit 20B: match runs.py masking for pipeline retrieval
 from app.core.retrieval_search import hybrid_retrieve
-from app.db.session import get_db
 from app.db.models import (
-    Workspace,
-    User,
     AgentDefinition,
-    PipelineTemplate,
-    PipelineRun,
-    PipelineStep,
-    Run,
     Artifact,
     Evidence,
+    PipelineRun,
+    PipelineStep,
+    PipelineTemplate,
+    Run,
     RunLog,
+    User,
+    Workspace,
 )
+from app.db.session import get_db
 from app.schemas.pipelines import (
-    PipelineTemplateIn,
-    PipelineTemplateOut,
-    PipelineTemplatesSeedOut,
+    PipelineExecuteAllOut,
+    PipelineNextOut,
     PipelineRunCreateIn,
     PipelineRunOut,
     PipelineStepOut,
-    PipelineNextOut,
-    PipelineExecuteAllOut,
+    PipelineTemplateIn,
+    PipelineTemplateOut,
+    PipelineTemplatesSeedOut,
 )
 
 router = APIRouter(tags=["pipelines"])
@@ -116,6 +119,18 @@ CANONICAL_PIPELINES: List[Dict[str, Any]] = [
 # -------------------------
 # Helpers
 # -------------------------
+def _to_uuid(v: Any) -> Optional[uuid.UUID]:
+    try:
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s:
+            return None
+        return uuid.UUID(s)
+    except Exception:
+        return None
+
+
 def _ensure_workspace_access(db: Session, workspace_id: str, user: User) -> Workspace:
     ws, _role = require_workspace_access(workspace_id, db, user)
     return ws
@@ -139,10 +154,7 @@ def _prev_context_attached_map(db: Session, steps: List[PipelineStep]) -> Dict[s
     rows = (
         db.execute(
             select(Evidence.run_id)
-            .where(
-                Evidence.run_id.in_(run_ids),
-                Evidence.source_name == "pipeline_prev_artifact",
-            )
+            .where(Evidence.run_id.in_(run_ids), Evidence.source_name == "pipeline_prev_artifact")
             .distinct()
         )
         .scalars()
@@ -440,11 +452,17 @@ def _generate_md_with_evidence(
     ev_text = format_evidence_for_prompt(evidence_items)
 
     if settings.LLM_ENABLED and settings.OPENAI_API_KEY:
-        from app.core.prompts import build_system_prompt, build_user_prompt
         from app.core.llm_client import llm_generate_markdown
+        from app.core.prompts import build_system_prompt, build_user_prompt
 
         evidence_dicts = [
-            {"excerpt": e.excerpt, "source_ref": e.source_ref, "source_name": e.source_name, "meta": e.meta or {}}
+            {
+                "excerpt": e.excerpt,
+                "source_ref": e.source_ref,
+                "source_name": e.source_name,
+                "meta": e.meta or {},
+                "fingerprint": getattr(e, "fingerprint", "") or "",
+            }
             for e in evidence_items
         ]
         citations_block, sources_section_md, normalized = build_citation_pack(evidence_dicts)
@@ -523,12 +541,19 @@ def _auto_attach_prev_artifact_as_evidence(
         return
 
     safe_excerpt = excerpt[:2000].strip()
+    source_ref = f"artifact:{artifact_id}"
+    fp = evidence_fingerprint(source_ref, safe_excerpt)
+
+    # Commit 20A: dedupe inside new_run_id
+    existing_fps = set(db.execute(select(Evidence.fingerprint).where(Evidence.run_id == new_run_id)).scalars().all())
+    if fp in existing_fps:
+        return
 
     ev = Evidence(
         run_id=new_run_id,
         kind="snippet",
         source_name="pipeline_prev_artifact",
-        source_ref=f"artifact:{artifact_id}",
+        source_ref=source_ref,
         excerpt=safe_excerpt,
         meta={
             "pipeline_run_id": str(pipeline_run_id),
@@ -542,6 +567,10 @@ def _auto_attach_prev_artifact_as_evidence(
             "prev_artifact_version": prev_artifact.get("version"),
             "prev_artifact_status": prev_artifact.get("status"),
         },
+        fingerprint=fp,
+        source_id=None,
+        document_id=None,
+        chunk_id=None,
     )
     db.add(ev)
     db.commit()
@@ -606,8 +635,28 @@ def _attach_retrieval_evidence_for_run(
     batch_id = str(uuid.uuid4())
     ev_items: List[Evidence] = []
 
+    # Commit 20B: apply same PII masking as runs.py
+    ws_obj: Optional[Workspace] = None
+    try:
+        ws_obj = db.get(Workspace, uuid.UUID(str(workspace_id)))
+    except Exception:
+        ws_obj = None
+
+    # Commit 20A: dedupe by fingerprint within run
+    existing_fps = set(db.execute(select(Evidence.fingerprint).where(Evidence.run_id == run.id)).scalars().all())
+
     for rank, it in enumerate(items, start=1):
-        source_ref = f"doc:{it.get('document_id')}#chunk:{it.get('chunk_id')}"
+        doc_id = it.get("document_id")
+        chunk_id = it.get("chunk_id")
+        source_ref = f"doc:{doc_id}#chunk:{chunk_id}"
+        excerpt_raw = str(it.get("snippet") or "").strip()
+        excerpt = policy_apply_pii_masking(ws_obj, excerpt_raw) if ws_obj else excerpt_raw
+
+        fp = evidence_fingerprint(source_ref, excerpt)
+        if fp in existing_fps:
+            continue
+        existing_fps.add(fp)
+
         meta = {
             "batch_id": batch_id,
             "batch_kind": "pipeline_step_retrieval",
@@ -638,8 +687,12 @@ def _attach_retrieval_evidence_for_run(
             kind="snippet",
             source_name="retrieval",
             source_ref=source_ref,
-            excerpt=str(it.get("snippet") or ""),
+            excerpt=excerpt,
             meta=meta,
+            fingerprint=fp,
+            source_id=_to_uuid(it.get("source_id")),
+            document_id=_to_uuid(doc_id),
+            chunk_id=_to_uuid(chunk_id),
         )
         db.add(ev)
         ev_items.append(ev)
@@ -723,7 +776,7 @@ def _create_completed_run_with_artifact_and_step_retrieval(
         "enabled": enabled,
         "query": q,
         "k": int(step_retrieval.get("k", tpl_retrieval.get("k", 6))),
-        "alpha": float(step_retrieval.get("alpha", tpl_retrieval.get("alpha", 0.0))),
+        "alpha": float(step_retrieval.get("alpha", tpl_retrieval.get("alpha", 0.65))),
         "source_types": step_retrieval.get("source_types", tpl_retrieval.get("source_types", source_types)),
         "timeframe": step_retrieval.get("timeframe", tpl_retrieval.get("timeframe", timeframe)),
         "min_score": float(step_retrieval.get("min_score", tpl_retrieval.get("min_score", 0.15))),
@@ -824,17 +877,19 @@ def _regenerate_run_with_evidence_internal(db: Session, run_uuid: uuid.UUID) -> 
     if not r:
         return
 
-    ev_items = (
-        db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc()))
-        .scalars()
-        .all()
-    )
+    ev_items = db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc())).scalars().all()
     if len(ev_items) == 0:
         return
 
     evidence_text = format_evidence_for_prompt(ev_items)
     evidence_dicts = [
-        {"excerpt": e.excerpt, "source_ref": e.source_ref, "source_name": e.source_name, "meta": e.meta or {}}
+        {
+            "excerpt": e.excerpt,
+            "source_ref": e.source_ref,
+            "source_name": e.source_name,
+            "meta": e.meta or {},
+            "fingerprint": getattr(e, "fingerprint", "") or "",
+        }
         for e in ev_items
     ]
     citations_block, sources_section_md, normalized = build_citation_pack(evidence_dicts)
@@ -843,8 +898,8 @@ def _regenerate_run_with_evidence_internal(db: Session, run_uuid: uuid.UUID) -> 
     title = f"{artifact_type.replace('_', ' ').title()} — Draft"
 
     if settings.LLM_ENABLED and settings.OPENAI_API_KEY:
-        from app.core.prompts import build_system_prompt, build_user_prompt
         from app.core.llm_client import llm_generate_markdown
+        from app.core.prompts import build_system_prompt, build_user_prompt
 
         system_prompt = build_system_prompt()
         base_user_prompt = build_user_prompt(agent_id=r.agent_id, input_payload=r.input_payload, evidence_text=evidence_text)
@@ -1277,9 +1332,9 @@ def run_next_step(
     pr.current_step_index += 1
     if pr.current_step_index >= len(steps):
         pr.status = "completed"
-        db.add(pr)
-        db.commit()
-        db.refresh(pr)
+    db.add(pr)
+    db.commit()
+    db.refresh(pr)
 
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
     return PipelineNextOut(ok=True, pipeline_run=_run_to_out(db, pr, steps), created_run_id=created_run_id)

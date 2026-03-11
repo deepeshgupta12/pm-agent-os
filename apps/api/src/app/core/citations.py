@@ -9,6 +9,9 @@ import hashlib
 # Existing helpers (kept)
 # -------------------------
 def _fingerprint(ev: Dict[str, Any]) -> str:
+    fp = str(ev.get("fingerprint") or "").strip()
+    if fp:
+        return fp
     source_ref = str(ev.get("source_ref") or "").strip()
     excerpt = str(ev.get("excerpt") or "").strip()
     h = hashlib.sha256((source_ref + "\n" + excerpt).encode("utf-8")).hexdigest()[:16]
@@ -192,6 +195,14 @@ def citation_enforcement_report(
 
     reasons: List[str] = []
     ok = True
+
+    if "## Unknowns" not in (md or "") and "## Unknowns / Assumptions" not in (md or ""):
+        ok = False
+        reasons.append("Missing '## Unknowns / Assumptions' section.")
+
+    if "## Confidence" not in (md or ""):
+        ok = False
+        reasons.append("Missing '## Confidence' section.")
 
     if evidence_count > 0 and thresholds.get("require_inline_if_evidence", True):
         if not body_has_inline_citations(md):

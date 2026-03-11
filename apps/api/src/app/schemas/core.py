@@ -123,6 +123,10 @@ class EvidenceOut(BaseModel):
     source_ref: Optional[str]
     excerpt: str
     meta: Dict[str, Any]
+    fingerprint: str
+    source_id: Optional[str] = None
+    document_id: Optional[str] = None
+    chunk_id: Optional[str] = None
 
 
 # -------- Run Logs + Timeline --------
