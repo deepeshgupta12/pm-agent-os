@@ -55,10 +55,17 @@ export default function App() {
         <Route path="/settings" element={<SettingsHomePage />} />
 
         {/* Workspace scoped */}
-        <Route path="/workspaces/:workspaceId" element={<WorkspaceOverviewPage />} />
+        {/* Commit 18: Guided mode is the default landing for a workspace */}
+        <Route path="/workspaces/:workspaceId" element={<WorkspaceGuidedPage />} />
         <Route path="/workspaces/:workspaceId/guided" element={<WorkspaceGuidedPage />} />
+
+        {/* Commit 18: Overview moved to /overview */}
+        <Route path="/workspaces/:workspaceId/overview" element={<WorkspaceOverviewPage />} />
+
+        {/* Keep legacy reachable */}
         <Route path="/workspaces/:workspaceId/_legacy" element={<WorkspaceDetailPage />} />
 
+        {/* Workspace tools */}
         <Route path="/workspaces/:workspaceId/actions" element={<ActionCenterPage />} />
         <Route path="/workspaces/:workspaceId/schedules" element={<SchedulesPage />} />
         <Route path="/workspaces/:workspaceId/policy" element={<PolicyCenterPage />} />

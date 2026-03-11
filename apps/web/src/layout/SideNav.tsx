@@ -49,10 +49,12 @@ export default function SideNav({ workspaceId }: { workspaceId: string | null })
   const hasWs = !!workspaceId;
   const wid = workspaceId || "";
 
-  const isActive = (prefix: string) => loc.pathname === prefix || loc.pathname.startsWith(`${prefix}/`);
+  const isActive = (prefix: string) =>
+    loc.pathname === prefix || loc.pathname.startsWith(`${prefix}/`);
 
   const wsBase = hasWs ? `/workspaces/${wid}` : "/workspaces";
-  const wsGuided = hasWs ? `/workspaces/${wid}/guided` : "/workspaces";
+  const wsGuided = hasWs ? `/workspaces/${wid}` : "/workspaces"; // default route is guided
+  const wsOverview = hasWs ? `/workspaces/${wid}/overview` : "/workspaces";
   const runBuilder = hasWs ? `/run-builder/${wid}` : "/workspaces";
 
   return (
@@ -84,14 +86,16 @@ export default function SideNav({ workspaceId }: { workspaceId: string | null })
             Workspace
           </Text>
 
-          <NavItem label="Guided mode" to={wsGuided} disabled={!hasWs} active={hasWs && isActive(wsGuided)} />
-          <NavItem label="Overview" to={wsBase} disabled={!hasWs} active={hasWs && isActive(wsBase)} />
+          <NavItem label="Guided mode" to={wsGuided} disabled={!hasWs} active={hasWs && isActive(wsBase)} />
+          <NavItem label="Overview" to={wsOverview} disabled={!hasWs} active={hasWs && isActive(wsOverview)} />
+
           <NavItem
-            label="Create Run"
+            label="Create run"
             to={runBuilder}
             disabled={!hasWs}
             active={hasWs && isActive(`/run-builder/${wid}`)}
           />
+
           <NavItem label="Outputs" to="/outputs" disabled={!hasWs} active={hasWs && isActive("/outputs")} />
           <NavItem label="Approvals" to="/approvals" disabled={!hasWs} active={hasWs && isActive("/approvals")} />
           <NavItem label="Docs" to="/docs" disabled={!hasWs} active={hasWs && isActive("/docs")} />
@@ -103,29 +107,29 @@ export default function SideNav({ workspaceId }: { workspaceId: string | null })
         {/* Workspace Settings grouping */}
         <Stack gap={6}>
           <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
-            Workspace Settings
+            Workspace settings
           </Text>
 
           <NavItem
-            label="Workspace Rules"
+            label="Workspace rules"
             to={`${wsBase}/policy`}
             disabled={!hasWs}
             active={hasWs && isActive(`${wsBase}/policy`)}
           />
           <NavItem
-            label="Audit Log"
+            label="Audit log"
             to={`${wsBase}/governance`}
             disabled={!hasWs}
             active={hasWs && isActive(`${wsBase}/governance`)}
           />
           <NavItem
-            label="Agent Builder"
+            label="Agent builder"
             to={`${wsBase}/agent-builder`}
             disabled={!hasWs}
             active={hasWs && isActive(`${wsBase}/agent-builder`)}
           />
           <NavItem
-            label="Members (Legacy)"
+            label="Members (legacy)"
             to={`${wsBase}/_legacy`}
             disabled={!hasWs}
             active={hasWs && isActive(`${wsBase}/_legacy`)}

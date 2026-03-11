@@ -16,6 +16,7 @@ import {
   Code,
   Checkbox,
   Tooltip,
+  Tabs,
 } from "@mantine/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -103,6 +104,11 @@ function fmtBatchLabel(b: RagBatch): string {
   return `${kind}${q} · ${b.evidence_count} ev${ts}`;
 }
 
+function shortId(id: string): string {
+  if (!id) return "";
+  return id.length <= 10 ? id : `${id.slice(0, 8)}…`;
+}
+
 function MutateTooltip({ canMutate, children }: { canMutate: boolean; children: React.ReactNode }) {
   if (canMutate) return <>{children}</>;
   return (
@@ -124,6 +130,8 @@ export default function RunDetailPage() {
   const { runId } = useParams();
   const rid = runId || "";
   const loc = useLocation();
+
+  const [tab, setTab] = useState<string>("normal");
 
   const [run, setRun] = useState<Run | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
@@ -147,14 +155,14 @@ export default function RunDetailPage() {
   // deep-link: prevent immediate double-fetch after programmatic open
   const skipNextRagOpenFetchRef = useRef(false);
 
-  // Create artifact form
+  // Create artifact form (debug)
   const [atype, setAtype] = useState<string | null>("prd");
   const [title, setTitle] = useState("Untitled");
   const [logicalKey, setLogicalKey] = useState("prd");
   const [contentMd, setContentMd] = useState("# Draft\n\nWrite your draft here…");
   const [creatingArtifact, setCreatingArtifact] = useState(false);
 
-  // Evidence form
+  // Evidence form (debug)
   const [ekind, setEkind] = useState<string | null>("snippet");
   const [sourceName, setSourceName] = useState("manual");
   const [sourceRef, setSourceRef] = useState("");
@@ -162,7 +170,7 @@ export default function RunDetailPage() {
   const [metaJson, setMetaJson] = useState("{}");
   const [creatingEvidence, setCreatingEvidence] = useState(false);
 
-  // Auto evidence
+  // Auto evidence (debug)
   const [autoQuery, setAutoQuery] = useState("");
   const [autoK, setAutoK] = useState<number>(6);
   const [autoAlpha, setAutoAlpha] = useState<number>(0.65);
@@ -180,7 +188,7 @@ export default function RunDetailPage() {
   // Logs filter
   const [logFilter, setLogFilter] = useState<string | null>("all");
 
-  // Retrieval Panel state
+  // Retrieval Panel state (debug)
   const [rpOpen, setRpOpen] = useState(true);
   const [rpQuery, setRpQuery] = useState("");
   const [rpK, setRpK] = useState<number>(5);
@@ -223,6 +231,8 @@ export default function RunDetailPage() {
   const roleStr = wsRole?.role ?? null;
   const canMutate = roleStr === "admin" || roleStr === "member";
 
+  const workspaceId = run?.workspace_id || null;
+
   function normalizeSourceTypes(s: string): string[] {
     return (s || "")
       .split(",")
@@ -242,7 +252,7 @@ export default function RunDetailPage() {
     return {};
   }
 
-  function buildRetrieveQueryParams(workspaceId: string): string {
+  function buildRetrieveQueryParams(workspaceIdParam: string): string {
     const q = (rpQuery || "").trim();
     const params = new URLSearchParams();
     params.set("q", q);
@@ -263,7 +273,7 @@ export default function RunDetailPage() {
     params.set("overfetch_k", String(rpOverfetchK));
     params.set("rerank", String(rpRerank));
 
-    return `/workspaces/${workspaceId}/retrieve?${params.toString()}`;
+    return `/workspaces/${workspaceIdParam}/retrieve?${params.toString()}`;
   }
 
   function selectedPreviewItems(): RetrieveItem[] {
@@ -278,9 +288,9 @@ export default function RunDetailPage() {
     setPreviewSelected(next);
   }
 
-  async function loadWorkspaceRole(workspaceId: string) {
+  async function loadWorkspaceRole(workspaceIdParam: string) {
     setWsRoleLoading(true);
-    const res = await apiFetch<WorkspaceRole>(`/workspaces/${workspaceId}/my-role`, { method: "GET" });
+    const res = await apiFetch<WorkspaceRole>(`/workspaces/${workspaceIdParam}/my-role`, { method: "GET" });
     setWsRoleLoading(false);
 
     if (!res.ok) {
@@ -306,7 +316,7 @@ export default function RunDetailPage() {
 
     const artRes = await apiFetch<Artifact[]>(`/runs/${rid}/artifacts`, { method: "GET" });
     if (!artRes.ok) {
-      setErr(`Artifacts load failed: ${artRes.status} ${artRes.error}`);
+      setErr(`Outputs load failed: ${artRes.status} ${artRes.error}`);
       return;
     }
     setArtifacts(artRes.data);
@@ -342,7 +352,7 @@ export default function RunDetailPage() {
     setRagLoading(false);
 
     if (!res.ok) {
-      setErr(`RAG debug failed: ${res.status} ${res.error}`);
+      setErr(`Debug failed: ${res.status} ${res.error}`);
       setRagDebug(null);
       return;
     }
@@ -532,7 +542,7 @@ export default function RunDetailPage() {
 
   async function createArtifact() {
     if (!canMutate) {
-      setErr("Viewer role cannot create artifacts.");
+      setErr("Viewer role cannot create outputs.");
       return;
     }
     if (!atype) return;
@@ -552,7 +562,7 @@ export default function RunDetailPage() {
     setCreatingArtifact(false);
 
     if (!res.ok) {
-      setErr(`Create artifact failed: ${res.status} ${res.error}`);
+      setErr(`Create output failed: ${res.status} ${res.error}`);
       return;
     }
 
@@ -718,6 +728,7 @@ export default function RunDetailPage() {
 
     skipNextRagOpenFetchRef.current = true;
 
+    setTab("debug");
     setRagOpen(true);
     setRagBatchId(bid);
 
@@ -770,17 +781,79 @@ export default function RunDetailPage() {
 
   const headerRight = (
     <Group>
-      <Button component={Link} to="/workspaces" variant="light" size="sm">
-        Workspaces
-      </Button>
+      {workspaceId ? (
+        <>
+          <Button component={Link} to={`/workspaces/${workspaceId}`} variant="light" size="sm">
+            Guided mode
+          </Button>
+          <Button component={Link} to={`/workspaces/${workspaceId}/overview`} variant="light" size="sm">
+            Overview
+          </Button>
+        </>
+      ) : (
+        <Button component={Link} to="/workspaces" variant="light" size="sm">
+          Workspaces
+        </Button>
+      )}
       <Button variant="light" onClick={loadAll} size="sm">
         Refresh
       </Button>
     </Group>
   );
 
+  const nextSteps = (
+    <GlassCard p="md">
+      <Stack gap="xs">
+        <Text fw={800}>Next steps</Text>
+        <Text size="sm" c="dimmed">
+          This is the normal workflow: review output → request publish → approve → schedule.
+        </Text>
+
+        <Group wrap="wrap">
+          <Button
+            component={Link}
+            to={latestArtifact ? `/artifacts/${latestArtifact.id}` : "/outputs"}
+            size="sm"
+            disabled={!latestArtifact}
+          >
+            Open output
+          </Button>
+
+          {workspaceId ? (
+            <>
+              <Button component={Link} to={`/workspaces/${workspaceId}/actions`} variant="light" size="sm">
+                Action Center
+              </Button>
+              <Button component={Link} to={`/workspaces/${workspaceId}/schedules`} variant="light" size="sm">
+                Schedules
+              </Button>
+            </>
+          ) : null}
+
+          <Button variant="light" size="sm" onClick={() => setTab("debug")}>
+            Open debug console
+          </Button>
+        </Group>
+
+        {latestArtifact ? (
+          <Text size="xs" c="dimmed">
+            Latest output: {latestArtifact.title} · {latestArtifact.status}
+          </Text>
+        ) : (
+          <Text size="xs" c="dimmed">
+            No output yet — create or regenerate to produce one.
+          </Text>
+        )}
+      </Stack>
+    </GlassCard>
+  );
+
   return (
-    <GlassPage title="Run" subtitle="RAG console for artifacts, evidence, retrieval, and debugging." right={headerRight}>
+    <GlassPage
+      title="Run"
+      subtitle="Normal view for shipping outputs. Debug console is available when needed."
+      right={headerRight}
+    >
       <Stack gap="md">
         {err ? (
           <GlassCard>
@@ -788,649 +861,759 @@ export default function RunDetailPage() {
           </GlassCard>
         ) : null}
 
-        <GlassSection
-          title="Run overview"
-          description={run ? run.id : rid}
-          right={
-            <Group gap="sm" wrap="wrap">
-              <Badge variant="light" color={roleBadgeColor(roleStr)} title="Your role in this workspace">
-                Role: {wsRoleLoading ? "…" : roleStr ?? "unknown"}
-              </Badge>
-              {run?.status ? <GlassStat label="Status" value={run.status} /> : null}
-              {run?.agent_id ? <GlassStat label="Agent" value={run.agent_id} /> : null}
-              <GlassStat label="Evidence" value={evidence.length} />
-            </Group>
-          }
-        >
-          {run ? (
-            <Stack gap="sm">
-              {run.output_summary ? <Text c="dimmed">{run.output_summary}</Text> : null}
+        <Tabs value={tab} onChange={(v) => setTab(v || "normal")}>
+          <Tabs.List>
+            <Tabs.Tab value="normal">Normal</Tabs.Tab>
+            <Tabs.Tab value="debug">Debug console</Tabs.Tab>
+          </Tabs.List>
 
-              {retrievalCfg ? (
-                <GlassCard p="md">
-                  <Stack gap={6}>
-                    <Group justify="space-between">
-                      <Text fw={700}>Last retrieval config</Text>
-                      <Badge variant="light">run._retrieval</Badge>
-                    </Group>
-                    <Text size="sm" c="dimmed">
-                      query: <Code>{String(retrievalCfg.query ?? "")}</Code> · k: <Code>{String(retrievalCfg.k ?? "")}</Code> · alpha:{" "}
-                      <Code>{String(retrievalCfg.alpha ?? "")}</Code>
-                    </Text>
-                    <Text size="sm" c="dimmed">
-                      min_score={String(retrievalCfg.min_score ?? "")}, overfetch_k={String(retrievalCfg.overfetch_k ?? "")}, rerank={String(
-                        retrievalCfg.rerank ?? ""
-                      )}
-                    </Text>
-                    {retrievalCfg.batch_id ? (
-                      <Text size="sm" c="dimmed">
-                        batch_id: <Code>{String(retrievalCfg.batch_id)}</Code>
-                      </Text>
-                    ) : null}
-                  </Stack>
-                </GlassCard>
-              ) : (
-                <Text size="sm" c="dimmed">
-                  Retrieval: not used on the last execution.
-                </Text>
-              )}
-
-              <Group gap="sm" align="center">
-                <MutateTooltip canMutate={canMutate}>
-                  <Button onClick={regenerate} loading={regenLoading} disabled={!canMutate || evidence.length === 0} size="sm">
-                    Regenerate from evidence
-                  </Button>
-                </MutateTooltip>
-                <Text size="sm" c="dimmed">
-                  {evidence.length === 0
-                    ? "Add evidence to enable regeneration."
-                    : canMutate
-                      ? `Uses ${evidence.length} evidence item(s) to create a new artifact version.`
-                      : "Viewer: regeneration disabled."}
-                </Text>
-              </Group>
-
-              <GlassCard p="md">
-                <Text fw={700} mb={6}>
-                  Input payload
-                </Text>
-                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(run.input_payload, null, 2)}</pre>
-              </GlassCard>
-            </Stack>
-          ) : (
-            <Text c="dimmed">Loading run…</Text>
-          )}
-        </GlassSection>
-
-        <GlassSection
-          title="Retrieval"
-          description="Preview results, attach as evidence, and regenerate with retrieval."
-          right={
-            <Group gap="sm">
-              <Button variant="light" onClick={() => setRpOpen((x) => !x)} size="sm">
-                {rpOpen ? "Hide" : "Show"}
-              </Button>
-            </Group>
-          }
-        >
-          <Collapse in={rpOpen}>
-            <Stack gap="sm">
-              <Text size="sm" c="dimmed">
-                Viewer can preview. Member/Admin can attach evidence and regenerate.
-              </Text>
-
-              <TextInput
-                label="Query"
-                value={rpQuery}
-                onChange={(e) => setRpQuery(e.currentTarget.value)}
-                placeholder='e.g., "save preferences"'
-              />
-
-              <Group grow>
-                <Group gap="xs" align="end">
-                  <NumberInput label="k" value={rpK} min={1} max={50} onChange={(v) => setRpK(Number(v) || 5)} />
-                  <HelpTip label="How many chunks to fetch before filtering/rerank." />
-                </Group>
-                <Group gap="xs" align="end">
-                  <NumberInput label="alpha" value={rpAlpha} min={0} max={1} step={0.05} onChange={(v) => setRpAlpha(Number(v) || 0)} />
-                  <HelpTip label="Hybrid weighting: 0=keyword-only, 1=vector-heavy (implementation-dependent)." />
-                </Group>
-                <TextInput
-                  label="source_types (comma-separated)"
-                  value={rpSourceTypes}
-                  onChange={(e) => setRpSourceTypes(e.currentTarget.value)}
-                  placeholder="docs, github"
-                />
-              </Group>
-
-              <Group grow>
-                <Select
-                  label="Timeframe"
-                  data={[
-                    { value: "7d", label: "7d" },
-                    { value: "30d", label: "30d" },
-                    { value: "90d", label: "90d" },
-                    { value: "custom", label: "custom" },
-                    { value: "none", label: "none" },
-                  ]}
-                  value={rpPreset}
-                  onChange={(v) => setRpPreset(v)}
-                />
-                <TextInput label="Start date (YYYY-MM-DD)" value={rpStartDate} onChange={(e) => setRpStartDate(e.currentTarget.value)} disabled={rpPreset !== "custom"} />
-                <TextInput label="End date (YYYY-MM-DD)" value={rpEndDate} onChange={(e) => setRpEndDate(e.currentTarget.value)} disabled={rpPreset !== "custom"} />
-              </Group>
-
-              <Group grow>
-                <Group gap="xs" align="end">
-                  <NumberInput
-                    label="min_score"
-                    value={rpMinScore}
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    onChange={(v) => setRpMinScore(Number(v) || 0.15)}
-                  />
-                  <HelpTip label="Filters weak matches. Raise to improve precision; lower to improve recall." />
-                </Group>
-
-                <Group gap="xs" align="end">
-                  <NumberInput
-                    label="overfetch_k"
-                    value={rpOverfetchK}
-                    min={1}
-                    max={10}
-                    step={1}
-                    onChange={(v) => setRpOverfetchK(Number(v) || 3)}
-                  />
-                  <HelpTip label="Fetch extra items for better final selection (especially when reranking)." />
-                </Group>
-
-                <div style={{ paddingTop: 26 }}>
-                  <Group gap="xs">
-                    <Checkbox label="rerank" checked={rpRerank} onChange={(e) => setRpRerank(e.currentTarget.checked)} />
-                    <HelpTip label="If enabled, applies a reranking step (when available) to improve ordering." />
+          {/* NORMAL VIEW */}
+          <Tabs.Panel value="normal" pt="md">
+            <Stack gap="md">
+              <GlassSection
+                title="Run overview"
+                description="Core status and outputs (IDs hidden by default)."
+                right={
+                  <Group gap="sm" wrap="wrap">
+                    <Badge variant="light" color={roleBadgeColor(roleStr)} title="Your role in this workspace">
+                      Role: {wsRoleLoading ? "…" : roleStr ?? "unknown"}
+                    </Badge>
+                    {run?.status ? <GlassStat label="Status" value={run.status} /> : null}
+                    {run?.agent_id ? <GlassStat label="Agent" value={run.agent_id} /> : null}
+                    <GlassStat label="Evidence" value={evidence.length} />
                   </Group>
-                </div>
-              </Group>
-
-              <Group>
-                <Button onClick={previewRetrieve} loading={previewLoading} variant="default" disabled={!run} size="sm">
-                  Retrieve preview
-                </Button>
-
-                <MutateTooltip canMutate={canMutate}>
-                  <Button onClick={regenerateWithRetrieval} loading={regenWithRetrievalLoading} disabled={!run || !canMutate} size="sm">
-                    Regenerate with retrieval
-                  </Button>
-                </MutateTooltip>
-              </Group>
-
-              {preview ? (
-                <GlassCard p="md">
+                }
+              >
+                {run ? (
                   <Stack gap="sm">
-                    <Group justify="space-between">
-                      <Text fw={700}>Preview results</Text>
-                      <GlassStat label="Items" value={preview.items?.length ?? 0} />
-                    </Group>
-
-                    <Text size="sm" c="dimmed">
-                      q=<Code>{preview.q}</Code> · k=<Code>{String(preview.k)}</Code> · alpha=<Code>{String(preview.alpha)}</Code> · min_score=
-                      <Code>{String(preview.min_score)}</Code> · overfetch_k=<Code>{String(preview.overfetch_k)}</Code> · rerank=<Code>{String(preview.rerank)}</Code>
-                    </Text>
-
-                    <Group justify="space-between">
-                      <Group gap="xs">
-                        <Button size="xs" variant="light" onClick={() => toggleAllPreview(true)} disabled={!preview.items?.length}>
-                          Select all
-                        </Button>
-                        <Button size="xs" variant="light" onClick={() => toggleAllPreview(false)} disabled={!preview.items?.length}>
-                          Clear
-                        </Button>
-                      </Group>
-
-                      <Group gap="xs">
-                        <Badge variant="light">
-                          selected {selectedPreviewItems().length}/{preview.items.length}
-                        </Badge>
-
-                        <MutateTooltip canMutate={canMutate}>
-                          <Button
-                            size="xs"
-                            onClick={attachSelectedPreviewAsEvidence}
-                            loading={attachLoading}
-                            disabled={!canMutate || selectedPreviewItems().length === 0}
-                          >
-                            Attach selected as evidence
-                          </Button>
-                        </MutateTooltip>
-                      </Group>
-                    </Group>
-
-                    <Divider />
-
-                    {preview.items.length === 0 ? (
-                      <Text c="dimmed">No results (after min_score filter).</Text>
-                    ) : (
-                      <Stack gap="xs">
-                        {preview.items.map((it: RetrieveItem) => (
-                          <GlassCard key={it.chunk_id} p="md">
-                            <Stack gap={6}>
-                              <Group justify="space-between" align="flex-start">
-                                <Stack gap={2}>
-                                  <Text fw={700}>{it.document_title}</Text>
-                                  <Text size="xs" c="dimmed">
-                                    doc={it.document_id} · chunk={it.chunk_id} · idx={it.chunk_index}
-                                  </Text>
-                                </Stack>
-
-                                <Group gap="xs">
-                                  <Checkbox
-                                    checked={!!previewSelected[it.chunk_id]}
-                                    onChange={(e) =>
-                                      setPreviewSelected((prev) => ({
-                                        ...prev,
-                                        [it.chunk_id]: e.currentTarget.checked,
-                                      }))
-                                    }
-                                  />
-                                  <Badge variant="light">hyb {fmtScore(it.score_hybrid)}</Badge>
-                                  {it.score_final != null ? (
-                                    <Badge color="grape" variant="light">
-                                      final {fmtScore(it.score_final)}
-                                    </Badge>
-                                  ) : null}
-                                </Group>
-                              </Group>
-
-                              <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
-                                {it.snippet}
-                              </Text>
-
-                              <Text size="xs" c="dimmed">
-                                fts={fmtScore(it.score_fts)} · vec={fmtScore(it.score_vec)}
-                                {it.score_rerank_bonus != null ? ` · bonus=${fmtScore(it.score_rerank_bonus)}` : ""}
-                              </Text>
-                            </Stack>
-                          </GlassCard>
-                        ))}
-                      </Stack>
-                    )}
+                    {run.output_summary ? <Text c="dimmed">{run.output_summary}</Text> : null}
+                    {nextSteps}
                   </Stack>
-                </GlassCard>
-              ) : (
-                <Text size="sm" c="dimmed">
-                  Run a preview to validate retrieval quality and filters.
-                </Text>
-              )}
+                ) : (
+                  <Text c="dimmed">Loading run…</Text>
+                )}
+              </GlassSection>
+
+              <GlassSection
+                title="Latest output"
+                description="Newest output generated by this run."
+                right={
+                  latestArtifact ? (
+                    <Group gap="xs">
+                      <Button size="xs" variant="light" component={Link} to={`/artifacts/${latestArtifact.id}`}>
+                        Open
+                      </Button>
+                      <Button size="xs" variant="default" onClick={() => exportPdf(latestArtifact.id)}>
+                        Export PDF
+                      </Button>
+                      <Button size="xs" variant="default" onClick={() => exportDocx(latestArtifact.id)}>
+                        Export DOCX
+                      </Button>
+                    </Group>
+                  ) : (
+                    <Badge variant="light">none</Badge>
+                  )
+                }
+              >
+                {!latestArtifact ? (
+                  <Text c="dimmed">No outputs yet.</Text>
+                ) : (
+                  <GlassCard p="md" style={{ maxHeight: 420, overflow: "auto" }}>
+                    <Stack gap={6}>
+                      <Text size="sm" c="dimmed">
+                        {latestArtifact.type} · v{latestArtifact.version} · {latestArtifact.status} · key={latestArtifact.logical_key}
+                      </Text>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{latestArtifact.content_md || ""}</ReactMarkdown>
+                    </Stack>
+                  </GlassCard>
+                )}
+              </GlassSection>
+
+              <GlassSection title="Quick actions" description="Common navigation for shipping.">
+                <Group wrap="wrap">
+                  <Button component={Link} to="/outputs" variant="light" size="sm">
+                    Outputs
+                  </Button>
+                  <Button component={Link} to="/runs" variant="light" size="sm">
+                    Runs
+                  </Button>
+                  {workspaceId ? (
+                    <>
+                      <Button component={Link} to={`/workspaces/${workspaceId}/actions`} variant="light" size="sm">
+                        Approvals (Action Center)
+                      </Button>
+                      <Button component={Link} to={`/workspaces/${workspaceId}/schedules`} variant="light" size="sm">
+                        Schedules
+                      </Button>
+                    </>
+                  ) : null}
+                </Group>
+              </GlassSection>
             </Stack>
-          </Collapse>
-        </GlassSection>
+          </Tabs.Panel>
 
-        <GlassSection
-          title="Latest artifact"
-          description="Newest artifact generated by this run."
-          right={
-            latestArtifact ? (
-              <Group gap="xs">
-                <Button size="xs" variant="light" component={Link} to={`/artifacts/${latestArtifact.id}`}>
-                  Open
-                </Button>
-                <Button size="xs" variant="default" onClick={() => exportPdf(latestArtifact.id)}>
-                  Export PDF
-                </Button>
-                <Button size="xs" variant="default" onClick={() => exportDocx(latestArtifact.id)}>
-                  Export DOCX
-                </Button>
-              </Group>
-            ) : (
-              <Badge variant="light">none</Badge>
-            )
-          }
-        >
-          {!latestArtifact ? (
-            <Text c="dimmed">No artifacts yet.</Text>
-          ) : (
-            <GlassCard p="md" style={{ maxHeight: 420, overflow: "auto" }}>
-              <Stack gap={6}>
-                <Text size="sm" c="dimmed">
-                  {latestArtifact.type} · v{latestArtifact.version} · {latestArtifact.status} · key={latestArtifact.logical_key}
-                </Text>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{latestArtifact.content_md || ""}</ReactMarkdown>
-              </Stack>
-            </GlassCard>
-          )}
-        </GlassSection>
-
-        <GlassSection
-          title="RAG debug"
-          description="Inspect batches, scoped evidence, and retrieval logs."
-          right={
-            <Group>
-              <Button variant="light" onClick={() => setRagOpen((x) => !x)} size="sm">
-                {ragOpen ? "Hide" : "Show"}
-              </Button>
-              <Button variant="default" onClick={() => loadRagDebug(ragBatchId)} loading={ragLoading} disabled={!ragOpen} size="sm">
-                Refresh
-              </Button>
-            </Group>
-          }
-        >
-          <Collapse in={ragOpen}>
-            <Stack gap="sm">
-              <GlassCard p="md">
-                <Stack gap="xs">
-                  <Group justify="space-between">
-                    <Text fw={700}>Batch scope</Text>
-                    <Tooltip
-                      withArrow
-                      label="Scope the debug view to a single retrieval execution. Helpful when multiple runs/regenerations exist."
-                    >
-                      <Badge variant="light">Advanced</Badge>
-                    </Tooltip>
+          {/* DEBUG VIEW */}
+          <Tabs.Panel value="debug" pt="md">
+            <Stack gap="md">
+              <GlassSection
+                title="Debug details"
+                description="IDs, JSON, retrieval tuning, logs, and RAG debug live here."
+                right={
+                  <Group gap="sm" wrap="wrap">
+                    <Badge variant="light" color={roleBadgeColor(roleStr)} title="Your role in this workspace">
+                      Role: {wsRoleLoading ? "…" : roleStr ?? "unknown"}
+                    </Badge>
+                    {run?.id ? <GlassStat label="Run ID" value={shortId(run.id)} /> : <GlassStat label="Run ID" value={shortId(rid)} />}
                   </Group>
+                }
+              >
+                {run ? (
+                  <GlassCard p="md">
+                    <Stack gap={6}>
+                      <Text fw={700}>Input payload (raw)</Text>
+                      <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(run.input_payload, null, 2)}</pre>
+                    </Stack>
+                  </GlassCard>
+                ) : (
+                  <Text c="dimmed">Loading…</Text>
+                )}
+              </GlassSection>
 
-                  <Group grow>
-                    <Select
-                      label="Batch"
-                      data={(ragDebug?.batches || []).map((b) => ({
-                        value: String(b.batch_id),
-                        label: fmtBatchLabel(b),
-                      }))}
-                      value={ragBatchId}
-                      onChange={(v) => {
-                        const next = v || null;
-                        setRagBatchId(next);
-                        if (next) void loadRagDebug(next);
-                      }}
-                      placeholder={(ragDebug?.batches || []).length === 0 ? "No batches yet" : "Select batch"}
-                      searchable
-                      nothingFoundMessage="No batches"
-                      disabled={(ragDebug?.batches || []).length === 0}
-                    />
-                    <Button
-                      mt={22}
-                      variant="default"
-                      onClick={() => {
-                        setRagBatchId(null);
-                        void loadRagDebug(null);
-                      }}
-                      size="sm"
-                    >
-                      Show all
+              <GlassSection
+                title="Retrieval"
+                description="Preview results, attach as evidence, and regenerate with retrieval."
+                right={
+                  <Group gap="sm">
+                    <Button variant="light" onClick={() => setRpOpen((x) => !x)} size="sm">
+                      {rpOpen ? "Hide" : "Show"}
                     </Button>
                   </Group>
-
-                  {ragBatchId ? (
+                }
+              >
+                <Collapse in={rpOpen}>
+                  <Stack gap="sm">
                     <Text size="sm" c="dimmed">
-                      scoped batch_id: <Code>{ragBatchId}</Code>
+                      Viewer can preview. Member/Admin can attach evidence and regenerate.
                     </Text>
+
+                    <TextInput
+                      label="Query"
+                      value={rpQuery}
+                      onChange={(e) => setRpQuery(e.currentTarget.value)}
+                      placeholder='e.g., "save preferences"'
+                    />
+
+                    <Group grow>
+                      <Group gap="xs" align="end">
+                        <NumberInput label="k" value={rpK} min={1} max={50} onChange={(v) => setRpK(Number(v) || 5)} />
+                        <HelpTip label="How many chunks to fetch before filtering/rerank." />
+                      </Group>
+                      <Group gap="xs" align="end">
+                        <NumberInput
+                          label="alpha"
+                          value={rpAlpha}
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          onChange={(v) => setRpAlpha(Number(v) || 0)}
+                        />
+                        <HelpTip label="Hybrid weighting: 0=keyword-only, 1=vector-heavy (implementation-dependent)." />
+                      </Group>
+                      <TextInput
+                        label="Sources (comma-separated)"
+                        value={rpSourceTypes}
+                        onChange={(e) => setRpSourceTypes(e.currentTarget.value)}
+                        placeholder="docs, github"
+                      />
+                    </Group>
+
+                    <Group grow>
+                      <Select
+                        label="Timeframe"
+                        data={[
+                          { value: "7d", label: "7d" },
+                          { value: "30d", label: "30d" },
+                          { value: "90d", label: "90d" },
+                          { value: "custom", label: "custom" },
+                          { value: "none", label: "none" },
+                        ]}
+                        value={rpPreset}
+                        onChange={(v) => setRpPreset(v)}
+                      />
+                      <TextInput
+                        label="Start date (YYYY-MM-DD)"
+                        value={rpStartDate}
+                        onChange={(e) => setRpStartDate(e.currentTarget.value)}
+                        disabled={rpPreset !== "custom"}
+                      />
+                      <TextInput
+                        label="End date (YYYY-MM-DD)"
+                        value={rpEndDate}
+                        onChange={(e) => setRpEndDate(e.currentTarget.value)}
+                        disabled={rpPreset !== "custom"}
+                      />
+                    </Group>
+
+                    <Group grow>
+                      <Group gap="xs" align="end">
+                        <NumberInput
+                          label="min_score"
+                          value={rpMinScore}
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          onChange={(v) => setRpMinScore(Number(v) || 0.15)}
+                        />
+                        <HelpTip label="Filters weak matches. Raise to improve precision; lower to improve recall." />
+                      </Group>
+
+                      <Group gap="xs" align="end">
+                        <NumberInput
+                          label="overfetch_k"
+                          value={rpOverfetchK}
+                          min={1}
+                          max={10}
+                          step={1}
+                          onChange={(v) => setRpOverfetchK(Number(v) || 3)}
+                        />
+                        <HelpTip label="Fetch extra items for better final selection (especially when reranking)." />
+                      </Group>
+
+                      <div style={{ paddingTop: 26 }}>
+                        <Group gap="xs">
+                          <Checkbox
+                            label="rerank"
+                            checked={rpRerank}
+                            onChange={(e) => setRpRerank(e.currentTarget.checked)}
+                          />
+                          <HelpTip label="If enabled, applies a reranking step (when available) to improve ordering." />
+                        </Group>
+                      </div>
+                    </Group>
+
+                    <Group>
+                      <Button onClick={previewRetrieve} loading={previewLoading} variant="default" disabled={!run} size="sm">
+                        Retrieve preview
+                      </Button>
+
+                      <MutateTooltip canMutate={canMutate}>
+                        <Button
+                          onClick={regenerateWithRetrieval}
+                          loading={regenWithRetrievalLoading}
+                          disabled={!run || !canMutate}
+                          size="sm"
+                        >
+                          Regenerate with retrieval
+                        </Button>
+                      </MutateTooltip>
+                    </Group>
+
+                    {preview ? (
+                      <GlassCard p="md">
+                        <Stack gap="sm">
+                          <Group justify="space-between">
+                            <Text fw={700}>Preview results</Text>
+                            <GlassStat label="Items" value={preview.items?.length ?? 0} />
+                          </Group>
+
+                          <Text size="sm" c="dimmed">
+                            q=<Code>{preview.q}</Code> · k=<Code>{String(preview.k)}</Code> · alpha=<Code>{String(preview.alpha)}</Code> · min_score=
+                            <Code>{String(preview.min_score)}</Code> · overfetch_k=<Code>{String(preview.overfetch_k)}</Code> · rerank=
+                            <Code>{String(preview.rerank)}</Code>
+                          </Text>
+
+                          <Group justify="space-between">
+                            <Group gap="xs">
+                              <Button size="xs" variant="light" onClick={() => toggleAllPreview(true)} disabled={!preview.items?.length}>
+                                Select all
+                              </Button>
+                              <Button size="xs" variant="light" onClick={() => toggleAllPreview(false)} disabled={!preview.items?.length}>
+                                Clear
+                              </Button>
+                            </Group>
+
+                            <Group gap="xs">
+                              <Badge variant="light">
+                                selected {selectedPreviewItems().length}/{preview.items.length}
+                              </Badge>
+
+                              <MutateTooltip canMutate={canMutate}>
+                                <Button
+                                  size="xs"
+                                  onClick={attachSelectedPreviewAsEvidence}
+                                  loading={attachLoading}
+                                  disabled={!canMutate || selectedPreviewItems().length === 0}
+                                >
+                                  Attach selected as evidence
+                                </Button>
+                              </MutateTooltip>
+                            </Group>
+                          </Group>
+
+                          <Divider />
+
+                          {preview.items.length === 0 ? (
+                            <Text c="dimmed">No results (after min_score filter).</Text>
+                          ) : (
+                            <Stack gap="xs">
+                              {preview.items.map((it: RetrieveItem) => (
+                                <GlassCard key={it.chunk_id} p="md">
+                                  <Stack gap={6}>
+                                    <Group justify="space-between" align="flex-start">
+                                      <Stack gap={2}>
+                                        <Text fw={700}>{it.document_title}</Text>
+                                        <Text size="xs" c="dimmed">
+                                          doc={it.document_id} · chunk={it.chunk_id} · idx={it.chunk_index}
+                                        </Text>
+                                      </Stack>
+
+                                      <Group gap="xs">
+                                        <Checkbox
+                                          checked={!!previewSelected[it.chunk_id]}
+                                          onChange={(e) =>
+                                            setPreviewSelected((prev) => ({
+                                              ...prev,
+                                              [it.chunk_id]: e.currentTarget.checked,
+                                            }))
+                                          }
+                                        />
+                                        <Badge variant="light">hyb {fmtScore(it.score_hybrid)}</Badge>
+                                        {it.score_final != null ? (
+                                          <Badge color="grape" variant="light">
+                                            final {fmtScore(it.score_final)}
+                                          </Badge>
+                                        ) : null}
+                                      </Group>
+                                    </Group>
+
+                                    <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
+                                      {it.snippet}
+                                    </Text>
+
+                                    <Text size="xs" c="dimmed">
+                                      fts={fmtScore(it.score_fts)} · vec={fmtScore(it.score_vec)}
+                                      {it.score_rerank_bonus != null ? ` · bonus=${fmtScore(it.score_rerank_bonus)}` : ""}
+                                    </Text>
+                                  </Stack>
+                                </GlassCard>
+                              ))}
+                            </Stack>
+                          )}
+                        </Stack>
+                      </GlassCard>
+                    ) : (
+                      <Text size="sm" c="dimmed">
+                        Run a preview to validate retrieval quality and filters.
+                      </Text>
+                    )}
+                  </Stack>
+                </Collapse>
+              </GlassSection>
+
+              <GlassSection
+                title="Latest output"
+                description="Newest output generated by this run."
+                right={
+                  latestArtifact ? (
+                    <Group gap="xs">
+                      <Button size="xs" variant="light" component={Link} to={`/artifacts/${latestArtifact.id}`}>
+                        Open
+                      </Button>
+                      <Button size="xs" variant="default" onClick={() => exportPdf(latestArtifact.id)}>
+                        Export PDF
+                      </Button>
+                      <Button size="xs" variant="default" onClick={() => exportDocx(latestArtifact.id)}>
+                        Export DOCX
+                      </Button>
+                    </Group>
                   ) : (
-                    <Text size="sm" c="dimmed">
-                      showing all evidence (unscoped)
-                    </Text>
-                  )}
-                </Stack>
-              </GlassCard>
+                    <Badge variant="light">none</Badge>
+                  )
+                }
+              >
+                {!latestArtifact ? (
+                  <Text c="dimmed">No outputs yet.</Text>
+                ) : (
+                  <GlassCard p="md" style={{ maxHeight: 420, overflow: "auto" }}>
+                    <Stack gap={6}>
+                      <Text size="sm" c="dimmed">
+                        {latestArtifact.type} · v{latestArtifact.version} · {latestArtifact.status} · key={latestArtifact.logical_key}
+                      </Text>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{latestArtifact.content_md || ""}</ReactMarkdown>
+                    </Stack>
+                  </GlassCard>
+                )}
+              </GlassSection>
 
-              <GlassCard p="md">
-                <Text fw={700} mb={6}>
-                  retrieval_config (best available)
-                </Text>
-                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(ragDebug?.retrieval_config ?? retrievalCfg)}</pre>
-              </GlassCard>
+              <GlassSection
+                title="RAG debug"
+                description="Inspect batches, scoped evidence, and retrieval logs."
+                right={
+                  <Group>
+                    <Button variant="light" onClick={() => setRagOpen((x) => !x)} size="sm">
+                      {ragOpen ? "Hide" : "Show"}
+                    </Button>
+                    <Button variant="default" onClick={() => loadRagDebug(ragBatchId)} loading={ragLoading} disabled={!ragOpen} size="sm">
+                      Refresh
+                    </Button>
+                  </Group>
+                }
+              >
+                <Collapse in={ragOpen}>
+                  <Stack gap="sm">
+                    <GlassCard p="md">
+                      <Stack gap="xs">
+                        <Group justify="space-between">
+                          <Text fw={700}>Batch scope</Text>
+                          <Tooltip
+                            withArrow
+                            label="Scope the debug view to a single retrieval execution. Helpful when multiple runs/regenerations exist."
+                          >
+                            <Badge variant="light">Advanced</Badge>
+                          </Tooltip>
+                        </Group>
 
-              <GlassCard p="md">
-                <Text fw={700} mb={6}>
-                  retrieval_log (latest)
-                </Text>
-                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(ragDebug?.retrieval_log ?? null)}</pre>
-              </GlassCard>
+                        <Group grow>
+                          <Select
+                            label="Batch"
+                            data={(ragDebug?.batches || []).map((b) => ({
+                              value: String(b.batch_id),
+                              label: fmtBatchLabel(b),
+                            }))}
+                            value={ragBatchId}
+                            onChange={(v) => {
+                              const next = v || null;
+                              setRagBatchId(next);
+                              if (next) void loadRagDebug(next);
+                            }}
+                            placeholder={(ragDebug?.batches || []).length === 0 ? "No batches yet" : "Select batch"}
+                            searchable
+                            nothingFoundMessage="No batches"
+                            disabled={(ragDebug?.batches || []).length === 0}
+                          />
+                          <Button
+                            mt={22}
+                            variant="default"
+                            onClick={() => {
+                              setRagBatchId(null);
+                              void loadRagDebug(null);
+                            }}
+                            size="sm"
+                          >
+                            Show all
+                          </Button>
+                        </Group>
 
-              <GlassCard p="md">
-                <Group justify="space-between">
-                  <Text fw={700}>Evidence (scoped)</Text>
-                  <GlassStat label="Count" value={ragDebug?.evidence?.length ?? 0} />
-                </Group>
-                <Divider my="sm" />
-                {!ragDebug || !ragDebug.evidence || ragDebug.evidence.length === 0 ? (
-                  <Text c="dimmed">No evidence attached.</Text>
+                        {ragBatchId ? (
+                          <Text size="sm" c="dimmed">
+                            scoped batch_id: <Code>{ragBatchId}</Code>
+                          </Text>
+                        ) : (
+                          <Text size="sm" c="dimmed">
+                            showing all evidence (unscoped)
+                          </Text>
+                        )}
+                      </Stack>
+                    </GlassCard>
+
+                    <GlassCard p="md">
+                      <Text fw={700} mb={6}>
+                        retrieval_config (best available)
+                      </Text>
+                      <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(ragDebug?.retrieval_config ?? retrievalCfg)}</pre>
+                    </GlassCard>
+
+                    <GlassCard p="md">
+                      <Text fw={700} mb={6}>
+                        retrieval_log (latest)
+                      </Text>
+                      <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(ragDebug?.retrieval_log ?? null)}</pre>
+                    </GlassCard>
+
+                    <GlassCard p="md">
+                      <Group justify="space-between">
+                        <Text fw={700}>Evidence (scoped)</Text>
+                        <GlassStat label="Count" value={ragDebug?.evidence?.length ?? 0} />
+                      </Group>
+                      <Divider my="sm" />
+                      {!ragDebug || !ragDebug.evidence || ragDebug.evidence.length === 0 ? (
+                        <Text c="dimmed">No evidence attached.</Text>
+                      ) : (
+                        <Stack gap="xs">
+                          {ragDebug.evidence.map((e) => (
+                            <GlassCard key={e.id} p="md">
+                              <Stack gap={4}>
+                                <Group gap="sm">
+                                  <Badge variant="light">{e.kind}</Badge>
+                                  <Text fw={700}>{e.source_name}</Text>
+                                  {e.source_ref ? <Text size="sm" c="dimmed">{e.source_ref}</Text> : null}
+                                </Group>
+                                <Text size="sm">{e.excerpt}</Text>
+                                <Text size="xs" c="dimmed">
+                                  {e.id}
+                                  {e.created_at ? ` · ${new Date(e.created_at).toLocaleString()}` : ""}
+                                </Text>
+                              </Stack>
+                            </GlassCard>
+                          ))}
+                        </Stack>
+                      )}
+                    </GlassCard>
+                  </Stack>
+                </Collapse>
+              </GlassSection>
+
+              <GlassSection
+                title="Timeline"
+                description="Key events for this run."
+                right={
+                  <Button variant="light" onClick={loadAll} size="sm">
+                    Refresh
+                  </Button>
+                }
+              >
+                {timeline.length === 0 ? (
+                  <Text c="dimmed">No timeline events yet.</Text>
                 ) : (
                   <Stack gap="xs">
-                    {ragDebug.evidence.map((e) => (
-                      <GlassCard key={e.id} p="md">
-                        <Stack gap={4}>
-                          <Group gap="sm">
-                            <Badge variant="light">{e.kind}</Badge>
-                            <Text fw={700}>{e.source_name}</Text>
-                            {e.source_ref ? <Text size="sm" c="dimmed">{e.source_ref}</Text> : null}
-                          </Group>
-                          <Text size="sm">{e.excerpt}</Text>
-                          <Text size="xs" c="dimmed">
-                            {e.id}
-                            {e.created_at ? ` · ${new Date(e.created_at).toLocaleString()}` : ""}
-                          </Text>
-                        </Stack>
+                    {timeline.map((ev, idx) => (
+                      <GlassCard key={`${ev.kind}:${ev.ref_id ?? "x"}:${idx}`} p="md">
+                        <Group justify="space-between" align="flex-start">
+                          <Stack gap={2}>
+                            <Group gap="sm">
+                              <Badge color={eventBadgeColor(ev.kind)} variant="light">
+                                {ev.kind}
+                              </Badge>
+                              <Text fw={700}>{ev.label}</Text>
+                            </Group>
+                            <Text size="xs" c="dimmed">
+                              {new Date(ev.ts).toLocaleString()}
+                              {ev.ref_id ? ` · ref=${ev.ref_id}` : ""}
+                            </Text>
+                          </Stack>
+
+                          {ev.kind === "artifact" && ev.ref_id ? (
+                            <Button size="xs" variant="light" component={Link} to={`/artifacts/${ev.ref_id}`}>
+                              Open
+                            </Button>
+                          ) : null}
+                        </Group>
                       </GlassCard>
                     ))}
                   </Stack>
                 )}
-              </GlassCard>
-            </Stack>
-          </Collapse>
-        </GlassSection>
+              </GlassSection>
 
-        <GlassSection
-          title="Timeline"
-          description="Key events for this run."
-          right={
-            <Button variant="light" onClick={loadAll} size="sm">
-              Refresh
-            </Button>
-          }
-        >
-          {timeline.length === 0 ? (
-            <Text c="dimmed">No timeline events yet.</Text>
-          ) : (
-            <Stack gap="xs">
-              {timeline.map((ev, idx) => (
-                <GlassCard key={`${ev.kind}:${ev.ref_id ?? "x"}:${idx}`} p="md">
-                  <Group justify="space-between" align="flex-start">
-                    <Stack gap={2}>
-                      <Group gap="sm">
-                        <Badge color={eventBadgeColor(ev.kind)} variant="light">
-                          {ev.kind}
-                        </Badge>
-                        <Text fw={700}>{ev.label}</Text>
-                      </Group>
-                      <Text size="xs" c="dimmed">
-                        {new Date(ev.ts).toLocaleString()}
-                        {ev.ref_id ? ` · ref=${ev.ref_id}` : ""}
-                      </Text>
-                    </Stack>
-
-                    {ev.kind === "artifact" && ev.ref_id ? (
-                      <Button size="xs" variant="light" component={Link} to={`/artifacts/${ev.ref_id}`}>
-                        Open
-                      </Button>
-                    ) : null}
+              <GlassSection
+                title="Logs"
+                description="Operator notes and system logs for this run."
+                right={
+                  <Group>
+                    <Select
+                      data={[
+                        { value: "all", label: "all" },
+                        { value: "info", label: "info" },
+                        { value: "warn", label: "warn" },
+                        { value: "error", label: "error" },
+                        { value: "debug", label: "debug" },
+                      ]}
+                      value={logFilter}
+                      onChange={setLogFilter}
+                      w={160}
+                    />
+                    <Button variant="light" onClick={loadAll} size="sm">
+                      Refresh
+                    </Button>
                   </Group>
-                </GlassCard>
-              ))}
-            </Stack>
-          )}
-        </GlassSection>
+                }
+              >
+                <Stack gap="sm">
+                  <Divider />
 
-        <GlassSection
-          title="Logs"
-          description="Operator notes and system logs for this run."
-          right={
-            <Group>
-              <Select
-                data={[
-                  { value: "all", label: "all" },
-                  { value: "info", label: "info" },
-                  { value: "warn", label: "warn" },
-                  { value: "error", label: "error" },
-                  { value: "debug", label: "debug" },
-                ]}
-                value={logFilter}
-                onChange={setLogFilter}
-                w={160}
-              />
-              <Button variant="light" onClick={loadAll} size="sm">
-                Refresh
-              </Button>
-            </Group>
-          }
-        >
-          <Stack gap="sm">
-            <Divider />
+                  <Text fw={700}>Add log (member+)</Text>
+                  <Group grow>
+                    <Select
+                      label="Level"
+                      data={[
+                        { value: "info", label: "info" },
+                        { value: "warn", label: "warn" },
+                        { value: "error", label: "error" },
+                        { value: "debug", label: "debug" },
+                      ]}
+                      value={logLevel}
+                      onChange={setLogLevel}
+                      disabled={!canMutate}
+                    />
+                    <TextInput
+                      label="Message"
+                      value={logMessage}
+                      onChange={(e) => setLogMessage(e.currentTarget.value)}
+                      disabled={!canMutate}
+                    />
+                  </Group>
 
-            <Text fw={700}>Add log (member+)</Text>
-            <Group grow>
-              <Select
-                label="Level"
-                data={[
-                  { value: "info", label: "info" },
-                  { value: "warn", label: "warn" },
-                  { value: "error", label: "error" },
-                  { value: "debug", label: "debug" },
-                ]}
-                value={logLevel}
-                onChange={setLogLevel}
-                disabled={!canMutate}
-              />
-              <TextInput label="Message" value={logMessage} onChange={(e) => setLogMessage(e.currentTarget.value)} disabled={!canMutate} />
-            </Group>
+                  <Textarea
+                    label="Meta (JSON)"
+                    autosize
+                    minRows={2}
+                    value={logMetaJson}
+                    onChange={(e) => setLogMetaJson(e.currentTarget.value)}
+                    disabled={!canMutate}
+                  />
 
-            <Textarea label="Meta (JSON)" autosize minRows={2} value={logMetaJson} onChange={(e) => setLogMetaJson(e.currentTarget.value)} disabled={!canMutate} />
+                  <MutateTooltip canMutate={canMutate}>
+                    <Button onClick={createLog} loading={creatingLog} disabled={!canMutate} size="sm">
+                      Add log
+                    </Button>
+                  </MutateTooltip>
 
-            <MutateTooltip canMutate={canMutate}>
-              <Button onClick={createLog} loading={creatingLog} disabled={!canMutate} size="sm">
-                Add log
-              </Button>
-            </MutateTooltip>
+                  <Divider />
 
-            <Divider />
-
-            {filteredLogs.length === 0 ? (
-              <Text c="dimmed">No logs yet.</Text>
-            ) : (
-              <Stack gap="xs">
-                {filteredLogs.map((l) => (
-                  <GlassCard key={l.id} p="md">
-                    <Stack gap={4}>
-                      <Group gap="sm">
-                        <Badge color={logBadgeColor(l.level)} variant="light">
-                          {l.level}
-                        </Badge>
-                        <Text fw={700}>{l.message}</Text>
-                      </Group>
-                      <Text size="xs" c="dimmed">
-                        {new Date(l.created_at).toLocaleString()} · {l.id}
-                      </Text>
-                      {l.meta && Object.keys(l.meta).length > 0 ? <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(l.meta, null, 2)}</pre> : null}
+                  {filteredLogs.length === 0 ? (
+                    <Text c="dimmed">No logs yet.</Text>
+                  ) : (
+                    <Stack gap="xs">
+                      {filteredLogs.map((l) => (
+                        <GlassCard key={l.id} p="md">
+                          <Stack gap={4}>
+                            <Group gap="sm">
+                              <Badge color={logBadgeColor(l.level)} variant="light">
+                                {l.level}
+                              </Badge>
+                              <Text fw={700}>{l.message}</Text>
+                            </Group>
+                            <Text size="xs" c="dimmed">
+                              {new Date(l.created_at).toLocaleString()} · {l.id}
+                            </Text>
+                            {l.meta && Object.keys(l.meta).length > 0 ? (
+                              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(l.meta, null, 2)}</pre>
+                            ) : null}
+                          </Stack>
+                        </GlassCard>
+                      ))}
                     </Stack>
-                  </GlassCard>
-                ))}
-              </Stack>
-            )}
-          </Stack>
-        </GlassSection>
+                  )}
+                </Stack>
+              </GlassSection>
 
-        <GlassSection title="Auto-add evidence" description="Attach retrieval evidence directly (member/admin)." right={<Badge variant="light">Advanced</Badge>}>
-          <Stack gap="sm">
-            <Text size="sm" c="dimmed">
-              Viewer can preview retrieval above. Member/Admin can attach evidence here.
-            </Text>
+              <GlassSection title="Auto-add evidence" description="Attach retrieval evidence directly (member/admin)." right={<Badge variant="light">Advanced</Badge>}>
+                <Stack gap="sm">
+                  <Text size="sm" c="dimmed">
+                    Viewer can preview retrieval above. Member/Admin can attach evidence here.
+                  </Text>
 
-            <TextInput
-              label="Query"
-              value={autoQuery}
-              onChange={(e) => setAutoQuery(e.currentTarget.value)}
-              placeholder='e.g., "refresh tokens"'
-              disabled={!canMutate}
-            />
+                  <TextInput
+                    label="Query"
+                    value={autoQuery}
+                    onChange={(e) => setAutoQuery(e.currentTarget.value)}
+                    placeholder='e.g., "refresh tokens"'
+                    disabled={!canMutate}
+                  />
 
-            <Group grow>
-              <NumberInput label="Top K" value={autoK} min={1} max={20} onChange={(v) => setAutoK(Number(v) || 6)} disabled={!canMutate} />
-              <Group gap="xs" align="end">
-                <NumberInput
-                  label="Alpha"
-                  value={autoAlpha}
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  onChange={(v) => setAutoAlpha(Number(v) || 0.65)}
-                  disabled={!canMutate}
-                />
-                <HelpTip label="Hybrid weighting for auto evidence retrieval." />
-              </Group>
-            </Group>
+                  <Group grow>
+                    <NumberInput
+                      label="Top K"
+                      value={autoK}
+                      min={1}
+                      max={20}
+                      onChange={(v) => setAutoK(Number(v) || 6)}
+                      disabled={!canMutate}
+                    />
+                    <Group gap="xs" align="end">
+                      <NumberInput
+                        label="Alpha"
+                        value={autoAlpha}
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        onChange={(v) => setAutoAlpha(Number(v) || 0.65)}
+                        disabled={!canMutate}
+                      />
+                      <HelpTip label="Hybrid weighting for auto evidence retrieval." />
+                    </Group>
+                  </Group>
 
-            <MutateTooltip canMutate={canMutate}>
-              <Button onClick={autoAddEvidence} loading={autoLoading} disabled={!canMutate} size="sm">
-                Fetch & attach evidence
-              </Button>
-            </MutateTooltip>
-          </Stack>
-        </GlassSection>
+                  <MutateTooltip canMutate={canMutate}>
+                    <Button onClick={autoAddEvidence} loading={autoLoading} disabled={!canMutate} size="sm">
+                      Fetch & attach evidence
+                    </Button>
+                  </MutateTooltip>
+                </Stack>
+              </GlassSection>
 
-        <GlassSection title="Create artifact" description="Create a manual artifact version (member+)." right={<Badge variant="light">Manual</Badge>}>
-          <Stack gap="sm">
-            <Select label="Type" data={artifactTypeOptions} value={atype} onChange={setAtype} disabled={!canMutate} />
-            <Group grow>
-              <TextInput label="Title" value={title} onChange={(e) => setTitle(e.currentTarget.value)} disabled={!canMutate} />
-              <Tooltip withArrow label="Logical key groups versions (e.g., prd, tracking_spec).">
-                <div style={{ width: "100%" }}>
-                  <TextInput label="Logical key" value={logicalKey} onChange={(e) => setLogicalKey(e.currentTarget.value)} disabled={!canMutate} />
-                </div>
-              </Tooltip>
-            </Group>
-            <Textarea label="Content (Markdown)" autosize minRows={6} value={contentMd} onChange={(e) => setContentMd(e.currentTarget.value)} disabled={!canMutate} />
+              <GlassSection title="Create output" description="Create a manual output version (member+)." right={<Badge variant="light">Manual</Badge>}>
+                <Stack gap="sm">
+                  <Select label="Type" data={artifactTypeOptions} value={atype} onChange={setAtype} disabled={!canMutate} />
+                  <Group grow>
+                    <TextInput label="Title" value={title} onChange={(e) => setTitle(e.currentTarget.value)} disabled={!canMutate} />
+                    <Tooltip withArrow label="Logical key groups versions (e.g., prd, tracking_spec).">
+                      <div style={{ width: "100%" }}>
+                        <TextInput label="Logical key" value={logicalKey} onChange={(e) => setLogicalKey(e.currentTarget.value)} disabled={!canMutate} />
+                      </div>
+                    </Tooltip>
+                  </Group>
+                  <Textarea label="Content (Markdown)" autosize minRows={6} value={contentMd} onChange={(e) => setContentMd(e.currentTarget.value)} disabled={!canMutate} />
 
-            <MutateTooltip canMutate={canMutate}>
-              <Button onClick={createArtifact} loading={creatingArtifact} disabled={!canMutate} size="sm">
-                Create
-              </Button>
-            </MutateTooltip>
-          </Stack>
-        </GlassSection>
+                  <MutateTooltip canMutate={canMutate}>
+                    <Button onClick={createArtifact} loading={creatingArtifact} disabled={!canMutate} size="sm">
+                      Create
+                    </Button>
+                  </MutateTooltip>
+                </Stack>
+              </GlassSection>
 
-        <GlassSection title="Add evidence" description="Attach evidence snippets/metrics/links to support regeneration (member+)." right={<Badge variant="light">Manual</Badge>}>
-          <Stack gap="sm">
-            <Group grow>
-              <Select
-                label="Kind"
-                data={[
-                  { value: "metric", label: "metric" },
-                  { value: "snippet", label: "snippet" },
-                  { value: "link", label: "link" },
-                ]}
-                value={ekind}
-                onChange={setEkind}
-                disabled={!canMutate}
-              />
-              <TextInput label="Source name" value={sourceName} onChange={(e) => setSourceName(e.currentTarget.value)} disabled={!canMutate} />
-            </Group>
+              <GlassSection title="Add evidence" description="Attach evidence snippets/metrics/links to support regeneration (member+)." right={<Badge variant="light">Manual</Badge>}>
+                <Stack gap="sm">
+                  <Group grow>
+                    <Select
+                      label="Kind"
+                      data={[
+                        { value: "metric", label: "metric" },
+                        { value: "snippet", label: "snippet" },
+                        { value: "link", label: "link" },
+                      ]}
+                      value={ekind}
+                      onChange={setEkind}
+                      disabled={!canMutate}
+                    />
+                    <TextInput label="Source name" value={sourceName} onChange={(e) => setSourceName(e.currentTarget.value)} disabled={!canMutate} />
+                  </Group>
 
-            <TextInput
-              label="Source ref (URL/id)"
-              value={sourceRef}
-              onChange={(e) => setSourceRef(e.currentTarget.value)}
-              placeholder="optional"
-              disabled={!canMutate}
-            />
-            <Textarea label="Excerpt" autosize minRows={3} value={excerpt} onChange={(e) => setExcerpt(e.currentTarget.value)} disabled={!canMutate} />
-            <Textarea label="Meta (JSON)" autosize minRows={3} value={metaJson} onChange={(e) => setMetaJson(e.currentTarget.value)} disabled={!canMutate} />
+                  <TextInput
+                    label="Source ref (URL/id)"
+                    value={sourceRef}
+                    onChange={(e) => setSourceRef(e.currentTarget.value)}
+                    placeholder="optional"
+                    disabled={!canMutate}
+                  />
+                  <Textarea label="Excerpt" autosize minRows={3} value={excerpt} onChange={(e) => setExcerpt(e.currentTarget.value)} disabled={!canMutate} />
+                  <Textarea label="Meta (JSON)" autosize minRows={3} value={metaJson} onChange={(e) => setMetaJson(e.currentTarget.value)} disabled={!canMutate} />
 
-            <MutateTooltip canMutate={canMutate}>
-              <Button onClick={addEvidence} loading={creatingEvidence} disabled={!canMutate} size="sm">
-                Add evidence
-              </Button>
-            </MutateTooltip>
-          </Stack>
-        </GlassSection>
+                  <MutateTooltip canMutate={canMutate}>
+                    <Button onClick={addEvidence} loading={creatingEvidence} disabled={!canMutate} size="sm">
+                      Add evidence
+                    </Button>
+                  </MutateTooltip>
+
+                  <Divider />
+
+                  <MutateTooltip canMutate={canMutate}>
+                    <Button onClick={regenerate} loading={regenLoading} disabled={!canMutate || evidence.length === 0} size="sm">
+                      Regenerate from evidence
+                    </Button>
+                  </MutateTooltip>
+                  <Text size="sm" c="dimmed">
+                    {evidence.length === 0
+                      ? "Add evidence to enable regeneration."
+                      : canMutate
+                        ? `Uses ${evidence.length} evidence item(s) to create a new output version.`
+                        : "Viewer: regeneration disabled."}
+                  </Text>
+                </Stack>
+              </GlassSection>
+            </Stack>
+          </Tabs.Panel>
+        </Tabs>
       </Stack>
     </GlassPage>
   );

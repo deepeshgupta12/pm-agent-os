@@ -9,47 +9,22 @@ import {
   Divider,
   Group,
   NumberInput,
-  Radio,
   Select,
   Stack,
   Text,
   TextInput,
   Textarea,
   Tooltip,
+  Collapse,
+  Switch,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
-import type { Agent, PipelineTemplate, Run, PipelineRun } from "../types";
+import type { Agent, PipelineTemplate, Run, PipelineRun, WorkspaceRole, RetrieveResponse, RetrieveItem } from "../types";
 
 import GlassPage from "../components/Glass/GlassPage";
 import GlassCard from "../components/Glass/GlassCard";
 import GlassSection from "../components/Glass/GlassSection";
 import GlassStat from "../components/Glass/GlassStat";
-
-type WorkspaceRole = {
-  workspace_id: string;
-  role: "admin" | "member" | "viewer";
-};
-
-type RetrieveItem = {
-  chunk_id: string;
-  document_id: string;
-  source_id: string;
-  document_title: string;
-  chunk_index: number;
-  snippet: string;
-  meta: Record<string, unknown>;
-  score_fts: number;
-  score_vec: number;
-  score_hybrid: number;
-};
-
-type RetrieveResponse = {
-  ok: boolean;
-  q: string;
-  k: number;
-  alpha: number;
-  items: RetrieveItem[];
-};
 
 type TemplateListResponse = PipelineTemplate[] | { items: PipelineTemplate[] };
 
@@ -60,12 +35,9 @@ function normalizeTemplates(res: TemplateListResponse): PipelineTemplate[] {
 
 type TimeframePreset = "7d" | "30d" | "90d" | "custom";
 
-function HelpPill({ label }: { label: string }) {
-  return (
-    <Tooltip label={label} withArrow>
-      <Badge variant="light">?</Badge>
-    </Tooltip>
-  );
+function shortId(id: string): string {
+  if (!id) return "";
+  return id.length <= 10 ? id : `${id.slice(0, 8)}…`;
 }
 
 export default function RunBuilderPage() {
@@ -80,29 +52,27 @@ export default function RunBuilderPage() {
   const roleStr = (myRole?.role || "").toLowerCase();
   const canWrite = roleStr !== "viewer";
 
-  // Mode: single agent run vs pipeline run
-  const [mode, setMode] = useState<"agent" | "pipeline">("agent");
-
   // Agents
   const [agents, setAgents] = useState<Agent[]>([]);
   const [agentId, setAgentId] = useState<string | null>(null);
 
-  // Pipeline templates
-  const [templates, setTemplates] = useState<PipelineTemplate[]>([]);
-  const [templateId, setTemplateId] = useState<string | null>(null);
-  const [loadingTemplates, setLoadingTemplates] = useState(false);
-
-  // Shared input payload (goal/context/constraints)
+  // Simple payload
   const [goal, setGoal] = useState("Improve onboarding conversion");
   const [context, setContext] = useState("Desktop web");
   const [constraints, setConstraints] = useState("");
 
-  // Timeframe
+  // References (simple)
+  const [useReferences, setUseReferences] = useState(false);
   const [preset, setPreset] = useState<TimeframePreset>("30d");
+
+  // Advanced toggle
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  // Advanced timeframe plumbing
   const [startDate, setStartDate] = useState<string>(""); // YYYY-MM-DD
   const [endDate, setEndDate] = useState<string>(""); // YYYY-MM-DD
 
-  // Sources selection (stored in payload; used by retrieval test)
+  // Advanced sources selection
   const [srcDocs, setSrcDocs] = useState(true);
   const [srcManual, setSrcManual] = useState(true);
   const [srcGithub, setSrcGithub] = useState(false);
@@ -112,27 +82,24 @@ export default function RunBuilderPage() {
   // Create
   const [creating, setCreating] = useState(false);
 
-  // Retrieval test + run retrieval config
-  const [rq, setRq] = useState("retrieval later");
+  // Retrieval test + run retrieval config (advanced)
+  const [rq, setRq] = useState("");
   const [rk, setRk] = useState<number>(5);
   const [ralpha, setRalpha] = useState<number>(0.65);
   const [rloading, setRloading] = useState(false);
   const [rres, setRres] = useState<RetrieveResponse | null>(null);
 
+  // Pipeline (keep available, but advanced-only for V0)
+  const [templates, setTemplates] = useState<PipelineTemplate[]>([]);
+  const [templateId, setTemplateId] = useState<string | null>(null);
+  const [loadingTemplates, setLoadingTemplates] = useState(false);
+
   const agentOptions = useMemo(
-    () => agents.map((a) => ({ value: a.id, label: `${a.name} (${a.id})` })),
+    () => agents.map((a) => ({ value: a.id, label: `${a.name}` })),
     [agents]
   );
 
-  const templateOptions = useMemo(
-    () => templates.map((t) => ({ value: t.id, label: t.name })),
-    [templates]
-  );
-
-  const selectedAgent = useMemo(
-    () => agents.find((a) => a.id === agentId) || null,
-    [agents, agentId]
-  );
+  const selectedAgent = useMemo(() => agents.find((a) => a.id === agentId) || null, [agents, agentId]);
 
   const selectedSources = useMemo(() => {
     const out: string[] = [];
@@ -153,7 +120,7 @@ export default function RunBuilderPage() {
     return {
       goal: goal.trim(),
       context: context.trim(),
-      constraints: constraints.trim(),
+      ...(constraints.trim() ? { constraints: constraints.trim() } : {}),
       timeframe: timeframePayload,
       sources_selected: selectedSources,
     };
@@ -198,60 +165,68 @@ export default function RunBuilderPage() {
     if (!templateId && items.length > 0) setTemplateId(items[0].id);
   }
 
-  async function create() {
+  async function createRun() {
     if (!wid) return;
 
     if (!canWrite) {
-      setErr("Viewer role: creating runs/pipelines is disabled.");
+      setErr("Viewer role: creating runs is disabled.");
+      return;
+    }
+
+    if (!agentId) {
+      setErr("Pick an agent.");
       return;
     }
 
     setErr(null);
     setCreating(true);
 
-    if (mode === "agent") {
-      if (!agentId) {
-        setCreating(false);
-        setErr("Pick an agent.");
-        return;
-      }
+    const retrievalEnabled = useReferences && rq.trim().length > 0;
 
-      const res = await apiFetch<Run>(`/workspaces/${wid}/runs`, {
-        method: "POST",
-        body: JSON.stringify({
-          agent_id: agentId,
-          input_payload: inputPayload,
-          retrieval: {
-            enabled: Boolean(rq.trim()),
-            query: rq.trim(),
-            k: rk || 6,
-            alpha: ralpha ?? 0.65,
-            source_types: selectedSources,
-            timeframe:
-              preset === "custom"
-                ? { preset: "custom", start_date: startDate.trim(), end_date: endDate.trim() }
-                : { preset },
-          },
-        }),
-      });
+    const res = await apiFetch<Run>(`/workspaces/${wid}/runs`, {
+      method: "POST",
+      body: JSON.stringify({
+        agent_id: agentId,
+        input_payload: inputPayload,
+        retrieval: {
+          enabled: retrievalEnabled,
+          query: rq.trim(),
+          k: rk || 6,
+          alpha: ralpha ?? 0.65,
+          source_types: selectedSources,
+          timeframe:
+            preset === "custom"
+              ? { preset: "custom", start_date: startDate.trim(), end_date: endDate.trim() }
+              : { preset },
+        },
+      }),
+    });
 
-      setCreating(false);
+    setCreating(false);
 
-      if (!res.ok) {
-        setErr(`Create run failed: ${res.status} ${res.error}`);
-        return;
-      }
-
-      nav(`/runs/${res.data.id}`);
+    if (!res.ok) {
+      setErr(`Create run failed: ${res.status} ${res.error}`);
       return;
     }
 
-    // pipeline
+    nav(`/runs/${res.data.id}`);
+  }
+
+  async function createPipelineRun() {
+    if (!wid) return;
+
+    if (!canWrite) {
+      setErr("Viewer role: creating pipeline runs is disabled.");
+      return;
+    }
+
     if (!templateId) {
-      setCreating(false);
       setErr("Pick a pipeline template.");
       return;
     }
+
+    setErr(null);
+    setCreating(true);
 
     const pres = await apiFetch<PipelineRun>(`/workspaces/${wid}/pipelines/runs`, {
       method: "POST",
@@ -271,7 +246,7 @@ export default function RunBuilderPage() {
   async function testRetrieve() {
     if (!wid) return;
     if (!rq.trim()) {
-      setErr("Enter a retrieval query.");
+      setErr("Enter a query to test references.");
       return;
     }
     setErr(null);
@@ -282,9 +257,10 @@ export default function RunBuilderPage() {
     params.set("k", String(rk || 5));
     params.set("alpha", String(ralpha ?? 0.65));
 
-    if (selectedSources.length > 0) {
-      params.set("source_types", selectedSources.join(","));
-    }
+    if (selectedSources.length > 0) params.set("source_types", selectedSources.join(","));
+
+    // Keep timeframe preset in preview if supported by backend
+    if (preset && preset !== "custom") params.set("timeframe_preset", preset);
 
     const res = await apiFetch<RetrieveResponse>(`/workspaces/${wid}/retrieve?${params.toString()}`, {
       method: "GET",
@@ -293,7 +269,7 @@ export default function RunBuilderPage() {
     setRloading(false);
 
     if (!res.ok) {
-      setErr(`Retrieve failed: ${res.status} ${res.error}`);
+      setErr(`References search failed: ${res.status} ${res.error}`);
       setRres(null);
       return;
     }
@@ -313,7 +289,10 @@ export default function RunBuilderPage() {
   const headerRight = (
     <Group>
       <Button component={Link} to={`/workspaces/${wid}`} variant="light" size="sm">
-        Back
+        Guided mode
+      </Button>
+      <Button component={Link} to={`/workspaces/${wid}/overview`} variant="light" size="sm">
+        Overview
       </Button>
       <Button component={Link} to={`/workspaces/${wid}/docs`} variant="light" size="sm">
         Docs
@@ -324,15 +303,14 @@ export default function RunBuilderPage() {
   const accessRight = myRole ? (
     <Group gap="sm" wrap="wrap">
       <Badge variant="light">{myRole.role}</Badge>
-      <GlassStat label="Mode" value={mode === "agent" ? "Agent" : "Pipeline"} />
       <GlassStat label="Write" value={canWrite ? "Enabled" : "Disabled"} />
     </Group>
   ) : undefined;
 
   return (
     <GlassPage
-      title="Run Builder"
-      subtitle="Create a run (agent) or a pipeline run. Preview retrieval to validate evidence coverage."
+      title="Create run"
+      subtitle="Simple-first run creation. Advanced options are available when you need them."
       right={headerRight}
     >
       <Stack gap="md">
@@ -344,84 +322,48 @@ export default function RunBuilderPage() {
 
         <GlassSection
           title="Access"
-          description="Viewer can preview retrieval. Member/Admin can create runs and pipeline runs."
+          description="Viewer can test references. Member/Admin can create runs."
           right={accessRight}
         >
           {!canWrite ? (
             <Text size="sm" c="dimmed">
-              Viewer role: creation is disabled. You can still use “Test retrieval” below.
+              Viewer role: creation is disabled. You can still test references in Advanced.
             </Text>
           ) : (
             <Text size="sm" c="dimmed">
-              You can create runs and pipelines. Retrieval config is stored on the run payload (V0).
+              Create runs with a minimal input. Use references only when needed.
             </Text>
           )}
         </GlassSection>
 
+        {/* SIMPLE-FIRST */}
         <GlassSection
-          title="Create"
-          description="Pick a mode, set your input payload, and create a run."
+          title="Create run"
+          description="Pick an agent, describe the goal, optionally use references, then create."
           right={
             <Group gap="sm">
-              <Button variant="light" onClick={loadTemplates} loading={loadingTemplates} disabled={!canWrite} size="sm">
-                Refresh templates
+              <Button variant="light" size="sm" onClick={() => setAdvancedOpen((x) => !x)}>
+                {advancedOpen ? "Hide advanced" : "Show advanced"}
               </Button>
             </Group>
           }
         >
           <Stack gap="sm">
-            <Group justify="space-between" align="center">
-              <Group gap="sm">
-                <Text fw={700}>Mode</Text>
-                <HelpPill label="Agent creates a single run. Pipeline executes a template workflow." />
-              </Group>
-            </Group>
+            <Select
+              label="Agent"
+              data={agentOptions}
+              value={agentId}
+              onChange={setAgentId}
+              searchable
+              nothingFoundMessage="No agents"
+              disabled={!canWrite}
+            />
 
-            <Radio.Group value={mode} onChange={(v) => setMode(v as any)}>
-              <Group>
-                <Radio value="agent" label="Single agent run" />
-                <Radio value="pipeline" label="Pipeline run" />
-              </Group>
-            </Radio.Group>
-
-            {mode === "agent" ? (
-              <Select
-                label="Agent"
-                data={agentOptions}
-                value={agentId}
-                onChange={setAgentId}
-                searchable
-                nothingFoundMessage="No agents"
-                disabled={!canWrite}
-              />
-            ) : (
-              <Stack gap="xs">
-                <Select
-                  label="Pipeline template"
-                  data={templateOptions}
-                  value={templateId}
-                  onChange={setTemplateId}
-                  searchable
-                  nothingFoundMessage="No templates"
-                  disabled={!canWrite}
-                />
-                {templates.length === 0 ? (
-                  <TextInput
-                    label="Template ID (manual)"
-                    value={templateId ?? ""}
-                    onChange={(e) => setTemplateId(e.currentTarget.value)}
-                    placeholder="Paste template UUID"
-                    disabled={!canWrite}
-                  />
-                ) : null}
-              </Stack>
-            )}
-
-            {mode === "agent" && selectedAgent ? (
+            {selectedAgent ? (
               <GlassCard p="md">
                 <Stack gap={6}>
                   <Group gap="sm">
-                    <Badge variant="light">{selectedAgent.id}</Badge>
+                    <Badge variant="light">{shortId(selectedAgent.id)}</Badge>
                     <Badge variant="light">{selectedAgent.version}</Badge>
                     <Text fw={700}>{selectedAgent.name}</Text>
                   </Group>
@@ -429,7 +371,7 @@ export default function RunBuilderPage() {
                     {selectedAgent.description}
                   </Text>
                   <Text size="sm" c="dimmed">
-                    Default artifact type: <Code>{selectedAgent.default_artifact_type}</Code>
+                    Default output: <Code>{selectedAgent.default_artifact_type}</Code>
                   </Text>
                 </Stack>
               </GlassCard>
@@ -437,217 +379,260 @@ export default function RunBuilderPage() {
 
             <Divider />
 
-            <Group gap="sm" align="center">
-              <Text fw={700}>Input</Text>
-              <HelpPill label="This is the high-level context the agent/pipeline receives as input_payload." />
-            </Group>
-
             <Group grow>
               <TextInput
                 label="Goal"
                 value={goal}
                 onChange={(e) => setGoal(e.currentTarget.value)}
                 disabled={!canWrite}
+                placeholder="What do you want this run to achieve?"
               />
               <TextInput
                 label="Context"
                 value={context}
                 onChange={(e) => setContext(e.currentTarget.value)}
                 disabled={!canWrite}
+                placeholder="Where / for whom?"
               />
             </Group>
 
-            <TextInput
+            <Textarea
               label="Constraints (optional)"
               value={constraints}
               onChange={(e) => setConstraints(e.currentTarget.value)}
               disabled={!canWrite}
+              autosize
+              minRows={2}
+              placeholder="Any constraints, caveats, scope limits?"
             />
 
             <Divider />
 
-            <Group gap="sm" align="center">
-              <Text fw={700}>Timeframe</Text>
-              <HelpPill label="Used by retrieval config on run creation. In V0, timeframe is also stored in payload for reference." />
-            </Group>
-
-            <Select
-              label="Preset"
-              value={preset}
-              onChange={(v) => setPreset((v as any) || "30d")}
-              data={[
-                { value: "7d", label: "Last 7 days" },
-                { value: "30d", label: "Last 30 days" },
-                { value: "90d", label: "Last 90 days" },
-                { value: "custom", label: "Custom" },
-              ]}
-              style={{ maxWidth: 320 }}
-              disabled={!canWrite}
-            />
-
-            {preset === "custom" ? (
-              <Group grow>
-                <TextInput
-                  label="Start date (YYYY-MM-DD)"
-                  value={startDate}
-                  onChange={(e) => setStartDate(e.currentTarget.value)}
-                  disabled={!canWrite}
-                />
-                <TextInput
-                  label="End date (YYYY-MM-DD)"
-                  value={endDate}
-                  onChange={(e) => setEndDate(e.currentTarget.value)}
-                  disabled={!canWrite}
-                />
+            <Group justify="space-between" align="center">
+              <Group gap="sm">
+                <Text fw={700}>Use references</Text>
+                <Tooltip
+                  withArrow
+                  label="If enabled, the run can pull evidence from workspace sources. Keep off for simple runs."
+                >
+                  <Badge variant="light">?</Badge>
+                </Tooltip>
               </Group>
-            ) : null}
+
+              <Switch checked={useReferences} onChange={(e) => setUseReferences(e.currentTarget.checked)} disabled={!canWrite} />
+            </Group>
+
+            {useReferences ? (
+              <Stack gap="sm">
+                <TextInput
+                  label="Reference query"
+                  value={rq}
+                  onChange={(e) => setRq(e.currentTarget.value)}
+                  placeholder='e.g., "refresh tokens", "onboarding drop-offs", "pricing experiments"'
+                  disabled={!canWrite}
+                />
+
+                <Select
+                  label="Timeframe (optional)"
+                  value={preset}
+                  onChange={(v) => setPreset((v as any) || "30d")}
+                  data={[
+                    { value: "7d", label: "Last 7 days" },
+                    { value: "30d", label: "Last 30 days" },
+                    { value: "90d", label: "Last 90 days" },
+                    { value: "custom", label: "Custom" },
+                  ]}
+                  style={{ maxWidth: 320 }}
+                  disabled={!canWrite}
+                />
+
+                {preset === "custom" ? (
+                  <Group grow>
+                    <TextInput
+                      label="Start date (YYYY-MM-DD)"
+                      value={startDate}
+                      onChange={(e) => setStartDate(e.currentTarget.value)}
+                      disabled={!canWrite}
+                    />
+                    <TextInput
+                      label="End date (YYYY-MM-DD)"
+                      value={endDate}
+                      onChange={(e) => setEndDate(e.currentTarget.value)}
+                      disabled={!canWrite}
+                    />
+                  </Group>
+                ) : null}
+              </Stack>
+            ) : (
+              <Text size="sm" c="dimmed">
+                References are off. This run will execute using only your input.
+              </Text>
+            )}
 
             <Divider />
-
-            <Group gap="sm" align="center">
-              <Text fw={700}>Sources</Text>
-              <HelpPill label="Selected source types are stored in payload and also used for retrieval preview." />
-            </Group>
 
             <Group>
-              <Checkbox checked={srcDocs} onChange={(e) => setSrcDocs(e.currentTarget.checked)} label="Docs" />
-              <Checkbox checked={srcManual} onChange={(e) => setSrcManual(e.currentTarget.checked)} label="Manual" />
-              <Checkbox checked={srcGithub} onChange={(e) => setSrcGithub(e.currentTarget.checked)} label="GitHub" />
-              <Checkbox checked={srcJira} onChange={(e) => setSrcJira(e.currentTarget.checked)} label="Jira" />
-              <Checkbox checked={srcSlack} onChange={(e) => setSrcSlack(e.currentTarget.checked)} label="Slack" />
-            </Group>
-
-            <Text size="sm" c="dimmed">
-              In V0, these are stored on the run/pipeline payload and used for retrieval preview. Connector ingestion comes later.
-            </Text>
-
-            <Divider />
-
-            <Group gap="sm" align="center">
-              <Text fw={700}>Retrieval config (for this run)</Text>
-              <HelpPill label="These parameters are sent when creating an agent run. Use 'Test retrieval' to validate results first." />
-            </Group>
-
-            <TextInput
-              label="Query"
-              value={rq}
-              onChange={(e) => setRq(e.currentTarget.value)}
-              placeholder='e.g., "how to name events"'
-              disabled={!canWrite && mode === "agent"}
-            />
-
-            <Group grow>
-              <NumberInput
-                label="k"
-                value={rk}
-                min={1}
-                max={50}
-                onChange={(v) => setRk(Number(v) || 5)}
-                disabled={!canWrite && mode === "agent"}
-              />
-              <NumberInput
-                label="alpha"
-                value={ralpha}
-                min={0}
-                max={1}
-                step={0.05}
-                onChange={(v) => setRalpha(Number(v) || 0.65)}
-                disabled={!canWrite && mode === "agent"}
-              />
-            </Group>
-
-            <Divider />
-
-            <Text fw={700}>Preview payload</Text>
-            <Textarea autosize minRows={6} value={JSON.stringify(inputPayload, null, 2)} readOnly />
-
-            <Group>
-              <Tooltip withArrow label={canWrite ? "Creates the run and redirects to Run detail." : "Viewer role cannot create runs."}>
+              <Tooltip withArrow label={canWrite ? "Creates the run and opens it." : "Viewer role cannot create runs."}>
                 <span>
-                  <Button onClick={create} loading={creating} disabled={!canWrite} size="sm">
-                    Create {mode === "agent" ? "run" : "pipeline run"}
+                  <Button onClick={createRun} loading={creating} disabled={!canWrite} size="sm">
+                    Create run
                   </Button>
                 </span>
               </Tooltip>
-            </Group>
-          </Stack>
-        </GlassSection>
-
-        <GlassSection
-          title="Test retrieval"
-          description="Preview what retrieval would return with your current query and source types."
-          right={<GlassStat label="Sources" value={selectedSources.length ? selectedSources.join(", ") : "none"} />}
-        >
-          <Stack gap="sm">
-            <Text size="sm" c="dimmed">
-              Uses <Code>GET /workspaces/:id/retrieve</Code>. Viewer+ allowed.
-            </Text>
-
-            <TextInput
-              label="Query"
-              value={rq}
-              onChange={(e) => setRq(e.currentTarget.value)}
-              placeholder='e.g., "refresh tokens"'
-            />
-
-            <Group grow>
-              <NumberInput label="Top K" value={rk} min={1} max={50} onChange={(v) => setRk(Number(v) || 5)} />
-              <NumberInput
-                label="Alpha (vector weight)"
-                value={ralpha}
-                min={0}
-                max={1}
-                step={0.05}
-                onChange={(v) => setRalpha(Number(v) || 0.65)}
-              />
-            </Group>
-
-            <Group>
-              <Button onClick={testRetrieve} loading={rloading} size="sm">
-                Search
+              <Button component={Link} to="/runs" variant="light" size="sm">
+                View runs
               </Button>
-              <Badge variant="light">source_types: {selectedSources.length ? selectedSources.join(",") : "none"}</Badge>
+              <Button component={Link} to="/outputs" variant="light" size="sm">
+                View outputs
+              </Button>
             </Group>
 
-            {rres ? (
+            {/* ADVANCED */}
+            <Collapse in={advancedOpen}>
+              <Divider my="md" />
+
               <GlassCard p="md">
-                <Stack gap="xs">
-                  <Group justify="space-between">
-                    <Text fw={700}>Results</Text>
-                    <Badge variant="light">items: {rres.items?.length ?? 0}</Badge>
+                <Stack gap="sm">
+                  <Group justify="space-between" align="center">
+                    <Text fw={800}>Advanced</Text>
+                    <Badge variant="light">Optional</Badge>
                   </Group>
 
-                  {(rres.items || []).length === 0 ? (
-                    <Text size="sm" c="dimmed">
-                      No matches.
-                    </Text>
-                  ) : (
-                    <Stack gap="xs">
-                      {rres.items.map((it) => (
-                        <GlassCard key={it.chunk_id} p="md">
-                          <Stack gap={6}>
-                            <Group gap="sm">
-                              <Badge variant="light">score: {Number(it.score_hybrid).toFixed(3)}</Badge>
-                              <Text fw={700}>{it.document_title}</Text>
-                            </Group>
-                            <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
-                              {it.snippet}
-                            </Text>
-                            <Text size="xs" c="dimmed">
-                              doc={it.document_id} · chunk={it.chunk_id} · source={it.source_id}
-                            </Text>
+                  <Text size="sm" c="dimmed">
+                    Advanced settings are for tuning references and running pipelines. Keep these hidden for normal use.
+                  </Text>
+
+                  <Divider />
+
+                  <Text fw={700}>Sources</Text>
+                  <Group>
+                    <Checkbox checked={srcDocs} onChange={(e) => setSrcDocs(e.currentTarget.checked)} label="Docs" />
+                    <Checkbox checked={srcManual} onChange={(e) => setSrcManual(e.currentTarget.checked)} label="Manual" />
+                    <Checkbox checked={srcGithub} onChange={(e) => setSrcGithub(e.currentTarget.checked)} label="GitHub" />
+                    <Checkbox checked={srcJira} onChange={(e) => setSrcJira(e.currentTarget.checked)} label="Jira" />
+                    <Checkbox checked={srcSlack} onChange={(e) => setSrcSlack(e.currentTarget.checked)} label="Slack" />
+                  </Group>
+
+                  <Text size="sm" c="dimmed">
+                    Selected sources: <Code>{selectedSources.length ? selectedSources.join(", ") : "none"}</Code>
+                  </Text>
+
+                  <Divider />
+
+                  <Text fw={700}>Reference tuning</Text>
+                  <Group grow>
+                    <NumberInput
+                      label="Top K"
+                      value={rk}
+                      min={1}
+                      max={50}
+                      onChange={(v) => setRk(Number(v) || 5)}
+                    />
+                    <NumberInput
+                      label="Alpha (vector weight)"
+                      value={ralpha}
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      onChange={(v) => setRalpha(Number(v) || 0.65)}
+                    />
+                  </Group>
+
+                  <Divider />
+
+                  <Text fw={700}>Test references</Text>
+                  <Text size="sm" c="dimmed">
+                    Uses <Code>GET /workspaces/:id/retrieve</Code> to preview reference coverage.
+                  </Text>
+
+                  <Group>
+                    <Button onClick={testRetrieve} loading={rloading} size="sm" variant="light">
+                      Search references
+                    </Button>
+                    <Badge variant="light">sources: {selectedSources.length ? selectedSources.join(",") : "none"}</Badge>
+                  </Group>
+
+                  {rres ? (
+                    <GlassCard p="md">
+                      <Stack gap="xs">
+                        <Group justify="space-between">
+                          <Text fw={700}>Results</Text>
+                          <Badge variant="light">items: {rres.items?.length ?? 0}</Badge>
+                        </Group>
+
+                        {(rres.items || []).length === 0 ? (
+                          <Text size="sm" c="dimmed">
+                            No matches.
+                          </Text>
+                        ) : (
+                          <Stack gap="xs">
+                            {(rres.items as RetrieveItem[]).map((it) => (
+                              <GlassCard key={it.chunk_id} p="md">
+                                <Stack gap={6}>
+                                  <Group gap="sm">
+                                    <Badge variant="light">score: {Number(it.score_hybrid).toFixed(3)}</Badge>
+                                    <Text fw={700}>{it.document_title}</Text>
+                                  </Group>
+                                  <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
+                                    {it.snippet}
+                                  </Text>
+                                </Stack>
+                              </GlassCard>
+                            ))}
                           </Stack>
-                        </GlassCard>
-                      ))}
-                    </Stack>
+                        )}
+                      </Stack>
+                    </GlassCard>
+                  ) : (
+                    <Text size="sm" c="dimmed">
+                      Run a reference search to validate ingestion and source selection.
+                    </Text>
                   )}
+
+                  <Divider />
+
+                  <Text fw={700}>Pipelines (advanced)</Text>
+                  <Text size="sm" c="dimmed">
+                    Pipelines are supported, but not the default workflow in V0.
+                  </Text>
+
+                  <Group>
+                    <Button
+                      variant="light"
+                      onClick={loadTemplates}
+                      loading={loadingTemplates}
+                      disabled={!canWrite}
+                      size="sm"
+                    >
+                      Refresh templates
+                    </Button>
+                  </Group>
+
+                  <Select
+                    label="Pipeline template"
+                    data={templates.map((t) => ({ value: t.id, label: t.name }))}
+                    value={templateId}
+                    onChange={setTemplateId}
+                    searchable
+                    nothingFoundMessage="No templates"
+                    disabled={!canWrite}
+                  />
+
+                  <Tooltip withArrow label={canWrite ? "Creates the pipeline run and opens it." : "Viewer cannot create."}>
+                    <span>
+                      <Button onClick={createPipelineRun} loading={creating} disabled={!canWrite || !templateId} size="sm">
+                        Create pipeline run
+                      </Button>
+                    </span>
+                  </Tooltip>
+
+                  <Divider />
+
+                  <Text fw={700}>Preview payload (advanced)</Text>
+                  <Textarea autosize minRows={6} value={JSON.stringify(inputPayload, null, 2)} readOnly />
                 </Stack>
               </GlassCard>
-            ) : (
-              <Text size="sm" c="dimmed">
-                Run a retrieval search to validate docs ingestion and filters before you create a run.
-              </Text>
-            )}
+            </Collapse>
           </Stack>
         </GlassSection>
       </Stack>
