@@ -22,7 +22,7 @@ from app.core.governance import (
 )
 from app.core.retrieval_search import hybrid_retrieve
 from app.core.citations import (
-    auto_inject_citation_anchors,  # Commit 5
+    auto_inject_citation_anchors,
     body_has_inline_citations,
     build_citation_pack,
     build_inline_citation_patch,
@@ -205,7 +205,6 @@ def _inject_confidence_section(md: str, *, evidence_count: int) -> str:
     if "## Confidence" in text:
         return text
 
-    # Deterministic, conservative wording (does not invent facts)
     if evidence_count <= 0:
         conf_lines = [
             "## Confidence",
@@ -282,7 +281,6 @@ No evidence was found for the requested retrieval query, so this draft does **no
 - Re-run retrieval with an updated query and confirm evidence_count > 0
 - Then regenerate the artifact grounded in evidence
 """
-    # deterministic safety net
     md = _inject_confidence_section(md, evidence_count=0)
     return artifact_type, title, md
 
@@ -339,7 +337,6 @@ Evidence Pack (cite as [n]):
 """.strip()
 
         user_prompt = "\n\n".join([base_user_prompt.strip(), citation_rules, evidence_pack])
-
         md = llm_generate_markdown(system_prompt=system_prompt, user_prompt=user_prompt)
 
         if not md.lstrip().startswith("#"):
@@ -348,7 +345,6 @@ Evidence Pack (cite as [n]):
         if "## Unknowns / Assumptions" not in md:
             md = md.rstrip() + "\n\n## Unknowns / Assumptions\n- None stated.\n"
 
-        # deterministic confidence injector (Commit 20B)
         md = _inject_confidence_section(md, evidence_count=len(evidence_items))
 
         if "## Sources" not in md:
@@ -368,7 +364,7 @@ Evidence Pack (cite as [n]):
             patch = build_inline_citation_patch(normalized)
             md = md.rstrip() + "\n\n" + patch + "\n"
 
-        # Commit 5: if density is still below thresholds, inject cited anchors into BODY (not Sources)
+        # Commit 20D: last-mile density injection ONCE, after all patches and Sources section is present
         if len(evidence_items) > 0:
             md = auto_inject_citation_anchors(
                 artifact_type=artifact_type,
@@ -377,21 +373,13 @@ Evidence Pack (cite as [n]):
                 evidence_count=len(evidence_items),
             )
 
-        # Final deterministic guarantee for confidence (even if anchors/patch reflowed)
         md = _inject_confidence_section(md, evidence_count=len(evidence_items))
-
-        if len(evidence_items) > 0:
-            md = auto_inject_citation_anchors(
-                artifact_type=artifact_type,
-                md=md,
-                normalized_citations=normalized,
-                evidence_count=len(evidence_items),
-            )
-
         return artifact_type, title, md
 
     # Fallback deterministic template (V0 mode)
-    artifact_type2, title2, md2 = build_initial_artifact(agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text)
+    artifact_type2, title2, md2 = build_initial_artifact(
+        agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text
+    )
 
     if len(evidence_items) > 0 and "## Unknowns / Assumptions" not in md2:
         md2 = md2.rstrip() + "\n\n## Unknowns / Assumptions\n- Evidence attached, but citation-grounded generation requires LLM mode.\n"
@@ -472,7 +460,7 @@ def create_run(
         retrieval_meta = {
             "enabled": True,
             "query": q,
-            "q": q,  # Commit 5: compatibility alias
+            "q": q,  # legacy alias
             "k": k,
             "alpha": alpha,
             "source_types": source_types,
@@ -480,7 +468,7 @@ def create_run(
             "min_score": min_score,
             "overfetch_k": overfetch_k,
             "rerank": rerank,
-            "batch_kind": "create_run",  # Commit 20B
+            "batch_kind": "create_run",
         }
 
         _enforce_policy_sources(db, ws, user, source_types or None, "policy.allowlist.runs.create_run.retrieval")
@@ -501,7 +489,6 @@ def create_run(
 
         batch_id = str(uuid.uuid4())
 
-        # Commit 20A: dedupe by fingerprint within run
         existing_fps = set(db.execute(select(Evidence.fingerprint).where(Evidence.run_id == r.id)).scalars().all())
 
         for rank, it in enumerate(items, start=1):
@@ -530,8 +517,8 @@ def create_run(
                 "source_id": it.get("source_id", ""),
                 "chunk_index": int(it.get("chunk_index") or 0),
                 "retrieval": {
-                    "query": q,  # canonical
-                    "q": q,  # legacy alias
+                    "query": q,
+                    "q": q,
                     "k": k,
                     "alpha": alpha,
                     "source_types": source_types,
@@ -599,13 +586,8 @@ def create_run(
             evidence_items=ev_items,
         )
 
-    # Final deterministic guarantee before enforcement
     md = _inject_confidence_section(md, evidence_count=len(ev_items))
 
-    # -------------------------
-    # V1: Hard citation enforcement (only when evidence exists)
-    # Commit 3 change: SKIP when LLM is disabled to avoid false FAIL.
-    # -------------------------
     try:
         if len(ev_items) > 0 and not (settings.LLM_ENABLED and settings.OPENAI_API_KEY):
             rep = citation_enforcement_report_skipped(
@@ -649,7 +631,6 @@ def create_run(
     if ev_items:
         r.output_summary += f" Evidence attached: {len(ev_items)} snippet(s)."
 
-    # add enforcement outcome to summary if failed (Commit 3: do not flag failure in skipped mode)
     try:
         if len(ev_items) > 0:
             if not (settings.LLM_ENABLED and settings.OPENAI_API_KEY):
@@ -661,7 +642,9 @@ def create_run(
                 rep2 = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
 
             if not rep2.get("ok"):
-                r.output_summary += f" ⚠️ Citation check failed (confidence={float(rep2.get('confidence_score') or 0.0):.2f})."
+                r.output_summary += (
+                    f" ⚠️ Citation check failed (confidence={float(rep2.get('confidence_score') or 0.0):.2f})."
+                )
     except Exception:
         pass
 
@@ -730,7 +713,7 @@ def regenerate_with_retrieval(
     retrieval_meta: Dict[str, Any] = {
         "enabled": True,
         "query": q,
-        "q": q,  # Commit 5: compatibility alias
+        "q": q,
         "k": k,
         "alpha": alpha,
         "source_types": source_types,
@@ -738,7 +721,7 @@ def regenerate_with_retrieval(
         "min_score": min_score,
         "overfetch_k": overfetch_k,
         "rerank": rerank,
-        "batch_kind": "regenerate_with_retrieval",  # Commit 20B
+        "batch_kind": "regenerate_with_retrieval",
     }
 
     _enforce_policy_sources(db, ws, user, source_types or None, "policy.allowlist.runs.regenerate_with_retrieval")
@@ -760,7 +743,6 @@ def regenerate_with_retrieval(
     batch_id = str(uuid.uuid4())
     ev_items: List[Evidence] = []
 
-    # Commit 20A: dedupe by fingerprint within run
     existing_fps = set(db.execute(select(Evidence.fingerprint).where(Evidence.run_id == r.id)).scalars().all())
 
     for rank, it in enumerate(items, start=1):
@@ -854,7 +836,6 @@ def regenerate_with_retrieval(
 
     md = _inject_confidence_section(md, evidence_count=len(ev_items))
 
-    # V1 enforcement (Commit 3: skip when LLM disabled)
     try:
         if len(ev_items) > 0 and not (settings.LLM_ENABLED and settings.OPENAI_API_KEY):
             rep = citation_enforcement_report_skipped(
@@ -906,7 +887,9 @@ def regenerate_with_retrieval(
                 rep2 = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
 
             if not rep2.get("ok"):
-                r.output_summary += f" ⚠️ Citation check failed (confidence={float(rep2.get('confidence_score') or 0.0):.2f})."
+                r.output_summary += (
+                    f" ⚠️ Citation check failed (confidence={float(rep2.get('confidence_score') or 0.0):.2f})."
+                )
     except Exception:
         pass
 
@@ -1147,7 +1130,6 @@ def rag_debug(
 
     _ensure_run_workspace_access(db, r, user)
 
-    # ---------- evidence batch helpers ----------
     def _evidence_batch_id(e: Evidence) -> Optional[str]:
         try:
             meta = e.meta or {}
@@ -1248,7 +1230,6 @@ def rag_debug(
                 continue
         return None
 
-    # ---------- collect ----------
     all_evs = db.execute(select(Evidence).where(Evidence.run_id == r.id).order_by(Evidence.created_at.desc())).scalars().all()
     batches = _build_batches_from_evidence(all_evs)
 
@@ -1289,7 +1270,6 @@ def rag_debug(
     except Exception:
         retrieval_cfg = None
 
-    # Commit 5: normalize retrieval_cfg keys (legacy "q" -> canonical "query")
     try:
         if isinstance(retrieval_cfg, dict):
             if not retrieval_cfg.get("query") and retrieval_cfg.get("q"):
@@ -1303,7 +1283,6 @@ def rag_debug(
         if picked_log and isinstance(picked_log.meta, dict) and picked_log.meta:
             retrieval_cfg = picked_log.meta
 
-        # Commit 5: normalize retrieval_log meta keys too
         try:
             if isinstance(retrieval_cfg, dict):
                 if not retrieval_cfg.get("query") and retrieval_cfg.get("q"):
@@ -1326,7 +1305,11 @@ def rag_debug(
             {
                 "batch_id": b.get("batch_id"),
                 "batch_kind": b.get("batch_kind"),
-                "created_at": (b.get("created_at").isoformat().replace("+00:00", "Z") if isinstance(b.get("created_at"), datetime) else None),
+                "created_at": (
+                    b.get("created_at").isoformat().replace("+00:00", "Z")
+                    if isinstance(b.get("created_at"), datetime)
+                    else None
+                ),
                 "evidence_count": int(b.get("evidence_count") or 0),
                 "retrieval": b.get("retrieval") or {},
             }
