@@ -1,6 +1,6 @@
 // apps/web/src/pages/RunBuilderPage.tsx
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   Badge,
   Button,
@@ -44,6 +44,7 @@ export default function RunBuilderPage() {
   const { workspaceId } = useParams();
   const wid = workspaceId || "";
   const nav = useNavigate();
+  const loc = useLocation();
 
   const [err, setErr] = useState<string | null>(null);
 
@@ -126,6 +127,16 @@ export default function RunBuilderPage() {
     };
   }, [goal, context, constraints, timeframePayload, selectedSources]);
 
+  function readAgentIdFromQuery(): string | null {
+    try {
+      const sp = new URLSearchParams(loc.search || "");
+      const v = (sp.get("agent_id") || "").trim();
+      return v ? v : null;
+    } catch {
+      return null;
+    }
+  }
+
   async function loadMyRole() {
     if (!wid) return;
     const res = await apiFetch<WorkspaceRole>(`/workspaces/${wid}/my-role`, { method: "GET" });
@@ -144,8 +155,18 @@ export default function RunBuilderPage() {
       setErr(`Agents load failed: ${res.status} ${res.error}`);
       return;
     }
-    setAgents(res.data);
-    if (!agentId && res.data.length > 0) setAgentId(res.data[0].id);
+
+    const list = res.data || [];
+    setAgents(list);
+
+    // Commit 19: deep-link support (Agent Library → Run Builder)
+    const fromQuery = readAgentIdFromQuery();
+    if (fromQuery && list.some((a) => a.id === fromQuery)) {
+      setAgentId(fromQuery);
+      return;
+    }
+
+    if (!agentId && list.length > 0) setAgentId(list[0].id);
   }
 
   async function loadTemplates() {
@@ -259,7 +280,6 @@ export default function RunBuilderPage() {
 
     if (selectedSources.length > 0) params.set("source_types", selectedSources.join(","));
 
-    // Keep timeframe preset in preview if supported by backend
     if (preset && preset !== "custom") params.set("timeframe_preset", preset);
 
     const res = await apiFetch<RetrieveResponse>(`/workspaces/${wid}/retrieve?${params.toString()}`, {
@@ -294,8 +314,8 @@ export default function RunBuilderPage() {
       <Button component={Link} to={`/workspaces/${wid}/overview`} variant="light" size="sm">
         Overview
       </Button>
-      <Button component={Link} to={`/workspaces/${wid}/docs`} variant="light" size="sm">
-        Docs
+      <Button component={Link} to="/agents" variant="light" size="sm">
+        Agents
       </Button>
     </Group>
   );
@@ -320,11 +340,7 @@ export default function RunBuilderPage() {
           </GlassCard>
         ) : null}
 
-        <GlassSection
-          title="Access"
-          description="Viewer can test references. Member/Admin can create runs."
-          right={accessRight}
-        >
+        <GlassSection title="Access" description="Viewer can test references. Member/Admin can create runs." right={accessRight}>
           {!canWrite ? (
             <Text size="sm" c="dimmed">
               Viewer role: creation is disabled. You can still test references in Advanced.
@@ -336,7 +352,6 @@ export default function RunBuilderPage() {
           )}
         </GlassSection>
 
-        {/* SIMPLE-FIRST */}
         <GlassSection
           title="Create run"
           description="Pick an agent, describe the goal, optionally use references, then create."
@@ -411,10 +426,7 @@ export default function RunBuilderPage() {
             <Group justify="space-between" align="center">
               <Group gap="sm">
                 <Text fw={700}>Use references</Text>
-                <Tooltip
-                  withArrow
-                  label="If enabled, the run can pull evidence from workspace sources. Keep off for simple runs."
-                >
+                <Tooltip withArrow label="If enabled, the run can pull evidence from workspace sources. Keep off for simple runs.">
                   <Badge variant="light">?</Badge>
                 </Tooltip>
               </Group>
@@ -487,7 +499,6 @@ export default function RunBuilderPage() {
               </Button>
             </Group>
 
-            {/* ADVANCED */}
             <Collapse in={advancedOpen}>
               <Divider my="md" />
 
@@ -521,13 +532,7 @@ export default function RunBuilderPage() {
 
                   <Text fw={700}>Reference tuning</Text>
                   <Group grow>
-                    <NumberInput
-                      label="Top K"
-                      value={rk}
-                      min={1}
-                      max={50}
-                      onChange={(v) => setRk(Number(v) || 5)}
-                    />
+                    <NumberInput label="Top K" value={rk} min={1} max={50} onChange={(v) => setRk(Number(v) || 5)} />
                     <NumberInput
                       label="Alpha (vector weight)"
                       value={ralpha}
@@ -597,13 +602,7 @@ export default function RunBuilderPage() {
                   </Text>
 
                   <Group>
-                    <Button
-                      variant="light"
-                      onClick={loadTemplates}
-                      loading={loadingTemplates}
-                      disabled={!canWrite}
-                      size="sm"
-                    >
+                    <Button variant="light" onClick={loadTemplates} loading={loadingTemplates} disabled={!canWrite} size="sm">
                       Refresh templates
                     </Button>
                   </Group>

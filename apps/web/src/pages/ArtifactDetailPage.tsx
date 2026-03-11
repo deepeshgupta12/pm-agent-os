@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+// apps/web/src/pages/ArtifactDetailPage.tsx
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import {
   Button,
@@ -37,6 +38,108 @@ type PublishRequestResponse = {
   workspace_id: string;
   status: string;
 };
+
+type OutlineItem = {
+  id: string;
+  level: 2 | 3;
+  text: string;
+};
+
+function slugify(s: string): string {
+  return (s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[`~!@#$%^&*()+=$begin:math:display$$end:math:display${}|\\;:'",.<>/?]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 80);
+}
+
+function buildOutline(md: string): OutlineItem[] {
+  const out: OutlineItem[] = [];
+  const lines = (md || "").split("\n");
+
+  const used = new Map<string, number>();
+  const add = (lvl: 2 | 3, text: string) => {
+    const base = slugify(text) || "section";
+    const n = (used.get(base) || 0) + 1;
+    used.set(base, n);
+    const id = n === 1 ? base : `${base}-${n}`;
+    out.push({ id, level: lvl, text: text.trim() });
+  };
+
+  for (const line of lines) {
+    const m2 = line.match(/^##\s+(.+)\s*$/);
+    if (m2?.[1]) add(2, m2[1]);
+
+    const m3 = line.match(/^###\s+(.+)\s*$/);
+    if (m3?.[1]) add(3, m3[1]);
+  }
+
+  return out.slice(0, 60);
+}
+
+function OutlinePanel({
+  items,
+  onJump,
+}: {
+  items: OutlineItem[];
+  onJump: (id: string) => void;
+}) {
+  if (!items.length) {
+    return (
+      <Card withBorder>
+        <Stack gap={6}>
+          <Text fw={700}>Outline</Text>
+          <Text size="sm" c="dimmed">
+            Add headings like <b>## Section</b> or <b>### Subsection</b> to generate an outline.
+          </Text>
+        </Stack>
+      </Card>
+    );
+  }
+
+  return (
+    <Card withBorder>
+      <Stack gap={8}>
+        <Group justify="space-between">
+          <Text fw={700}>Outline</Text>
+          <Badge variant="light">{items.length}</Badge>
+        </Group>
+
+        <Stack gap={4}>
+          {items.map((it) => (
+            <Anchor
+              key={it.id}
+              component="button"
+              type="button"
+              onClick={() => onJump(it.id)}
+              style={{
+                textAlign: "left",
+                paddingLeft: it.level === 3 ? 14 : 0,
+                fontSize: it.level === 3 ? 13 : 14,
+              }}
+            >
+              {it.text}
+            </Anchor>
+          ))}
+        </Stack>
+      </Stack>
+    </Card>
+  );
+}
+
+type HeadingProps = {
+  children?: any;
+};
+
+function extractText(children: any): string {
+  if (children == null) return "";
+  if (typeof children === "string") return children;
+  if (Array.isArray(children)) return children.map(extractText).join("");
+  if (typeof children === "object" && children.props?.children) return extractText(children.props.children);
+  return "";
+}
 
 export default function ArtifactDetailPage() {
   const { artifactId } = useParams();
@@ -87,6 +190,8 @@ export default function ArtifactDetailPage() {
   const [diffText, setDiffText] = useState<string>("");
   const [diffLoading, setDiffLoading] = useState(false);
 
+  const previewWrapRef = useRef<HTMLDivElement | null>(null);
+
   const isFinal = status === "final";
   const isInReview = status === "in_review";
   const role = (myRole?.role || "").toLowerCase();
@@ -96,6 +201,8 @@ export default function ArtifactDetailPage() {
 
   const latestReview = useMemo(() => (reviews.length > 0 ? reviews[0] : null), [reviews]);
   const latestReviewState = (latestReview?.state || "").toLowerCase();
+
+  const outline = useMemo(() => buildOutline(contentMd), [contentMd]);
 
   const diffOptions = useMemo(() => {
     return siblings.map((a) => ({
@@ -193,8 +300,12 @@ export default function ArtifactDetailPage() {
         .filter((x) => x.logical_key === loaded.logical_key)
         .filter((x) => x.id !== loaded.id)
         .sort((a, b) => (b.version ?? 0) - (a.version ?? 0));
+
       setSiblings(sameKey);
-      setOtherId(sameKey.length > 0 ? sameKey[0].id : null);
+
+      // default to "previous" if it exists (closest version), else latest other
+      const prev = sameKey.find((x) => (x.version ?? 0) === (loaded.version ?? 0) - 1);
+      setOtherId(prev?.id ?? (sameKey.length > 0 ? sameKey[0].id : null));
     }
 
     // Members + comments need workspace id
@@ -376,7 +487,9 @@ export default function ArtifactDetailPage() {
     setAssigning(true);
     setErr(null);
 
-    const body: ArtifactAssignIn = { assigned_to_user_id: userIdOrEmpty && userIdOrEmpty.trim() ? userIdOrEmpty : null };
+    const body: ArtifactAssignIn = {
+      assigned_to_user_id: userIdOrEmpty && userIdOrEmpty.trim() ? userIdOrEmpty : null,
+    };
 
     const res = await apiFetch<Artifact>(`/artifacts/${aid}/assign`, {
       method: "PATCH",
@@ -451,7 +564,19 @@ export default function ArtifactDetailPage() {
       return;
     }
 
-    setDiffText(res.data.unified_diff || "(no diff)");
+    const txt = (res.data.unified_diff || "").trim();
+    setDiffText(txt ? txt : "(no differences)");
+  }
+
+  function jumpToHeading(id: string) {
+    // headings are in the preview panel
+    const el = document.getElementById(id);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    // fallback: scroll preview container top
+    previewWrapRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   useEffect(() => {
@@ -478,13 +603,44 @@ export default function ArtifactDetailPage() {
     return `/workspaces/${workspaceId}/actions`;
   }, [workspaceId]);
 
+  const mdComponents = useMemo(() => {
+    return {
+      h2: ({ children }: HeadingProps) => {
+        const text = extractText(children);
+        const id = slugify(text);
+        return (
+          <h2 id={id} style={{ scrollMarginTop: 80 }}>
+            {children}
+          </h2>
+        );
+      },
+      h3: ({ children }: HeadingProps) => {
+        const text = extractText(children);
+        const id = slugify(text);
+        return (
+          <h3 id={id} style={{ scrollMarginTop: 80 }}>
+            {children}
+          </h3>
+        );
+      },
+    };
+  }, []);
+
   return (
     <Stack gap="md">
       <Group justify="space-between">
-        <Title order={2}>Artifact</Title>
-        <Button component={Link} to="/workspaces" variant="light">
-          Back
-        </Button>
+        <Title order={2}>Artifact Studio</Title>
+        <Group>
+          <Button component={Link} to="/outputs" variant="light">
+            Outputs
+          </Button>
+          <Button component={Link} to="/runs" variant="light">
+            Runs
+          </Button>
+          <Button component={Link} to="/workspaces" variant="default">
+            Back
+          </Button>
+        </Group>
       </Group>
 
       {viewerHint ? (
@@ -493,11 +649,11 @@ export default function ArtifactDetailPage() {
         </Card>
       ) : null}
 
-      {err && (
+      {err ? (
         <Card withBorder>
           <Text c="red">{err}</Text>
         </Card>
-      )}
+      ) : null}
 
       {publishRequestMsg ? (
         <Card withBorder>
@@ -520,8 +676,8 @@ export default function ArtifactDetailPage() {
         <Card withBorder>
           <Stack gap="sm">
             <Group justify="space-between">
-              <Group gap="sm">
-                <Text fw={700}>
+              <Group gap="sm" wrap="wrap">
+                <Text fw={800}>
                   {art.type} · v{art.version} · {art.logical_key}
                 </Text>
                 <Badge>{status}</Badge>
@@ -531,6 +687,67 @@ export default function ArtifactDetailPage() {
               <Text size="xs" c="dimmed">
                 {art.id}
               </Text>
+            </Group>
+
+            <Divider />
+
+            {/* Primary actions */}
+            <Group wrap="wrap">
+              <Button onClick={saveInPlace} loading={saving} disabled={isFinal || isInReview || !canWrite}>
+                Save (same version)
+              </Button>
+              <Button variant="light" onClick={saveNewVersion} loading={newVerLoading} disabled={isFinal || isInReview || !canWrite}>
+                Save as new version
+              </Button>
+              <Button variant="default" onClick={copyMarkdown}>
+                Copy Markdown
+              </Button>
+              <Button variant="default" onClick={exportPdf}>
+                Export PDF
+              </Button>
+              <Button variant="default" onClick={exportDocx}>
+                Export DOCX
+              </Button>
+
+              {!isFinal ? (
+                <Button
+                  color="green"
+                  onClick={requestPublish}
+                  loading={requestingPublish}
+                  disabled={!!requestPublishDisabledReason}
+                  title={requestPublishDisabledReason ?? undefined}
+                >
+                  Request publish (Action Center)
+                </Button>
+              ) : (
+                <Button color="yellow" onClick={unpublish} loading={unpublishing} disabled={!canWrite}>
+                  Unpublish (back to draft)
+                </Button>
+              )}
+            </Group>
+
+            {requestPublishDisabledReason ? (
+              <Text size="sm" c="dimmed">
+                Publish blocked: {requestPublishDisabledReason}
+              </Text>
+            ) : null}
+
+            {copyMsg ? (
+              <Text size="sm" c="dimmed">
+                {copyMsg}
+              </Text>
+            ) : null}
+
+            <Divider />
+
+            <Group grow>
+              <TextInput
+                label="Title"
+                value={title}
+                onChange={(e) => setTitle(e.currentTarget.value)}
+                disabled={isFinal || isInReview || !canWrite}
+              />
+              <TextInput label="Status" value={status} disabled />
             </Group>
 
             {/* Assignment */}
@@ -631,7 +848,7 @@ export default function ArtifactDetailPage() {
               </Stack>
             </Card>
 
-            {/* Approvals banner */}
+            {/* Approvals */}
             <Card withBorder>
               <Stack gap="xs">
                 <Group justify="space-between">
@@ -690,67 +907,6 @@ export default function ArtifactDetailPage() {
               </Stack>
             </Card>
 
-            <Group grow>
-              <TextInput
-                label="Title"
-                value={title}
-                onChange={(e) => setTitle(e.currentTarget.value)}
-                disabled={isFinal || isInReview || !canWrite}
-              />
-              <TextInput label="Status" value={status} disabled />
-            </Group>
-
-            <Group>
-              <Button onClick={saveInPlace} loading={saving} disabled={isFinal || isInReview || !canWrite}>
-                Save (same version)
-              </Button>
-              <Button
-                variant="light"
-                onClick={saveNewVersion}
-                loading={newVerLoading}
-                disabled={isFinal || isInReview || !canWrite}
-              >
-                Save as new version
-              </Button>
-              <Button variant="default" onClick={copyMarkdown}>
-                Copy Markdown
-              </Button>
-              <Button variant="default" onClick={exportPdf}>
-                Export PDF
-              </Button>
-              <Button variant="default" onClick={exportDocx}>
-                Export DOCX
-              </Button>
-
-              {!isFinal ? (
-                <Button
-                  color="green"
-                  onClick={requestPublish}
-                  loading={requestingPublish}
-                  disabled={!!requestPublishDisabledReason}
-                  title={requestPublishDisabledReason ?? undefined}
-                >
-                  Request publish (Action Center)
-                </Button>
-              ) : (
-                <Button color="yellow" onClick={unpublish} loading={unpublishing} disabled={!canWrite}>
-                  Unpublish (back to draft)
-                </Button>
-              )}
-
-              {requestPublishDisabledReason ? (
-                <Text size="sm" c="dimmed">
-                  Publish blocked: {requestPublishDisabledReason}
-                </Text>
-              ) : null}
-
-              {copyMsg ? (
-                <Text size="sm" c="dimmed">
-                  {copyMsg}
-                </Text>
-              ) : null}
-            </Group>
-
             <Divider />
 
             {/* Diff */}
@@ -782,7 +938,9 @@ export default function ArtifactDetailPage() {
                   </Card>
                 ) : (
                   <Text size="sm" c="dimmed">
-                    {siblings.length === 0 ? "Create another version to enable diff." : "Pick a version and click “Show Diff”."}
+                    {siblings.length === 0
+                      ? "Create another version to enable diff."
+                      : "Pick a version and click “Show Diff”."}
                   </Text>
                 )}
               </Stack>
@@ -790,39 +948,46 @@ export default function ArtifactDetailPage() {
 
             <Divider />
 
+            {/* Studio: Outline + Editor + Preview */}
             <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
               <div>
-                <Textarea
-                  label="Content (Markdown)"
-                  autosize
-                  minRows={18}
-                  value={contentMd}
-                  onChange={(e) => setContentMd(e.currentTarget.value)}
-                  disabled={isFinal || isInReview || !canWrite}
-                />
+                <Stack gap="sm">
+                  <OutlinePanel items={outline} onJump={jumpToHeading} />
+
+                  <Textarea
+                    label="Content (Markdown)"
+                    autosize
+                    minRows={18}
+                    value={contentMd}
+                    onChange={(e) => setContentMd(e.currentTarget.value)}
+                    disabled={isFinal || isInReview || !canWrite}
+                  />
+
+                  {isFinal ? (
+                    <Text size="sm" c="dimmed">
+                      This artifact is published (final) and locked. Unpublish to edit.
+                    </Text>
+                  ) : null}
+
+                  {isInReview ? (
+                    <Text size="sm" c="dimmed">
+                      This artifact is in review and locked for edits. You can still comment/assign.
+                    </Text>
+                  ) : null}
+                </Stack>
               </div>
 
               <div>
-                <Text fw={600} mb={6}>
+                <Text fw={700} mb={6}>
                   Preview
                 </Text>
-                <Card withBorder style={{ height: "100%", overflow: "auto" }}>
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{contentMd}</ReactMarkdown>
+                <Card withBorder style={{ height: "100%", overflow: "auto" }} ref={previewWrapRef as any}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents as any}>
+                    {contentMd}
+                  </ReactMarkdown>
                 </Card>
               </div>
             </SimpleGrid>
-
-            {isFinal ? (
-              <Text size="sm" c="dimmed">
-                This artifact is published (final) and locked. Unpublish to edit.
-              </Text>
-            ) : null}
-
-            {isInReview ? (
-              <Text size="sm" c="dimmed">
-                This artifact is in review and locked for edits. You can still comment/assign.
-              </Text>
-            ) : null}
           </Stack>
         </Card>
       ) : (
