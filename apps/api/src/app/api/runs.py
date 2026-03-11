@@ -1,3 +1,4 @@
+# apps/api/src/app/api/runs.py
 from __future__ import annotations
 
 import uuid
@@ -9,53 +10,58 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
-from app.core.generator import build_initial_artifact, build_run_summary, AGENT_TO_DEFAULT_ARTIFACT_TYPE
 from app.core.config import settings
 from app.core.evidence_format import format_evidence_for_prompt
+from app.core.evidence_store import evidence_fingerprint
+from app.core.generator import AGENT_TO_DEFAULT_ARTIFACT_TYPE, build_initial_artifact, build_run_summary
+from app.core.governance import (
+    audit_policy_check,
+    policy_allowed_source_types,
+    policy_apply_pii_masking,
+    policy_assert_allowed_sources,
+)
+from app.core.retrieval_search import hybrid_retrieve
 from app.core.citations import (
-    build_citation_pack,
-    output_has_any_citations,
+    auto_inject_citation_anchors,  # Commit 5
     body_has_inline_citations,
+    build_citation_pack,
     build_inline_citation_patch,
     citation_enforcement_report,
     citation_enforcement_report_skipped,
+    output_has_any_citations,
     render_citation_compliance_md,
-    auto_inject_citation_anchors,   # Commit 5
 )
-from app.core.governance import policy_assert_allowed_sources, policy_apply_pii_masking
-from app.core.retrieval_search import hybrid_retrieve
-from app.db.session import get_db
 from app.db.models import (
-    Workspace,
-    Run,
-    RunLog,
     AgentDefinition,
     Artifact,
     Evidence,
-    User,
+    Run,
+    RunLog,
     RunStatusEvent,
+    User,
+    Workspace,
 )
+from app.db.session import get_db
 from app.schemas.core import (
     RunCreateIn,
     RunOut,
-    RunStatusUpdateIn,
     RunLogCreateIn,
     RunLogOut,
-    RunTimelineEventOut,
     RunRegenerateWithRetrievalIn,
-)
-
-from app.core.governance import (
-    policy_assert_allowed_sources,
-    policy_apply_pii_masking,
-    policy_allowed_source_types,
-    audit_policy_check,
+    RunStatusUpdateIn,
+    RunTimelineEventOut,
 )
 
 router = APIRouter(tags=["runs"])
 
 
-def _enforce_policy_sources(db: Session, ws: Workspace, user: User, requested: Optional[List[str]], action: str) -> None:
+def _enforce_policy_sources(
+    db: Session,
+    ws: Workspace,
+    user: User,
+    requested: Optional[List[str]],
+    action: str,
+) -> None:
     allowlist = policy_allowed_source_types(ws)
     try:
         policy_assert_allowed_sources(ws, requested)
@@ -91,6 +97,18 @@ def _parse_uuid(id_str: str) -> uuid.UUID:
         return uuid.UUID(id_str)
     except Exception:
         raise HTTPException(status_code=404, detail="Run not found")
+
+
+def _to_uuid(v: Any) -> Optional[uuid.UUID]:
+    try:
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s:
+            return None
+        return uuid.UUID(s)
+    except Exception:
+        return None
 
 
 def _ensure_run_workspace_access(db: Session, run: Run, user: User) -> Workspace:
@@ -177,6 +195,39 @@ def _timeframe_to_bounds(timeframe: Optional[Dict[str, Any]]) -> tuple[Optional[
     return None, None
 
 
+def _inject_confidence_section(md: str, *, evidence_count: int) -> str:
+    """
+    Deterministic injector:
+    - If missing "## Confidence", add it.
+    - Place it before "## Sources" if sources exist, else append at end.
+    """
+    text = md or ""
+    if "## Confidence" in text:
+        return text
+
+    # Deterministic, conservative wording (does not invent facts)
+    if evidence_count <= 0:
+        conf_lines = [
+            "## Confidence",
+            "- Low: no evidence was attached for this run, so requirements/claims cannot be grounded.",
+        ]
+    else:
+        conf_lines = [
+            "## Confidence",
+            f"- Medium (draft): {evidence_count} evidence snippet(s) attached, but citation density may still be insufficient until all key claims are explicitly cited.",
+        ]
+
+    conf_block = "\n".join(conf_lines).strip() + "\n"
+
+    idx = text.find("## Sources")
+    if idx != -1:
+        body = text[:idx].rstrip()
+        sources = text[idx:].lstrip()
+        return (body + "\n\n" + conf_block + "\n" + sources).strip() + "\n"
+
+    return (text.rstrip() + "\n\n" + conf_block).strip() + "\n"
+
+
 def _no_evidence_md(agent_id: str, input_payload: Dict[str, Any], retrieval_meta: Dict[str, Any]) -> Tuple[str, str, str]:
     artifact_type = AGENT_TO_DEFAULT_ARTIFACT_TYPE.get(agent_id, "strategy_memo")
     title = f"{artifact_type.replace('_', ' ').title()} — Draft"
@@ -220,11 +271,19 @@ No evidence was found for the requested retrieval query, so this draft does **no
 3. Should retrieval broaden (higher k / overfetch / multiple source_types) or narrow (more precise query)?
 4. Should rerank be enabled (rerank=true) and do we need embeddings (embed_after=true) for recall?
 
+## Unknowns / Assumptions
+- The required source documents are not yet available in retrieval for this workspace, so the PRD cannot be grounded.
+
+## Confidence
+- Low: no evidence was attached for this run.
+
 ## Next Actions
 - Ingest/sync the missing documents into the workspace
 - Re-run retrieval with an updated query and confirm evidence_count > 0
 - Then regenerate the artifact grounded in evidence
 """
+    # deterministic safety net
+    md = _inject_confidence_section(md, evidence_count=0)
     return artifact_type, title, md
 
 
@@ -240,11 +299,17 @@ def _generate_md_with_evidence(
     ev_text = format_evidence_for_prompt(evidence_items)
 
     if settings.LLM_ENABLED and settings.OPENAI_API_KEY:
-        from app.core.prompts import build_system_prompt, build_user_prompt
         from app.core.llm_client import llm_generate_markdown
+        from app.core.prompts import build_system_prompt, build_user_prompt
 
         evidence_dicts = [
-            {"excerpt": e.excerpt, "source_ref": e.source_ref, "source_name": e.source_name, "meta": e.meta or {}}
+            {
+                "excerpt": e.excerpt,
+                "source_ref": e.source_ref,
+                "source_name": e.source_name,
+                "meta": e.meta or {},
+                "fingerprint": getattr(e, "fingerprint", "") or "",
+            }
             for e in evidence_items
         ]
         citations_block, sources_section_md, normalized = build_citation_pack(evidence_dicts)
@@ -263,7 +328,8 @@ Citation rules:
 Output requirements (MANDATORY):
 1) Start with a clear H1 title.
 2) Include a section "## Unknowns / Assumptions".
-3) Include a section "## Sources" at the end with the exact [n] references.
+3) Include a section "## Confidence".
+4) Include a section "## Sources" at the end with the exact [n] references.
 """.strip()
 
         evidence_pack = f"""
@@ -281,6 +347,9 @@ Evidence Pack (cite as [n]):
 
         if "## Unknowns / Assumptions" not in md:
             md = md.rstrip() + "\n\n## Unknowns / Assumptions\n- None stated.\n"
+
+        # deterministic confidence injector (Commit 20B)
+        md = _inject_confidence_section(md, evidence_count=len(evidence_items))
 
         if "## Sources" not in md:
             md = md.rstrip() + "\n\n" + sources_section_md + "\n"
@@ -308,12 +377,26 @@ Evidence Pack (cite as [n]):
                 evidence_count=len(evidence_items),
             )
 
+        # Final deterministic guarantee for confidence (even if anchors/patch reflowed)
+        md = _inject_confidence_section(md, evidence_count=len(evidence_items))
+
+        if len(evidence_items) > 0:
+            md = auto_inject_citation_anchors(
+                artifact_type=artifact_type,
+                md=md,
+                normalized_citations=normalized,
+                evidence_count=len(evidence_items),
+            )
+
         return artifact_type, title, md
 
     # Fallback deterministic template (V0 mode)
     artifact_type2, title2, md2 = build_initial_artifact(agent_id=agent_id, input_payload=input_payload, evidence_text=ev_text)
+
     if len(evidence_items) > 0 and "## Unknowns / Assumptions" not in md2:
         md2 = md2.rstrip() + "\n\n## Unknowns / Assumptions\n- Evidence attached, but citation-grounded generation requires LLM mode.\n"
+
+    md2 = _inject_confidence_section(md2, evidence_count=len(evidence_items))
     return artifact_type2, title2, md2
 
 
@@ -397,6 +480,7 @@ def create_run(
             "min_score": min_score,
             "overfetch_k": overfetch_k,
             "rerank": rerank,
+            "batch_kind": "create_run",  # Commit 20B
         }
 
         _enforce_policy_sources(db, ws, user, source_types or None, "policy.allowlist.runs.create_run.retrieval")
@@ -417,8 +501,22 @@ def create_run(
 
         batch_id = str(uuid.uuid4())
 
+        # Commit 20A: dedupe by fingerprint within run
+        existing_fps = set(db.execute(select(Evidence.fingerprint).where(Evidence.run_id == r.id)).scalars().all())
+
         for rank, it in enumerate(items, start=1):
-            source_ref = f"doc:{it.get('document_id')}#chunk:{it.get('chunk_id')}"
+            doc_id = it.get("document_id")
+            chunk_id = it.get("chunk_id")
+
+            source_ref = f"doc:{doc_id}#chunk:{chunk_id}"
+            excerpt_raw = str(it.get("snippet") or "")
+            excerpt = policy_apply_pii_masking(ws, excerpt_raw, phase="write")
+
+            fp = evidence_fingerprint(source_ref, excerpt)
+            if fp in existing_fps:
+                continue
+            existing_fps.add(fp)
+
             meta = {
                 "batch_id": batch_id,
                 "batch_kind": "create_run",
@@ -432,15 +530,15 @@ def create_run(
                 "source_id": it.get("source_id", ""),
                 "chunk_index": int(it.get("chunk_index") or 0),
                 "retrieval": {
-                "query": q,  # Commit 5 canonical
-                "q": q,      # legacy alias
-                "k": k,
-                "alpha": alpha,
-                "source_types": source_types,
-                "timeframe": timeframe,
-                "min_score": min_score,
-                "overfetch_k": overfetch_k,
-                "rerank": rerank,
+                    "query": q,  # canonical
+                    "q": q,  # legacy alias
+                    "k": k,
+                    "alpha": alpha,
+                    "source_types": source_types,
+                    "timeframe": timeframe,
+                    "min_score": min_score,
+                    "overfetch_k": overfetch_k,
+                    "rerank": rerank,
                 },
             }
 
@@ -449,8 +547,12 @@ def create_run(
                 kind="snippet",
                 source_name="retrieval",
                 source_ref=source_ref,
-                excerpt=policy_apply_pii_masking(ws, str(it.get("snippet") or "")),
+                excerpt=excerpt,
                 meta=meta,
+                fingerprint=fp,
+                source_id=_to_uuid(it.get("source_id")),
+                document_id=_to_uuid(doc_id),
+                chunk_id=_to_uuid(chunk_id),
             )
             db.add(ev)
             ev_items.append(ev)
@@ -496,6 +598,9 @@ def create_run(
             input_payload=r.input_payload,
             evidence_items=ev_items,
         )
+
+    # Final deterministic guarantee before enforcement
+    md = _inject_confidence_section(md, evidence_count=len(ev_items))
 
     # -------------------------
     # V1: Hard citation enforcement (only when evidence exists)
@@ -548,7 +653,6 @@ def create_run(
     try:
         if len(ev_items) > 0:
             if not (settings.LLM_ENABLED and settings.OPENAI_API_KEY):
-                # skipped mode => never add failure note
                 rep2 = citation_enforcement_report_skipped(
                     evidence_count=len(ev_items),
                     reason="LLM disabled; deterministic scaffold does not guarantee citation density.",
@@ -634,6 +738,7 @@ def regenerate_with_retrieval(
         "min_score": min_score,
         "overfetch_k": overfetch_k,
         "rerank": rerank,
+        "batch_kind": "regenerate_with_retrieval",  # Commit 20B
     }
 
     _enforce_policy_sources(db, ws, user, source_types or None, "policy.allowlist.runs.regenerate_with_retrieval")
@@ -655,8 +760,22 @@ def regenerate_with_retrieval(
     batch_id = str(uuid.uuid4())
     ev_items: List[Evidence] = []
 
+    # Commit 20A: dedupe by fingerprint within run
+    existing_fps = set(db.execute(select(Evidence.fingerprint).where(Evidence.run_id == r.id)).scalars().all())
+
     for rank, it in enumerate(items, start=1):
-        source_ref = f"doc:{it.get('document_id')}#chunk:{it.get('chunk_id')}"
+        doc_id = it.get("document_id")
+        chunk_id = it.get("chunk_id")
+
+        source_ref = f"doc:{doc_id}#chunk:{chunk_id}"
+        excerpt_raw = str(it.get("snippet") or "")
+        excerpt = policy_apply_pii_masking(ws, excerpt_raw, phase="write")
+
+        fp = evidence_fingerprint(source_ref, excerpt)
+        if fp in existing_fps:
+            continue
+        existing_fps.add(fp)
+
         meta = {
             "batch_id": batch_id,
             "batch_kind": "regenerate_with_retrieval",
@@ -677,8 +796,12 @@ def regenerate_with_retrieval(
             kind="snippet",
             source_name="retrieval",
             source_ref=source_ref,
-            excerpt=policy_apply_pii_masking(ws, str(it.get("snippet") or "")),
+            excerpt=excerpt,
             meta=meta,
+            fingerprint=fp,
+            source_id=_to_uuid(it.get("source_id")),
+            document_id=_to_uuid(doc_id),
+            chunk_id=_to_uuid(chunk_id),
         )
         db.add(ev)
         ev_items.append(ev)
@@ -701,7 +824,9 @@ def regenerate_with_retrieval(
         RunLog(
             run_id=r.id,
             level="info" if ev_items else "warn",
-            message="Regenerate-with-retrieval executed; evidence attached." if ev_items else "Regenerate-with-retrieval executed; no evidence found.",
+            message="Regenerate-with-retrieval executed; evidence attached."
+            if ev_items
+            else "Regenerate-with-retrieval executed; no evidence found.",
             meta=retrieval_meta,
         )
     )
@@ -726,6 +851,8 @@ def regenerate_with_retrieval(
             evidence_items=ev_items,
         )
         title = latest.title or _title
+
+    md = _inject_confidence_section(md, evidence_count=len(ev_items))
 
     # V1 enforcement (Commit 3: skip when LLM disabled)
     try:
@@ -980,7 +1107,14 @@ def get_run_timeline(run_id: str, db: Session = Depends(get_db), user: User = De
                 kind="evidence",
                 label=f"Evidence attached: {e.kind} from {e.source_name}",
                 ref_id=str(e.id),
-                meta={"source_ref": e.source_ref, "meta": e.meta or {}},
+                meta={
+                    "source_ref": e.source_ref,
+                    "fingerprint": getattr(e, "fingerprint", ""),
+                    "source_id": str(getattr(e, "source_id", "") or "") or None,
+                    "document_id": str(getattr(e, "document_id", "") or "") or None,
+                    "chunk_id": str(getattr(e, "chunk_id", "") or "") or None,
+                    "meta": e.meta or {},
+                },
             )
         )
 
@@ -1154,7 +1288,7 @@ def rag_debug(
         retrieval_cfg = (r.input_payload or {}).get("_retrieval")
     except Exception:
         retrieval_cfg = None
-    
+
     # Commit 5: normalize retrieval_cfg keys (legacy "q" -> canonical "query")
     try:
         if isinstance(retrieval_cfg, dict):
@@ -1168,7 +1302,7 @@ def rag_debug(
     if batch_id:
         if picked_log and isinstance(picked_log.meta, dict) and picked_log.meta:
             retrieval_cfg = picked_log.meta
-        
+
         # Commit 5: normalize retrieval_log meta keys too
         try:
             if isinstance(retrieval_cfg, dict):
@@ -1178,12 +1312,11 @@ def rag_debug(
                     retrieval_cfg["q"] = retrieval_cfg.get("query")
         except Exception:
             pass
-
-        else:
-            if evs:
-                rr2 = _batch_retrieval_from_evidence(evs[0])
-                if rr2:
-                    retrieval_cfg = {**rr2, "batch_id": batch_id, "evidence_count": len(evs)}
+    else:
+        if evs:
+            rr2 = _batch_retrieval_from_evidence(evs[0])
+            if rr2:
+                retrieval_cfg = {**rr2, "batch_id": batch_id, "evidence_count": len(evs)}
 
     return {
         "ok": True,
@@ -1207,6 +1340,10 @@ def rag_debug(
                 "kind": e.kind,
                 "source_name": e.source_name,
                 "source_ref": e.source_ref,
+                "fingerprint": getattr(e, "fingerprint", ""),
+                "source_id": str(getattr(e, "source_id", "") or "") or None,
+                "document_id": str(getattr(e, "document_id", "") or "") or None,
+                "chunk_id": str(getattr(e, "chunk_id", "") or "") or None,
                 "excerpt": e.excerpt,
                 "meta": e.meta or {},
                 "created_at": e.created_at.isoformat().replace("+00:00", "Z"),

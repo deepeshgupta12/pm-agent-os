@@ -371,6 +371,17 @@ class Evidence(Base):
 
     run: Mapped["Run"] = relationship(back_populates="evidence_items")
 
+    fingerprint: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    source_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sources.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    document_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    chunk_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chunks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
 
 class RefreshToken(Base):
     __tablename__ = "refresh_tokens"
