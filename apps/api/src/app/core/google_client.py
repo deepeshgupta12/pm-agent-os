@@ -21,8 +21,10 @@ class GoogleAPIError(RuntimeError):
 class GoogleClient:
     """
     V1.5:
-      - Add retry/backoff for Drive calls (429 + 5xx)
-      - OAuth refresh remains strict (don't hide broken creds)
+    - Drive list/export/download + retry/backoff
+    Commit 21:
+    - Docs API create + replace/append text
+    - Drive move to folder + webViewLink
     """
 
     GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
@@ -52,6 +54,7 @@ class GoogleClient:
         self._access_token_exp: float = 0.0
 
         self.drive_base = "https://www.googleapis.com/drive/v3"
+        self.docs_base = "https://docs.googleapis.com/v1"
         self.oauth_token_url = "https://oauth2.googleapis.com/token"
 
         self.timeout_s = int(timeout_s)
@@ -116,10 +119,20 @@ class GoogleClient:
         *,
         headers: Dict[str, str],
         params: Optional[Dict[str, Any]] = None,
+        json: Optional[Dict[str, Any]] = None,
+        data: Optional[Any] = None,
     ) -> requests.Response:
         last_err: Optional[GoogleAPIError] = None
         for attempt in range(1, self.max_retries + 1):
-            r = self.session.request(method, url, headers=headers, params=params, timeout=self.timeout_s)
+            r = self.session.request(
+                method,
+                url,
+                headers=headers,
+                params=params,
+                json=json,
+                data=data,
+                timeout=self.timeout_s,
+            )
 
             if 200 <= r.status_code < 300:
                 return r
@@ -145,6 +158,7 @@ class GoogleClient:
             raise last_err
         raise GoogleAPIError(500, "Google API request failed (unknown error)")
 
+    # ---------------- Drive (existing) ----------------
     def list_docs_in_folder(
         self,
         *,
@@ -163,7 +177,7 @@ class GoogleClient:
         params: Dict[str, Any] = {
             "q": q,
             "pageSize": max(1, min(int(page_size), 1000)),
-            "fields": "nextPageToken,files(id,name,mimeType,modifiedTime,createdTime,owners(emailAddress),webViewLink)",
+            "fields": "nextPageToken,files(id,name,mimeType,modifiedTime,createdTime,owners(emailAddress),webViewLink,parents)",
         }
         if page_token:
             params["pageToken"] = page_token
@@ -194,3 +208,91 @@ class GoogleClient:
         doc = DocxDocument(BytesIO(data))
         paras = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
         return "\n".join(paras).strip()
+
+    # ---------------- Commit 21: Docs publish helpers ----------------
+    def create_doc(self, *, title: str) -> str:
+        url = f"{self.docs_base}/documents"
+        payload = {"title": title or "Untitled"}
+        r = self._request("POST", url, headers=self._headers(), json=payload)
+        js = r.json()
+        doc_id = js.get("documentId")
+        if not doc_id:
+            raise GoogleAPIError(500, "Docs create did not return documentId", {"body": js})
+        return str(doc_id)
+
+    def get_doc(self, *, doc_id: str) -> Dict[str, Any]:
+        url = f"{self.docs_base}/documents/{doc_id}"
+        r = self._request("GET", url, headers=self._headers())
+        return r.json()
+
+    def _doc_end_index(self, doc_json: Dict[str, Any]) -> int:
+        body = doc_json.get("body") or {}
+        content = body.get("content") or []
+        if not isinstance(content, list) or not content:
+            return 1
+        # Docs API gives endIndex on each structural element; last content element endIndex is doc end
+        end = 1
+        for el in content:
+            ei = el.get("endIndex")
+            if isinstance(ei, int) and ei > end:
+                end = ei
+        # endIndex is typically last+1
+        return max(1, int(end))
+
+    def replace_doc_text(self, *, doc_id: str, text: str) -> None:
+        doc = self.get_doc(doc_id=doc_id)
+        end_index = self._doc_end_index(doc)
+
+        # delete everything except the initial newline (Docs body typically starts at index 1)
+        # safe range: [1, end_index-1]
+        delete_end = max(1, end_index - 1)
+
+        requests_payload: List[Dict[str, Any]] = []
+        if delete_end > 1:
+            requests_payload.append(
+                {"deleteContentRange": {"range": {"startIndex": 1, "endIndex": delete_end}}}
+            )
+
+        # insert at start
+        requests_payload.append(
+            {"insertText": {"location": {"index": 1}, "text": (text or "").strip()}}
+        )
+
+        url = f"{self.docs_base}/documents/{doc_id}:batchUpdate"
+        self._request("POST", url, headers=self._headers(), json={"requests": requests_payload})
+
+    def append_doc_text(self, *, doc_id: str, text: str) -> None:
+        doc = self.get_doc(doc_id=doc_id)
+        end_index = self._doc_end_index(doc)
+        insert_at = max(1, end_index - 1)
+
+        url = f"{self.docs_base}/documents/{doc_id}:batchUpdate"
+        payload = {
+            "requests": [
+                {"insertText": {"location": {"index": insert_at}, "text": (text or "")}}
+            ]
+        }
+        self._request("POST", url, headers=self._headers(), json=payload)
+
+    def get_web_view_link(self, *, file_id: str) -> Optional[str]:
+        url = f"{self.drive_base}/files/{file_id}"
+        params = {"fields": "webViewLink"}
+        r = self._request("GET", url, headers=self._headers(), params=params)
+        js = r.json()
+        return js.get("webViewLink")
+
+    def move_file_to_folder(self, *, file_id: str, folder_id: str) -> None:
+        # get current parents
+        url_get = f"{self.drive_base}/files/{file_id}"
+        r1 = self._request("GET", url_get, headers=self._headers(), params={"fields": "parents"})
+        js = r1.json()
+        parents = js.get("parents") or []
+        remove_parents = ",".join([p for p in parents if isinstance(p, str)])
+
+        # patch to add new parent
+        url_patch = f"{self.drive_base}/files/{file_id}"
+        params: Dict[str, Any] = {"addParents": folder_id, "fields": "id,parents"}
+        if remove_parents:
+            params["removeParents"] = remove_parents
+
+        self._request("PATCH", url_patch, headers=self._headers(), params=params)

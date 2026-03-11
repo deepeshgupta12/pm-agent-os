@@ -221,6 +221,15 @@ class ActionItemOut(BaseModel):
     approvals_rejected_count: int = 0
     my_decision: Optional[str] = None  # approved|rejected|null
 
+    # Commit 21: execution lifecycle
+    execution_status: str = "not_started"
+    execution_attempts: int = 0
+    execution_started_at: Optional[datetime] = None
+    execution_finished_at: Optional[datetime] = None
+    execution_last_error: Optional[str] = None
+    execution_idempotency_key: Optional[str] = None
+    execution_result_json: Dict[str, Any] = Field(default_factory=dict)
+
 
 class ApprovalsPolicyOut(BaseModel):
     workspace_id: str

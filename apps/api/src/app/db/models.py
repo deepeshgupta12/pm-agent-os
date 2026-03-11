@@ -656,26 +656,32 @@ class ActionItem(Base):
     title: Mapped[str] = mapped_column(String(240), nullable=False, default="")
     payload_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     target_ref: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+
     decision_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
-    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
     workspace: Mapped["Workspace"] = relationship(back_populates="action_items")
 
     approvals_required: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
-    created_by_user: Mapped["User"] = relationship(
-        back_populates="created_action_items", foreign_keys=[created_by_user_id]
-    )
-    assigned_to_user: Mapped[Optional["User"]] = relationship(
-        back_populates="assigned_action_items", foreign_keys=[assigned_to_user_id]
-    )
-    decided_by_user: Mapped[Optional["User"]] = relationship(
-        back_populates="decided_action_items", foreign_keys=[decided_by_user_id]
-    )
+    created_by_user: Mapped["User"] = relationship(back_populates="created_action_items", foreign_keys=[created_by_user_id])
+    assigned_to_user: Mapped[Optional["User"]] = relationship(back_populates="assigned_action_items", foreign_keys=[assigned_to_user_id])
+    decided_by_user: Mapped[Optional["User"]] = relationship(back_populates="decided_action_items", foreign_keys=[decided_by_user_id])
+
+    # --- Commit 21: execution lifecycle for approval-gated writes ---
+    execution_status: Mapped[str] = mapped_column(String(24), nullable=False, default="not_started", index=True)
+    execution_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    execution_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    execution_finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    execution_last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    execution_idempotency_key: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    execution_result_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
 
 class ActionItemDecision(Base):
