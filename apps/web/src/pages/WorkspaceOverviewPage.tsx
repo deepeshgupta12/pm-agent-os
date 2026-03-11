@@ -1,7 +1,7 @@
 // apps/web/src/pages/WorkspaceOverviewPage.tsx
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Badge, Button, Divider, Group, SimpleGrid, Stack, Text } from "@mantine/core";
+import { Badge, Button, Divider, Group, SimpleGrid, Stack, Text, Collapse } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import type { Run, Workspace, WorkspaceRole, ActionItem } from "../types";
 
@@ -15,6 +15,11 @@ type Counts = {
   recentRuns?: number;
 };
 
+function shortId(id: string): string {
+  if (!id) return "";
+  return id.length <= 10 ? id : `${id.slice(0, 8)}…`;
+}
+
 export default function WorkspaceOverviewPage() {
   const { workspaceId } = useParams();
   const wid = workspaceId || "";
@@ -27,6 +32,8 @@ export default function WorkspaceOverviewPage() {
 
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const roleStr = (myRole?.role || "").toLowerCase();
   const isAdmin = roleStr === "admin";
@@ -87,8 +94,8 @@ export default function WorkspaceOverviewPage() {
 
   const headerRight = (
     <Group>
-      <Button component={Link} to="/workspaces" variant="light" size="sm">
-        Back
+      <Button component={Link} to={`/workspaces/${wid}`} variant="light" size="sm">
+        Guided mode
       </Button>
       <Button component={Link} to={`/run-builder/${wid}`} size="sm">
         Create run
@@ -102,9 +109,7 @@ export default function WorkspaceOverviewPage() {
   const statsRight = (
     <Group gap="sm" wrap="wrap">
       {roleBadge}
-      {typeof counts.queuedActions === "number" ? (
-        <GlassStat label="Approvals" value={counts.queuedActions} />
-      ) : null}
+      {typeof counts.queuedActions === "number" ? <GlassStat label="Approvals" value={counts.queuedActions} /> : null}
       {typeof counts.recentRuns === "number" ? <GlassStat label="Runs" value={counts.recentRuns} /> : null}
       <GlassStat label="Access" value={isAdmin ? "Admin" : "Read-only"} />
     </Group>
@@ -113,7 +118,7 @@ export default function WorkspaceOverviewPage() {
   return (
     <GlassPage
       title={ws?.name ? `Workspace · ${ws.name}` : "Workspace"}
-      subtitle="A calm starting point for runs, approvals, and governance."
+      subtitle="Workspace shortcuts and recent activity."
       right={headerRight}
     >
       <Stack gap="md">
@@ -125,21 +130,43 @@ export default function WorkspaceOverviewPage() {
 
         <GlassSection
           title={ws?.name ? ws.name : "Loading…"}
-          description={ws?.id ? ws.id : wid}
+          description="Overview (IDs hidden by default)"
           right={statsRight}
         >
           <Divider />
 
+          <Group justify="space-between" align="center">
+            <Text size="sm" c="dimmed">
+              Use Guided mode for the main workflow. Overview is for shortcuts and context.
+            </Text>
+            <Button variant="light" size="xs" onClick={() => setAdvancedOpen((x) => !x)}>
+              {advancedOpen ? "Hide advanced" : "Show advanced"}
+            </Button>
+          </Group>
+
+          <Collapse in={advancedOpen}>
+            <GlassCard p="md" mt="sm">
+              <Stack gap={6}>
+                <Text fw={700}>Advanced details</Text>
+                <Text size="sm" c="dimmed">
+                  Workspace ID: <b>{shortId(wid)}</b>
+                </Text>
+              </Stack>
+            </GlassCard>
+          </Collapse>
+
+          <Divider my="md" />
+
           <SimpleGrid cols={{ base: 1, sm: 2, md: 3 }} spacing="md">
             <GlassCard p="md">
               <Stack gap={8}>
-                <Text fw={700}>Run Builder</Text>
+                <Text fw={700}>Create run</Text>
                 <Text size="sm" c="dimmed">
-                  Create a run using an agent and optional retrieval.
+                  Create a run using an agent. Use references only if needed.
                 </Text>
                 <Group>
                   <Button component={Link} to={`/run-builder/${wid}`} variant="light" size="sm">
-                    Open Run Builder
+                    Open
                   </Button>
                 </Group>
               </Stack>
@@ -149,16 +176,14 @@ export default function WorkspaceOverviewPage() {
               <Stack gap={8}>
                 <Group justify="space-between">
                   <Text fw={700}>Approvals</Text>
-                  {typeof counts.queuedActions === "number" ? (
-                    <GlassStat label="Queued" value={counts.queuedActions} />
-                  ) : null}
+                  {typeof counts.queuedActions === "number" ? <GlassStat label="Queued" value={counts.queuedActions} /> : null}
                 </Group>
                 <Text size="sm" c="dimmed">
-                  Review approval items and execution outcomes.
+                  Review publish requests and approval items.
                 </Text>
                 <Group>
                   <Button component={Link} to={`/workspaces/${wid}/actions`} variant="light" size="sm">
-                    Open Approvals
+                    Open Action Center
                   </Button>
                 </Group>
               </Stack>
@@ -172,7 +197,7 @@ export default function WorkspaceOverviewPage() {
                 </Text>
                 <Group>
                   <Button component={Link} to={`/workspaces/${wid}/docs`} variant="light" size="sm">
-                    Open Docs
+                    Open
                   </Button>
                 </Group>
               </Stack>
@@ -182,11 +207,11 @@ export default function WorkspaceOverviewPage() {
               <Stack gap={8}>
                 <Text fw={700}>Schedules</Text>
                 <Text size="sm" c="dimmed">
-                  Automate runs on intervals.
+                  Automate recurring runs.
                 </Text>
                 <Group>
                   <Button component={Link} to={`/workspaces/${wid}/schedules`} variant="light" size="sm">
-                    Open Schedules
+                    Open
                   </Button>
                 </Group>
               </Stack>
@@ -200,7 +225,7 @@ export default function WorkspaceOverviewPage() {
                 </Text>
                 <Group>
                   <Button component={Link} to={`/workspaces/${wid}/pipelines`} variant="light" size="sm">
-                    Open Pipelines
+                    Open
                   </Button>
                 </Group>
               </Stack>
@@ -208,13 +233,13 @@ export default function WorkspaceOverviewPage() {
 
             <GlassCard p="md">
               <Stack gap={8}>
-                <Text fw={700}>Agent Builder</Text>
+                <Text fw={700}>Agent builder</Text>
                 <Text size="sm" c="dimmed">
                   Create and publish agent versions.
                 </Text>
                 <Group>
                   <Button component={Link} to={`/workspaces/${wid}/agent-builder`} variant="light" size="sm">
-                    Open Agent Builder
+                    Open
                   </Button>
                 </Group>
               </Stack>
@@ -224,7 +249,7 @@ export default function WorkspaceOverviewPage() {
 
         <GlassSection
           title="Workspace settings"
-          description="Policy and governance controls for this workspace."
+          description="Rules and audit logs (advanced)."
           right={
             <Group gap="sm" wrap="wrap">
               <GlassStat label="Access" value={isAdmin ? "Admin" : "Read-only"} />
@@ -234,13 +259,13 @@ export default function WorkspaceOverviewPage() {
           <SimpleGrid cols={{ base: 1, sm: 2, md: 3 }} spacing="md">
             <GlassCard p="md">
               <Stack gap={8}>
-                <Text fw={700}>Policy Center</Text>
+                <Text fw={700}>Workspace rules</Text>
                 <Text size="sm" c="dimmed">
-                  Internal-only, allowlists, retention.
+                  Internal-only, allowed sources, retention.
                 </Text>
                 <Group>
                   <Button component={Link} to={`/workspaces/${wid}/policy`} variant="light" size="sm">
-                    Open Policy Center
+                    Open
                   </Button>
                 </Group>
               </Stack>
@@ -250,11 +275,11 @@ export default function WorkspaceOverviewPage() {
               <Stack gap={8}>
                 <Text fw={700}>Audit log</Text>
                 <Text size="sm" c="dimmed">
-                  Governance events (policy + RBAC).
+                  Governance events and decisions.
                 </Text>
                 <Group>
                   <Button component={Link} to={`/workspaces/${wid}/governance`} variant="light" size="sm">
-                    Open Governance
+                    Open
                   </Button>
                 </Group>
               </Stack>
@@ -262,13 +287,13 @@ export default function WorkspaceOverviewPage() {
 
             <GlassCard p="md">
               <Stack gap={8}>
-                <Text fw={700}>Member management</Text>
+                <Text fw={700}>Members</Text>
                 <Text size="sm" c="dimmed">
-                  Roles and access (legacy page).
+                  Roles and access (legacy admin).
                 </Text>
                 <Group>
                   <Button component={Link} to={`/workspaces/${wid}/_legacy`} variant="light" size="sm">
-                    Open Members
+                    Open
                   </Button>
                 </Group>
               </Stack>
@@ -284,10 +309,8 @@ export default function WorkspaceOverviewPage() {
 
         <GlassSection
           title="Recent runs"
-          description="Latest activity in this workspace."
-          right={
-            typeof counts.recentRuns === "number" ? <GlassStat label="Total" value={counts.recentRuns} /> : undefined
-          }
+          description="Latest activity (IDs hidden by default)."
+          right={typeof counts.recentRuns === "number" ? <GlassStat label="Total" value={counts.recentRuns} /> : undefined}
         >
           {runs.length === 0 ? (
             <Text c="dimmed">No runs yet.</Text>
@@ -309,7 +332,7 @@ export default function WorkspaceOverviewPage() {
                       ) : null}
 
                       <Text size="xs" c="dimmed">
-                        {r.id}
+                        Run: {shortId(r.id)}
                       </Text>
                     </Stack>
 

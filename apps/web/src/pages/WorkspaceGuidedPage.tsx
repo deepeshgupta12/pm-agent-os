@@ -23,6 +23,11 @@ function roleBadgeColor(role: string | null): string {
   return "dark";
 }
 
+function shortId(id: string): string {
+  if (!id) return "";
+  return id.length <= 10 ? id : `${id.slice(0, 8)}…`;
+}
+
 export default function WorkspaceGuidedPage() {
   const { workspaceId } = useParams();
   const wid = workspaceId || "";
@@ -124,8 +129,7 @@ export default function WorkspaceGuidedPage() {
         ? "In review (locked)"
         : "Draft — request publish when ready";
 
-  const step4Status =
-    approvalsCount === 0 ? "No approvals queued" : `${approvalsCount} queued approval(s)`;
+  const step4Status = approvalsCount === 0 ? "No approvals queued" : `${approvalsCount} queued approval(s)`;
 
   return (
     <GlassPage
@@ -133,7 +137,7 @@ export default function WorkspaceGuidedPage() {
       subtitle={ws?.name ? `Workspace: ${ws.name}` : "A guided workflow for shipping outputs."}
       right={
         <Group>
-          <Button component={Link} to={`/workspaces/${wid}`} variant="light" size="sm">
+          <Button component={Link} to={`/workspaces/${wid}/overview`} variant="light" size="sm">
             Overview
           </Button>
           <Button variant="light" onClick={load} loading={loading} size="sm">
@@ -166,8 +170,16 @@ export default function WorkspaceGuidedPage() {
                   Role: {roleStr ?? "unknown"}
                 </Badge>
                 <GlassStat label="Queued approvals" value={approvalsCount} />
-                {latest.run ? <GlassStat label="Latest run" value={latest.run.status} /> : <GlassStat label="Latest run" value="none" />}
-                {latest.artifact ? <GlassStat label="Latest output" value={latest.artifact.status} /> : <GlassStat label="Latest output" value="none" />}
+                {latest.run ? (
+                  <GlassStat label="Latest run" value={latest.run.status} />
+                ) : (
+                  <GlassStat label="Latest run" value="none" />
+                )}
+                {latest.artifact ? (
+                  <GlassStat label="Latest output" value={latest.artifact.status} />
+                ) : (
+                  <GlassStat label="Latest output" value="none" />
+                )}
               </Group>
             }
           >
@@ -206,24 +218,18 @@ export default function WorkspaceGuidedPage() {
                     {step2Status}
                   </Text>
                   <Group>
-                    <Button
-                      component={Link}
-                      to={step2ArtifactHref || "/outputs"}
-                      size="sm"
-                      disabled={!latest.artifact}
-                    >
+                    <Button component={Link} to={step2ArtifactHref || "/outputs"} size="sm" disabled={!latest.artifact}>
                       Open output
                     </Button>
-                    <Button
-                      component={Link}
-                      to={step2RunHref || "/runs"}
-                      variant="light"
-                      size="sm"
-                      disabled={!latest.run}
-                    >
+                    <Button component={Link} to={step2RunHref || "/runs"} variant="light" size="sm" disabled={!latest.run}>
                       Open run
                     </Button>
                   </Group>
+                  {latest.run ? (
+                    <Text size="xs" c="dimmed">
+                      Latest run: {shortId(latest.run.id)}
+                    </Text>
+                  ) : null}
                 </Stack>
               </GlassCard>
 
@@ -246,12 +252,7 @@ export default function WorkspaceGuidedPage() {
                     Status: {step3Status}
                   </Text>
                   <Group>
-                    <Button
-                      component={Link}
-                      to={step3PrimaryHref || "/outputs"}
-                      size="sm"
-                      disabled={!latest.artifact}
-                    >
+                    <Button component={Link} to={step3PrimaryHref || "/outputs"} size="sm" disabled={!latest.artifact}>
                       Open output to request publish
                     </Button>
                     <Button component={Link} to="/outputs" variant="light" size="sm">
@@ -312,7 +313,7 @@ export default function WorkspaceGuidedPage() {
             <Divider my="sm" />
 
             <Text size="sm" c="dimmed">
-              Advanced tools are still available under workspace settings (rules, audit log, agent builder), but Guided mode is the default journey.
+              Advanced tools are available under workspace settings (rules, audit log, agent builder), but Guided mode is the default journey.
             </Text>
           </GlassSection>
 
@@ -329,6 +330,9 @@ export default function WorkspaceGuidedPage() {
               </Button>
               <Button component={Link} to={`/workspaces/${wid}/_legacy`} variant="light" size="sm">
                 Members (legacy)
+              </Button>
+              <Button component={Link} to={`/workspaces/${wid}/overview`} variant="light" size="sm">
+                Workspace overview
               </Button>
             </Group>
           </GlassSection>

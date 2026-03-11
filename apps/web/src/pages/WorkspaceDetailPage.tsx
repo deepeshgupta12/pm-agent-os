@@ -10,9 +10,9 @@ import {
   Text,
   Textarea,
   TextInput,
-  Divider,
   Code,
   Tooltip,
+  Collapse,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import type { Agent, Run, Workspace, WorkspaceMember, WorkspaceRole, TemplateAdmin } from "../types";
@@ -37,6 +37,11 @@ function stableJsonStringify(v: any): string {
   } catch {
     return "{}";
   }
+}
+
+function shortId(id: string): string {
+  if (!id) return "";
+  return id.length <= 10 ? id : `${id.slice(0, 8)}…`;
 }
 
 export default function WorkspaceDetailPage() {
@@ -69,6 +74,9 @@ export default function WorkspaceDetailPage() {
   const [tplAdminDirty, setTplAdminDirty] = useState(false);
   const [tplAdminErr, setTplAdminErr] = useState<string | null>(null);
 
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [showIds, setShowIds] = useState(false);
+
   const roleStr = (myRole?.role || "").toLowerCase();
   const isAdmin = roleStr === "admin";
 
@@ -78,7 +86,7 @@ export default function WorkspaceDetailPage() {
     () =>
       agents.map((a) => ({
         value: a.id,
-        label: `${a.name} (${a.id})`,
+        label: `${a.name}`,
       })),
     [agents]
   );
@@ -288,6 +296,9 @@ export default function WorkspaceDetailPage() {
   const headerRight = (
     <Group>
       <Button component={Link} to={`/workspaces/${wid}`} variant="light" size="sm">
+        Guided mode
+      </Button>
+      <Button component={Link} to={`/workspaces/${wid}/overview`} variant="light" size="sm">
         Overview
       </Button>
       <Button component={Link} to={`/run-builder/${wid}`} size="sm">
@@ -301,8 +312,8 @@ export default function WorkspaceDetailPage() {
 
   return (
     <GlassPage
-      title={ws?.name ? `Workspace · ${ws.name}` : "Workspace"}
-      subtitle="Legacy admin panel (members, template config, and quick run creation)."
+      title={ws?.name ? `Members (legacy) · ${ws.name}` : "Members (legacy)"}
+      subtitle="Legacy admin console. IDs and raw JSON are hidden by default."
       right={headerRight}
     >
       <Stack gap="md">
@@ -314,119 +325,30 @@ export default function WorkspaceDetailPage() {
 
         <GlassSection
           title={ws?.name || "Loading…"}
-          description={ws?.id || wid}
+          description="Legacy admin view"
           right={
             <Group gap="sm" wrap="wrap">
               <GlassStat label="Access" value={isAdmin ? "Admin" : "Read-only"} />
               <GlassStat label="Members" value={members.length} />
               <GlassStat label="Runs" value={runs.length} />
+              <Button variant="light" size="xs" onClick={() => setShowIds((x) => !x)}>
+                {showIds ? "Hide IDs" : "Show IDs"}
+              </Button>
+              <Button variant="light" size="xs" onClick={() => setAdvancedOpen((x) => !x)}>
+                {advancedOpen ? "Hide advanced" : "Show advanced"}
+              </Button>
             </Group>
           }
         >
           <Text size="sm" c="dimmed">
-            This page stays available for advanced controls. Most day-to-day work happens in the Overview.
+            Prefer Guided mode + Overview for day-to-day work. This page exists for admin maintenance.
           </Text>
-        </GlassSection>
 
-        {/* Template Admin */}
-        <GlassSection
-          title="Template Admin"
-          description="Workspace-scoped JSON configuration used by agents and templates."
-          right={
-            <Group>
-              <Button variant="light" onClick={loadTemplateAdmin} loading={tplAdminLoading} size="sm">
-                Refresh
-              </Button>
-              <Tooltip
-                withArrow
-                label={isAdmin ? "Saves template_admin_json for this workspace." : "Admin only."}
-              >
-                <span>
-                  <Button
-                    onClick={saveTemplateAdmin}
-                    loading={tplAdminSaving}
-                    disabled={!isAdmin || tplAdminLoading || !tplAdminDirty}
-                    size="sm"
-                  >
-                    Save
-                  </Button>
-                </span>
-              </Tooltip>
-            </Group>
-          }
-        >
-          <Stack gap="sm">
-            <Group gap="sm">
-              <Badge variant="light">V1</Badge>
-              <Badge variant="light" color={isAdmin ? "grape" : "gray"}>
-                {isAdmin ? "admin can edit" : "read-only"}
-              </Badge>
-              <Tooltip
-                withArrow
-                label="Stored at workspaces.template_admin_json. New workspaces default to {} until saved."
-              >
-                <Badge variant="light">Stored JSON</Badge>
-              </Tooltip>
-            </Group>
-
-            {tplAdminErr ? (
-              <GlassCard>
-                <Text c="red">{tplAdminErr}</Text>
-              </GlassCard>
-            ) : null}
-
-            <Textarea
-              label="template_admin_json"
-              description={
-                tplAdminLoading
-                  ? "Loading…"
-                  : isAdmin
-                    ? "Edit JSON and click Save."
-                    : "Viewer/Member: read-only. Ask an admin to update."
-              }
-              autosize
-              minRows={10}
-              value={tplAdminJson}
-              onChange={(e) => {
-                setTplAdminJson(e.currentTarget.value);
-                setTplAdminDirty(true);
-                setTplAdminErr(null);
-              }}
-              disabled={!isAdmin || tplAdminLoading}
-            />
-
-            {!tplAdminParsed.ok ? (
-              <Text c="red" size="sm">
-                JSON error: {tplAdminParsed.error}
-              </Text>
-            ) : null}
-
-            <Divider />
-
-            <Text fw={600}>Suggested shape (example)</Text>
-            <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-              {`{
-  "prd_fields": {
-    "required": ["Summary", "Problem", "Users / Segments", "Success Metrics", "Scope", "Requirements"],
-    "optional": ["Risks", "Assumptions", "Open Questions", "Next Actions"]
-  },
-  "event_naming": {
-    "format": "category_action_object",
-    "examples": ["onboarding_click_cta", "pricing_view_plan"]
-  },
-  "research_taxonomy_tags": {
-    "themes": ["pricing", "onboarding", "performance", "trust"],
-    "personas": ["new_user", "power_user", "admin"]
-  }
-}`}
-            </pre>
-
-            {tplAdmin ? (
-              <Text size="xs" c="dimmed">
-                Loaded for workspace: <Code>{tplAdmin.workspace_id}</Code>
-              </Text>
-            ) : null}
-          </Stack>
+          {showIds ? (
+            <Text size="xs" c="dimmed" mt="sm">
+              Workspace ID: <Code>{wid}</Code>
+            </Text>
+          ) : null}
         </GlassSection>
 
         {/* Members */}
@@ -490,9 +412,11 @@ export default function WorkspaceDetailPage() {
                     <Group justify="space-between" align="center">
                       <Stack gap={2}>
                         <Text fw={700}>{m.email}</Text>
-                        <Text size="xs" c="dimmed">
-                          {m.user_id}
-                        </Text>
+                        {showIds ? (
+                          <Text size="xs" c="dimmed">
+                            {m.user_id}
+                          </Text>
+                        ) : null}
                       </Stack>
 
                       <Group>
@@ -525,113 +449,190 @@ export default function WorkspaceDetailPage() {
           </Stack>
         </GlassSection>
 
-        {/* Quick run creation */}
-        <GlassSection
-          title="Quick run (legacy)"
-          description="Create a run directly from an agent with a raw JSON payload."
-          right={
-            <Tooltip withArrow label="Prefer Run Builder for a guided flow. This is a fast admin shortcut.">
-              <Badge variant="light">Advanced</Badge>
-            </Tooltip>
-          }
-        >
-          <Stack gap="sm">
-            <Select
-              label="Agent"
-              data={agentOptions}
-              value={agentId}
-              onChange={setAgentId}
-              searchable
-              nothingFoundMessage="No agents"
-            />
-
-            {selectedAgent ? (
-              <GlassCard p="md">
-                <Stack gap={4}>
-                  <Group gap="sm">
-                    <Badge variant="light">{selectedAgent.id}</Badge>
-                    <Badge variant="light">{selectedAgent.version}</Badge>
-                    <Text fw={700}>{selectedAgent.name}</Text>
-                  </Group>
-                  <Text size="sm" c="dimmed">
-                    {selectedAgent.description}
-                  </Text>
-                  <Text size="sm">
-                    Default artifact type:{" "}
-                    <Text span fw={700}>
-                      {selectedAgent.default_artifact_type}
-                    </Text>
-                  </Text>
-                </Stack>
-              </GlassCard>
-            ) : null}
-
-            <Textarea
-              label="Input payload (JSON)"
-              description={
-                <Tooltip
-                  withArrow
-                  label="This is sent as input_payload. Keep it small and well-formed. Invalid JSON will fail fast."
-                >
-                  <span>Raw JSON input for the agent.</span>
-                </Tooltip>
-              }
-              autosize
-              minRows={6}
-              value={inputJson}
-              onChange={(e) => setInputJson(e.currentTarget.value)}
-            />
-
-            <Group>
-              <Button onClick={createRun} loading={creating} size="sm">
-                Create run
-              </Button>
-              <Button variant="light" onClick={loadAll} size="sm">
-                Refresh
-              </Button>
-            </Group>
-          </Stack>
-        </GlassSection>
-
-        {/* Runs list */}
-        <GlassSection
-          title="Runs"
-          description="Latest runs in this workspace (newest first)."
-          right={<GlassStat label="Total" value={runs.length} />}
-        >
-          {runs.length === 0 ? (
-            <Text c="dimmed">No runs yet.</Text>
-          ) : (
-            <Stack gap="xs">
-              {runs.slice(0, 15).map((r) => (
-                <GlassCard key={r.id} p="md">
-                  <Group justify="space-between" align="flex-start">
-                    <Stack gap={6}>
-                      <Group gap="sm">
-                        <Badge variant="light">{r.status}</Badge>
-                        <Text fw={700}>{r.agent_id}</Text>
-                      </Group>
-
-                      {r.output_summary ? (
-                        <Text size="sm" c="dimmed">
-                          {r.output_summary}
-                        </Text>
-                      ) : null}
-
-                      <Text size="xs" c="dimmed">
-                        {r.id}
-                      </Text>
-                    </Stack>
-
-                    <Button component={Link} to={`/runs/${r.id}`} variant="light" size="sm">
-                      Open
+        <Collapse in={advancedOpen}>
+          {/* Template Admin */}
+          <GlassSection
+            title="Template Admin (advanced)"
+            description="Workspace-scoped JSON configuration used by agents and templates."
+            right={
+              <Group>
+                <Button variant="light" onClick={loadTemplateAdmin} loading={tplAdminLoading} size="sm">
+                  Refresh
+                </Button>
+                <Tooltip withArrow label={isAdmin ? "Saves template_admin_json for this workspace." : "Admin only."}>
+                  <span>
+                    <Button
+                      onClick={saveTemplateAdmin}
+                      loading={tplAdminSaving}
+                      disabled={!isAdmin || tplAdminLoading || !tplAdminDirty}
+                      size="sm"
+                    >
+                      Save
                     </Button>
-                  </Group>
+                  </span>
+                </Tooltip>
+              </Group>
+            }
+          >
+            <Stack gap="sm">
+              <Group gap="sm">
+                <Badge variant="light">V1</Badge>
+                <Badge variant="light" color={isAdmin ? "grape" : "gray"}>
+                  {isAdmin ? "admin can edit" : "read-only"}
+                </Badge>
+              </Group>
+
+              {tplAdminErr ? (
+                <GlassCard>
+                  <Text c="red">{tplAdminErr}</Text>
                 </GlassCard>
-              ))}
+              ) : null}
+
+              <Textarea
+                label="template_admin_json"
+                description={
+                  tplAdminLoading
+                    ? "Loading…"
+                    : isAdmin
+                      ? "Edit JSON and click Save."
+                      : "Viewer/Member: read-only. Ask an admin to update."
+                }
+                autosize
+                minRows={10}
+                value={tplAdminJson}
+                onChange={(e) => {
+                  setTplAdminJson(e.currentTarget.value);
+                  setTplAdminDirty(true);
+                  setTplAdminErr(null);
+                }}
+                disabled={!isAdmin || tplAdminLoading}
+              />
+
+              {!tplAdminParsed.ok ? (
+                <Text c="red" size="sm">
+                  JSON error: {tplAdminParsed.error}
+                </Text>
+              ) : null}
+
+              {tplAdmin ? (
+                <Text size="xs" c="dimmed">
+                  Loaded for workspace: <Code>{tplAdmin.workspace_id}</Code>
+                </Text>
+              ) : null}
             </Stack>
-          )}
-        </GlassSection>
+          </GlassSection>
+
+          {/* Quick run creation */}
+          <GlassSection
+            title="Quick run (legacy, advanced)"
+            description="Create a run directly from an agent with a raw JSON payload."
+            right={
+              <Tooltip withArrow label="Prefer Create run for a guided flow. This is a fast admin shortcut.">
+                <Badge variant="light">Advanced</Badge>
+              </Tooltip>
+            }
+          >
+            <Stack gap="sm">
+              <Select
+                label="Agent"
+                data={agentOptions}
+                value={agentId}
+                onChange={setAgentId}
+                searchable
+                nothingFoundMessage="No agents"
+              />
+
+              {selectedAgent ? (
+                <GlassCard p="md">
+                  <Stack gap={4}>
+                    <Group gap="sm">
+                      <Badge variant="light">{shortId(selectedAgent.id)}</Badge>
+                      <Badge variant="light">{selectedAgent.version}</Badge>
+                      <Text fw={700}>{selectedAgent.name}</Text>
+                    </Group>
+                    <Text size="sm" c="dimmed">
+                      {selectedAgent.description}
+                    </Text>
+                    <Text size="sm">
+                      Default output type:{" "}
+                      <Text span fw={700}>
+                        {selectedAgent.default_artifact_type}
+                      </Text>
+                    </Text>
+                  </Stack>
+                </GlassCard>
+              ) : null}
+
+              <Textarea
+                label="Input payload (JSON)"
+                description={
+                  <Tooltip withArrow label="This is sent as input_payload. Keep it small and well-formed. Invalid JSON will fail fast.">
+                    <span>Raw JSON input for the agent.</span>
+                  </Tooltip>
+                }
+                autosize
+                minRows={6}
+                value={inputJson}
+                onChange={(e) => setInputJson(e.currentTarget.value)}
+              />
+
+              <Group>
+                <Button onClick={createRun} loading={creating} size="sm">
+                  Create run
+                </Button>
+                <Button variant="light" onClick={loadAll} size="sm">
+                  Refresh
+                </Button>
+              </Group>
+            </Stack>
+          </GlassSection>
+
+          {/* Runs list */}
+          <GlassSection title="Runs (advanced)" description="Latest runs in this workspace (newest first)." right={<GlassStat label="Total" value={runs.length} />}>
+            {runs.length === 0 ? (
+              <Text c="dimmed">No runs yet.</Text>
+            ) : (
+              <Stack gap="xs">
+                {runs.slice(0, 15).map((r) => (
+                  <GlassCard key={r.id} p="md">
+                    <Group justify="space-between" align="flex-start">
+                      <Stack gap={6}>
+                        <Group gap="sm">
+                          <Badge variant="light">{r.status}</Badge>
+                          <Text fw={700}>{r.agent_id}</Text>
+                        </Group>
+
+                        {r.output_summary ? (
+                          <Text size="sm" c="dimmed">
+                            {r.output_summary}
+                          </Text>
+                        ) : null}
+
+                        {showIds ? (
+                          <Text size="xs" c="dimmed">
+                            {r.id}
+                          </Text>
+                        ) : null}
+                      </Stack>
+
+                      <Button component={Link} to={`/runs/${r.id}`} variant="light" size="sm">
+                        Open
+                      </Button>
+                    </Group>
+                  </GlassCard>
+                ))}
+              </Stack>
+            )}
+          </GlassSection>
+        </Collapse>
+
+        {!advancedOpen ? (
+          <GlassCard p="md">
+            <Text size="sm" c="dimmed">
+              Advanced JSON configuration and legacy quick-run tools are hidden. Use “Show advanced” if needed.
+            </Text>
+          </GlassCard>
+        ) : null}
       </Stack>
     </GlassPage>
   );

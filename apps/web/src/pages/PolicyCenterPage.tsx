@@ -8,12 +8,12 @@ import {
   Group,
   MultiSelect,
   NumberInput,
-  Select,
   Stack,
   Switch,
   Text,
   Divider,
   Tooltip,
+  Collapse,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import type { WorkspacePolicyOut, WorkspacePolicyPurgeOut, WorkspaceRole } from "../types";
@@ -96,29 +96,32 @@ export default function PolicyCenterPage() {
   const [policy, setPolicy] = useState<Record<string, any> | null>(null);
   const [dirty, setDirty] = useState(false);
 
+  // advanced
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+
   // purge
   const [purging, setPurging] = useState(false);
   const [purgeResult, setPurgeResult] = useState<WorkspacePolicyPurgeOut | null>(null);
 
-  // form fields
+  // form fields (simple)
   const [internalOnly, setInternalOnly] = useState(false);
-
   const [allowedSourceTypes, setAllowedSourceTypes] = useState<string[]>([]);
   const [retentionDays, setRetentionDays] = useState<number | null>(null);
-  const [blockExternalLinks, setBlockExternalLinks] = useState(false);
 
+  // advanced knobs
+  const [blockExternalLinks, setBlockExternalLinks] = useState(false);
   const [piiEnabled, setPiiEnabled] = useState(false);
   const [piiMode, setPiiMode] = useState<PiiMode>("none");
 
   const sourceOptions = useMemo(
     () => [
-      { value: "docs", label: "docs" },
-      { value: "github", label: "github" },
-      { value: "slack", label: "slack" },
-      { value: "jira", label: "jira" },
-      { value: "support", label: "support" },
-      { value: "analytics", label: "analytics" },
-      { value: "manual", label: "manual" },
+      { value: "docs", label: "Docs" },
+      { value: "github", label: "GitHub" },
+      { value: "slack", label: "Slack" },
+      { value: "jira", label: "Jira" },
+      { value: "support", label: "Support" },
+      { value: "analytics", label: "Analytics" },
+      { value: "manual", label: "Manual" },
     ],
     []
   );
@@ -162,7 +165,7 @@ export default function PolicyCenterPage() {
 
     if (!res.ok) {
       setPolicy(null);
-      setErr(`Policy load failed: ${res.status} ${res.error}`);
+      setErr(`Rules load failed: ${res.status} ${res.error}`);
       return;
     }
 
@@ -170,9 +173,11 @@ export default function PolicyCenterPage() {
     setPolicy(normalized);
 
     setInternalOnly(!!normalized.internal_only);
-
-    setAllowedSourceTypes(Array.isArray(normalized?.retrieval?.allowed_source_types) ? normalized.retrieval.allowed_source_types : []);
+    setAllowedSourceTypes(
+      Array.isArray(normalized?.retrieval?.allowed_source_types) ? normalized.retrieval.allowed_source_types : []
+    );
     setRetentionDays(typeof normalized?.retrieval?.retention_days === "number" ? normalized.retrieval.retention_days : null);
+
     setBlockExternalLinks(!!normalized?.retrieval?.block_external_links);
 
     setPiiEnabled(!!normalized?.privacy?.pii_masking?.enabled);
@@ -184,7 +189,7 @@ export default function PolicyCenterPage() {
   async function savePolicy() {
     if (!wid) return;
     if (!isAdmin) {
-      setErr("Only admins can update workspace policy.");
+      setErr("Only admins can update workspace rules.");
       return;
     }
 
@@ -202,7 +207,7 @@ export default function PolicyCenterPage() {
     setSaving(false);
 
     if (!res.ok) {
-      setErr(`Policy save failed: ${res.status} ${res.error}`);
+      setErr(`Save failed: ${res.status} ${res.error}`);
       return;
     }
 
@@ -210,10 +215,12 @@ export default function PolicyCenterPage() {
     setPolicy(normalized);
 
     setInternalOnly(!!normalized.internal_only);
-    setAllowedSourceTypes(Array.isArray(normalized?.retrieval?.allowed_source_types) ? normalized.retrieval.allowed_source_types : []);
+    setAllowedSourceTypes(
+      Array.isArray(normalized?.retrieval?.allowed_source_types) ? normalized.retrieval.allowed_source_types : []
+    );
     setRetentionDays(typeof normalized?.retrieval?.retention_days === "number" ? normalized.retrieval.retention_days : null);
-    setBlockExternalLinks(!!normalized?.retrieval?.block_external_links);
 
+    setBlockExternalLinks(!!normalized?.retrieval?.block_external_links);
     setPiiEnabled(!!normalized?.privacy?.pii_masking?.enabled);
     setPiiMode((normalized?.privacy?.pii_masking?.mode as PiiMode) || "none");
 
@@ -261,12 +268,15 @@ export default function PolicyCenterPage() {
   const headerRight = (
     <Group>
       <Button component={Link} to={`/workspaces/${wid}`} variant="light" size="sm">
-        Back
+        Guided mode
+      </Button>
+      <Button component={Link} to={`/workspaces/${wid}/overview`} variant="light" size="sm">
+        Overview
       </Button>
       <Button variant="light" onClick={loadPolicy} loading={loading} size="sm">
         Refresh
       </Button>
-      <Tooltip withArrow label={isAdmin ? "Saves policy_json for this workspace." : "Admin only."}>
+      <Tooltip withArrow label={isAdmin ? "Saves workspace rules." : "Admin only."}>
         <span>
           <Button onClick={savePolicy} loading={saving} disabled={!isAdmin || !dirty || loading} size="sm">
             Save
@@ -277,7 +287,7 @@ export default function PolicyCenterPage() {
   );
 
   return (
-    <GlassPage title="Policy Center" subtitle="Workspace governance for retrieval, privacy, and retention." right={headerRight}>
+    <GlassPage title="Workspace rules" subtitle="Simple rules for safety, sources, and retention." right={headerRight}>
       <Stack gap="md">
         {err ? (
           <GlassCard>
@@ -286,22 +296,25 @@ export default function PolicyCenterPage() {
         ) : null}
 
         <GlassSection
-          title="Workspace policy"
-          description="Stored as JSON at workspaces.policy_json."
+          title="Rules"
+          description="Simple-first. Advanced controls are optional."
           right={
             <Group gap="sm" wrap="wrap">
               <GlassStat label="Access" value={isAdmin ? "Admin" : "Read-only"} />
               <GlassStat label="Dirty" value={dirty ? "Yes" : "No"} />
-              <Badge variant="light">V1</Badge>
+              <Button variant="light" size="xs" onClick={() => setAdvancedOpen((x) => !x)}>
+                {advancedOpen ? "Hide advanced" : "Show advanced"}
+              </Button>
             </Group>
           }
         >
           <Stack gap="md">
             <Divider />
 
+            {/* SIMPLE: Internal-only */}
             <Stack gap="xs">
               <Group gap="sm" align="center">
-                <Text fw={700}>Internal-only</Text>
+                <Text fw={700}>Internal-only workspace</Text>
                 <Tooltip withArrow label="If enabled: exports are blocked and connector operations are disabled.">
                   <Badge variant="light">?</Badge>
                 </Tooltip>
@@ -314,25 +327,23 @@ export default function PolicyCenterPage() {
                   markDirty();
                 }}
                 disabled={!isAdmin}
-                label="internal_only"
+                label="Restrict this workspace to internal use"
               />
             </Stack>
 
             <Divider />
 
+            {/* SIMPLE: Allowed sources */}
             <Stack gap="xs">
               <Group gap="sm" align="center">
-                <Text fw={700}>Retrieval controls</Text>
-                <Tooltip
-                  withArrow
-                  label="Use allowed_source_types as an allowlist. If empty, all sources are allowed."
-                >
+                <Text fw={700}>Allowed sources</Text>
+                <Tooltip withArrow label="If empty, all sources are allowed.">
                   <Badge variant="light">?</Badge>
                 </Tooltip>
               </Group>
 
               <MultiSelect
-                label="allowed_source_types"
+                label="Allowlist (optional)"
                 data={sourceOptions}
                 value={allowedSourceTypes}
                 onChange={(v) => {
@@ -342,12 +353,28 @@ export default function PolicyCenterPage() {
                 disabled={!isAdmin}
                 searchable
                 clearable
-                placeholder="Select allowed sources (leave empty to allow all)"
+                placeholder="Leave empty to allow all"
               />
 
+              <Text size="sm" c="dimmed">
+                This controls where references can be pulled from.
+              </Text>
+            </Stack>
+
+            <Divider />
+
+            {/* SIMPLE: Retention */}
+            <Stack gap="xs">
+              <Group gap="sm" align="center">
+                <Text fw={700}>Retention</Text>
+                <Tooltip withArrow label="If set, you can purge old evidence and logs.">
+                  <Badge variant="light">?</Badge>
+                </Tooltip>
+              </Group>
+
               <NumberInput
-                label="retention_days"
-                description="Optional. If set (>0), you can run purge to delete evidence + run logs older than cutoff."
+                label="Retention days (optional)"
+                description="If set (>0), you can purge evidence + run logs older than the cutoff."
                 value={retentionDays ?? undefined}
                 onChange={(v) => {
                   const n = typeof v === "number" && Number.isFinite(v) ? v : null;
@@ -358,108 +385,137 @@ export default function PolicyCenterPage() {
                 min={1}
                 placeholder="e.g., 30"
               />
-
-              <Switch
-                checked={blockExternalLinks}
-                onChange={(e) => {
-                  setBlockExternalLinks(e.currentTarget.checked);
-                  markDirty();
-                }}
-                disabled={!isAdmin}
-                label="block_external_links"
-                description="Stored in policy_json. Enforcement can be wired in later (V1 stores it)."
-              />
             </Stack>
 
-            <Divider />
+            {/* ADVANCED */}
+            <Collapse in={advancedOpen}>
+              <Divider my="md" />
 
-            <Stack gap="xs">
-              <Group gap="sm" align="center">
-                <Text fw={700}>PII masking</Text>
-                <Tooltip withArrow label="Basic masking for email/phone/long IDs. Mode controls when masking is applied.">
-                  <Badge variant="light">?</Badge>
-                </Tooltip>
-              </Group>
+              <GlassCard p="md">
+                <Stack gap="md">
+                  <Group justify="space-between" align="center">
+                    <Text fw={800}>Advanced</Text>
+                    <Badge variant="light">Optional</Badge>
+                  </Group>
 
-              <Switch
-                checked={piiEnabled}
-                onChange={(e) => {
-                  setPiiEnabled(e.currentTarget.checked);
-                  markDirty();
-                }}
-                disabled={!isAdmin}
-                label="pii_masking.enabled"
-              />
+                  <Stack gap="xs">
+                    <Group gap="sm" align="center">
+                      <Text fw={700}>External links</Text>
+                      <Tooltip withArrow label="Stored as a rule; enforcement can be wired later.">
+                        <Badge variant="light">?</Badge>
+                      </Tooltip>
+                    </Group>
 
-              <Select
-                label="pii_masking.mode"
-                data={[
-                  { value: "none", label: "none" },
-                  { value: "write_time", label: "write_time" },
-                  { value: "export_time", label: "export_time" },
-                  { value: "both", label: "both" },
-                ]}
-                value={piiMode}
-                onChange={(v) => {
-                  const nv = (v as PiiMode) || "none";
-                  setPiiMode(nv);
-                  markDirty();
-                }}
-                disabled={!isAdmin || !piiEnabled}
-              />
-            </Stack>
-
-            <Divider />
-
-            <Stack gap="xs">
-              <Group justify="space-between" align="center">
-                <Group gap="sm" align="center">
-                  <Text fw={700}>Retention purge</Text>
-                  <Tooltip withArrow label="Deletes evidence + run logs older than cutoff (based on retention_days).">
-                    <Badge variant="light">?</Badge>
-                  </Tooltip>
-                </Group>
-
-                <Button onClick={runPurge} loading={purging} disabled={!isAdmin || purging || loading} size="sm">
-                  Run purge now
-                </Button>
-              </Group>
-
-              <Text size="sm" c="dimmed">
-                Uses <Code>POST /workspaces/:id/policy/purge</Code>. Requires <Code>retention_days</Code>.
-              </Text>
-
-              {purgeResult ? (
-                <GlassCard p="md">
-                  <Stack gap={6}>
-                    <Text fw={700}>Purge result</Text>
-                    <Text size="sm">
-                      cutoff: <Code>{purgeResult.cutoff}</Code>
-                    </Text>
-                    <Text size="sm">
-                      deleted_evidence: <Code>{purgeResult.deleted_evidence}</Code> · deleted_logs:{" "}
-                      <Code>{purgeResult.deleted_logs}</Code>
-                    </Text>
+                    <Switch
+                      checked={blockExternalLinks}
+                      onChange={(e) => {
+                        setBlockExternalLinks(e.currentTarget.checked);
+                        markDirty();
+                      }}
+                      disabled={!isAdmin}
+                      label="Block external links in references"
+                    />
                   </Stack>
-                </GlassCard>
-              ) : null}
-            </Stack>
 
-            <Divider />
+                  <Divider />
 
-            <Stack gap="xs">
-              <Text fw={700}>Normalized policy (preview)</Text>
-              <Text size="sm" c="dimmed">
-                This is what will be sent to the backend on Save.
-              </Text>
-              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(effectiveJson)}</pre>
+                  <Stack gap="xs">
+                    <Group gap="sm" align="center">
+                      <Text fw={700}>PII masking</Text>
+                      <Tooltip withArrow label="Basic masking for email/phone/long IDs. Mode controls when masking is applied.">
+                        <Badge variant="light">?</Badge>
+                      </Tooltip>
+                    </Group>
 
-              {policy ? (
-                <Text size="xs" c="dimmed">
-                  Loaded from server: <Code>{wid}</Code>
-                </Text>
-              ) : null}
-            </Stack>
+                    <Switch
+                      checked={piiEnabled}
+                      onChange={(e) => {
+                        setPiiEnabled(e.currentTarget.checked);
+                        markDirty();
+                      }}
+                      disabled={!isAdmin}
+                      label="Enable PII masking"
+                    />
+
+                    <MultiSelect
+                      label="PII masking mode (single select via allowlist)"
+                      data={[
+                        { value: "none", label: "none" },
+                        { value: "write_time", label: "write_time" },
+                        { value: "export_time", label: "export_time" },
+                        { value: "both", label: "both" },
+                      ]}
+                      value={[piiMode]}
+                      onChange={(v) => {
+                        const nv = (v?.[0] as PiiMode) || "none";
+                        setPiiMode(nv);
+                        markDirty();
+                      }}
+                      disabled={!isAdmin || !piiEnabled}
+                      clearable={false}
+                      searchable={false}
+                    />
+                  </Stack>
+
+                  <Divider />
+
+                  <Stack gap="xs">
+                    <Group justify="space-between" align="center">
+                      <Group gap="sm" align="center">
+                        <Text fw={700}>Retention purge</Text>
+                        <Tooltip withArrow label="Deletes evidence + run logs older than cutoff (based on retention days).">
+                          <Badge variant="light">?</Badge>
+                        </Tooltip>
+                      </Group>
+
+                      <Button
+                        onClick={runPurge}
+                        loading={purging}
+                        disabled={!isAdmin || purging || loading || !retentionDays}
+                        size="sm"
+                      >
+                        Run purge now
+                      </Button>
+                    </Group>
+
+                    <Text size="sm" c="dimmed">
+                      Uses <Code>POST /workspaces/:id/policy/purge</Code>. Requires retention days.
+                    </Text>
+
+                    {purgeResult ? (
+                      <GlassCard p="md">
+                        <Stack gap={6}>
+                          <Text fw={700}>Purge result</Text>
+                          <Text size="sm">
+                            cutoff: <Code>{purgeResult.cutoff}</Code>
+                          </Text>
+                          <Text size="sm">
+                            deleted_evidence: <Code>{purgeResult.deleted_evidence}</Code> · deleted_logs:{" "}
+                            <Code>{purgeResult.deleted_logs}</Code>
+                          </Text>
+                        </Stack>
+                      </GlassCard>
+                    ) : null}
+                  </Stack>
+
+                  <Divider />
+
+                  <Stack gap="xs">
+                    <Text fw={700}>Normalized rules (preview)</Text>
+                    <Text size="sm" c="dimmed">
+                      This is what will be sent to the backend on Save.
+                    </Text>
+                    <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(effectiveJson)}</pre>
+
+                    {policy ? (
+                      <Text size="xs" c="dimmed">
+                        Loaded for workspace: <Code>{wid}</Code>
+                      </Text>
+                    ) : null}
+                  </Stack>
+                </Stack>
+              </GlassCard>
+            </Collapse>
           </Stack>
         </GlassSection>
       </Stack>
