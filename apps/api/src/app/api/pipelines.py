@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import require_user, require_workspace_access, require_workspace_role_min
 from app.core.config import settings
 from app.core.citations import (
-    auto_inject_citation_anchors,  # Commit 5+
+    auto_inject_citation_anchors,  # Commit 5+/20D
     body_has_inline_citations,
     build_citation_pack,
     build_inline_citation_patch,
@@ -531,7 +531,6 @@ Evidence Pack (cite as [n]):
 """.strip()
 
         user_prompt = "\n\n".join([base_user_prompt.strip(), citation_rules, evidence_pack])
-
         md = llm_generate_markdown(system_prompt=system_prompt, user_prompt=user_prompt)
 
         if not md.lstrip().startswith("#"):
@@ -559,7 +558,7 @@ Evidence Pack (cite as [n]):
             patch = build_inline_citation_patch(normalized)
             md = md.rstrip() + "\n\n" + patch + "\n"
 
-        # Commit 5+: ensure density passes deterministically (BODY only)
+        # Commit 20D: last-mile density injection (BODY only) after Sources + inline patch handling
         if len(evidence_items) > 0:
             md = auto_inject_citation_anchors(
                 artifact_type=artifact_type,
@@ -878,7 +877,6 @@ def _create_completed_run_with_artifact_and_step_retrieval(
 
     md = _inject_confidence_section(md, evidence_count=len(ev_items))
 
-    # V1 enforcement for pipeline step run (only when evidence exists)
     try:
         rep = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
         if len(ev_items) > 0:
@@ -968,7 +966,9 @@ def _regenerate_run_with_evidence_internal(db: Session, run_uuid: uuid.UUID) -> 
         from app.core.prompts import build_system_prompt, build_user_prompt
 
         system_prompt = build_system_prompt()
-        base_user_prompt = build_user_prompt(agent_id=r.agent_id, input_payload=r.input_payload, evidence_text=evidence_text)
+        base_user_prompt = build_user_prompt(
+            agent_id=r.agent_id, input_payload=r.input_payload, evidence_text=evidence_text
+        )
 
         citation_rules = """
 You MUST ground claims in the Evidence Pack below.
@@ -1019,7 +1019,7 @@ Evidence Pack (cite as [n]):
             patch = build_inline_citation_patch(normalized)
             md = md.rstrip() + "\n\n" + patch + "\n"
 
-        # Step 2.3: deterministic density top-up for LLM path
+        # Commit 20D: last-mile density injection for internal regen
         md = auto_inject_citation_anchors(
             artifact_type=artifact_type,
             md=md,
@@ -1038,7 +1038,6 @@ Evidence Pack (cite as [n]):
             md = md.rstrip() + "\n\n" + build_inline_citation_patch(normalized) + "\n"
         md = _inject_confidence_section(md, evidence_count=len(ev_items))
 
-    # V1 enforcement for internal regen
     try:
         rep = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
         md = md.rstrip() + "\n\n" + render_citation_compliance_md(rep) + "\n"
@@ -1080,7 +1079,9 @@ Evidence Pack (cite as [n]):
     try:
         rep2 = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=len(ev_items))
         if not rep2.get("ok"):
-            r.output_summary += f" ⚠️ Citation check failed (confidence={float(rep2.get('confidence_score') or 0.0):.2f})."
+            r.output_summary += (
+                f" ⚠️ Citation check failed (confidence={float(rep2.get('confidence_score') or 0.0):.2f})."
+            )
     except Exception:
         pass
 
@@ -1403,7 +1404,9 @@ def run_next_step(
         db.commit()
 
     try:
-        created_run_id = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step, auto_regen=auto_regen)
+        created_run_id = _execute_one_step(
+            db=db, ws=ws, user=user, pr=pr, steps=steps, step=step, auto_regen=auto_regen
+        )
     except Exception as e:
         _mark_step_failed(db, pr, step, error=str(e))
         steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
@@ -1473,7 +1476,9 @@ def execute_all_steps(
             continue
 
         try:
-            rid = _execute_one_step(db=db, ws=ws, user=user, pr=pr, steps=steps, step=step, auto_regen=auto_regen)
+            rid = _execute_one_step(
+                db=db, ws=ws, user=user, pr=pr, steps=steps, step=step, auto_regen=auto_regen
+            )
             created_run_ids.append(rid)
         except Exception as e:
             ok = False

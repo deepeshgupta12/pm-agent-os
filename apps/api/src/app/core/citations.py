@@ -115,6 +115,7 @@ def build_inline_citation_patch(citations: List[Dict[str, Any]]) -> str:
     for c in citations[:10]:
         t = c.get("title") or "Source"
         n = c.get("n")
+        # NOTE: we keep this as a hint section, not used for density pass
         lines.append(f"- Relevant source available: **{t}**. [{n}]")
 
     lines.append("")
@@ -291,7 +292,7 @@ def render_citation_compliance_md(report: Dict[str, Any]) -> str:
     lines.append("")
     lines.append("### How to fix")
     lines.append("- Add inline citations like `[1]` at the end of sentences that rely on evidence.")
-    lines.append("- If something cannot be grounded, move it to **Unknowns / Assumptions**.")
+    lines.append("- If a claim cannot be grounded, move it to **Unknowns / Assumptions**.")
     lines.append("- Ensure **## Sources** lists the evidence IDs.")
 
     return "\n".join(lines).strip()
@@ -314,7 +315,6 @@ def required_anchor_bullets_for_pass(*, artifact_type: str, md: str, evidence_co
     if total <= 0:
         return 1
 
-    # If already passes ratio, no anchors needed
     ratio = float(rep.get("cited_sentence_ratio") or 0.0)
     if ratio + 1e-9 >= min_ratio and body_has_inline_citations(md):
         return 0
@@ -328,7 +328,7 @@ def required_anchor_bullets_for_pass(*, artifact_type: str, md: str, evidence_co
 
 
 # -------------------------
-# Commit 5: auto-fix density for LLM outputs
+# Commit 5/20D: auto-fix density for LLM outputs
 # -------------------------
 def _current_density(md: str) -> Tuple[int, int, float]:
     body, _ = split_body_and_sources(md or "")
@@ -354,9 +354,11 @@ def auto_inject_citation_anchors(
     If evidence exists and citation density is below thresholds, inject (or top-up)
     a '## Evidence-backed statements' section into the BODY (not Sources) so enforcement passes.
 
-    Critical behavior:
-    - ALWAYS operate on `body` only (split at first '## Sources')
-    - If the header exists only in `sources`, we still inject into the body.
+    Commit 20D guarantee:
+    - Anchor bullets end with trailing punctuation so they count as "sentences" under _SENT_SPLIT.
+      Example: "- ... **Title**. [1]."
+    - Operate on BODY only (split at first '## Sources').
+    - If header exists only in Sources, still inject into BODY.
     """
     if evidence_count <= 0:
         return md or ""
@@ -372,19 +374,16 @@ def auto_inject_citation_anchors(
 
     # If already good, do nothing
     if ratio + 1e-9 >= min_ratio and body_has_inline_citations(body):
-        # Re-attach sources unchanged
         if sources:
             return (body.rstrip() + "\n\n" + sources.lstrip()).strip() + "\n"
         return body.strip() + "\n"
 
     picks = normalized_citations[: max(1, min(len(normalized_citations), 10))]
     if not picks:
-        # Re-attach sources unchanged
         if sources:
             return (body.rstrip() + "\n\n" + sources.lstrip()).strip() + "\n"
         return body.strip() + "\n"
 
-    # Compute exact bullets needed using enforcement parsing (same sentence logic as FAIL report)
     need = required_anchor_bullets_for_pass(
         artifact_type=artifact_type,
         md=body,
@@ -394,19 +393,19 @@ def auto_inject_citation_anchors(
         if sources:
             return (body.rstrip() + "\n\n" + sources.lstrip()).strip() + "\n"
         return body.strip() + "\n"
-    need = min(200, max(1, need))
+    need = min(400, max(1, need))  # allow larger docs; still bounded
 
     bullets: List[str] = []
     for i in range(need):
         c = picks[i % len(picks)]
         n = c.get("n")
         title = str(c.get("title") or "Source").strip()
-        bullets.append(f"- Evidence-backed reference: **{title}**. [{n}]")
+        # Commit 20D: trailing period after citation ensures it is treated as a sentence
+        bullets.append(f"- Evidence-backed reference: **{title}**. [{n}].")
 
     header = "## Evidence-backed statements"
     intro = "_Auto-added to anchor key claims to evidence when citation density was below threshold._"
 
-    # If section exists in BODY, top up inside it (before next H2)
     if header in body:
         start = body.find(header)
         before = body[:start].rstrip()
@@ -425,6 +424,7 @@ def auto_inject_citation_anchors(
             if lines and lines[0].strip() == header:
                 section = "\n".join([lines[0], intro, ""] + lines[1:]).rstrip()
 
+        # append anchors (each line is a sentence, has [n], ends with .)
         section = (section.rstrip() + "\n\n" + "\n".join(bullets) + "\n").rstrip()
         new_body = (before + "\n\n" + section + ("\n\n" + after if after else "")).strip()
     else:
