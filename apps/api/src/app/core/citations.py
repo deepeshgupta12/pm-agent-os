@@ -1,3 +1,4 @@
+# apps/api/src/app/core/citations.py
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
@@ -106,7 +107,9 @@ def build_inline_citation_patch(citations: List[Dict[str, Any]]) -> str:
 
     lines: List[str] = []
     lines.append("## Evidence-backed notes")
-    lines.append("_Inline citations were missing in the draft body. This section was auto-added to anchor key statements to sources._")
+    lines.append(
+        "_Inline citations were missing in the draft body. This section was auto-added to anchor key statements to sources._"
+    )
     lines.append("")
 
     for c in citations[:10]:
@@ -294,6 +297,36 @@ def render_citation_compliance_md(report: Dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
+def required_anchor_bullets_for_pass(*, artifact_type: str, md: str, evidence_count: int) -> int:
+    """
+    Compute the minimum number of additional cited bullet 'sentences' needed so that
+    citation_enforcement_report(...) would pass the cited sentence ratio threshold.
+    """
+    rep = citation_enforcement_report(artifact_type=artifact_type, md=md, evidence_count=evidence_count)
+    thresholds = rep.get("thresholds") or {}
+    min_ratio = float(thresholds.get("min_cited_sentence_ratio", 0.25))
+
+    total = int(rep.get("total_sentences") or 0)
+    cited = int(rep.get("cited_sentences") or 0)
+
+    if evidence_count <= 0:
+        return 0
+    if total <= 0:
+        return 1
+
+    # If already passes ratio, no anchors needed
+    ratio = float(rep.get("cited_sentence_ratio") or 0.0)
+    if ratio + 1e-9 >= min_ratio and body_has_inline_citations(md):
+        return 0
+
+    # Need x such that (cited + x) / (total + x) >= min_ratio
+    need = 1
+    if min_ratio < 1.0:
+        rhs = (min_ratio * float(total)) - float(cited)
+        need = int(max(1.0, (rhs / (1.0 - min_ratio)) + 1.0))
+    return max(1, need)
+
+
 # -------------------------
 # Commit 5: auto-fix density for LLM outputs
 # -------------------------
@@ -321,39 +354,48 @@ def auto_inject_citation_anchors(
     If evidence exists and citation density is below thresholds, inject (or top-up)
     a '## Evidence-backed statements' section into the BODY (not Sources) so enforcement passes.
 
-    Idempotent-ish behavior:
-    - If section missing: insert it.
-    - If section exists but density still below threshold: append additional bullets within that section.
+    Critical behavior:
+    - ALWAYS operate on `body` only (split at first '## Sources')
+    - If the header exists only in `sources`, we still inject into the body.
     """
     if evidence_count <= 0:
         return md or ""
 
+    body, sources = split_body_and_sources(md or "")
+
     thresholds = _artifact_thresholds(artifact_type)
     min_ratio = float(thresholds.get("min_cited_sentence_ratio", 0.25))
 
-    cited, total, ratio = _current_density(md or "")
+    cited, total, ratio = _current_density(body or "")
     if total == 0:
         ratio = 0.0
 
     # If already good, do nothing
-    if ratio + 1e-9 >= min_ratio and body_has_inline_citations(md):
-        return md or ""
+    if ratio + 1e-9 >= min_ratio and body_has_inline_citations(body):
+        # Re-attach sources unchanged
+        if sources:
+            return (body.rstrip() + "\n\n" + sources.lstrip()).strip() + "\n"
+        return body.strip() + "\n"
 
     picks = normalized_citations[: max(1, min(len(normalized_citations), 10))]
     if not picks:
-        return md or ""
+        # Re-attach sources unchanged
+        if sources:
+            return (body.rstrip() + "\n\n" + sources.lstrip()).strip() + "\n"
+        return body.strip() + "\n"
 
-    # Need x such that (cited + x) / (total + x) >= min_ratio
-    need = 1
-    if min_ratio < 1.0:
-        rhs = (min_ratio * float(total)) - float(cited)
-        need = int(max(1.0, (rhs / (1.0 - min_ratio)) + 1.0))
+    # Compute exact bullets needed using enforcement parsing (same sentence logic as FAIL report)
+    need = required_anchor_bullets_for_pass(
+        artifact_type=artifact_type,
+        md=body,
+        evidence_count=evidence_count,
+    )
+    if need <= 0:
+        if sources:
+            return (body.rstrip() + "\n\n" + sources.lstrip()).strip() + "\n"
+        return body.strip() + "\n"
+    need = min(200, max(1, need))
 
-    # Safe bound (increase as needed; 200 is plenty for big docs without exploding)
-    max_need = 200
-    need = min(max_need, max(1, need))
-
-    # Build bullets; each bullet line becomes a "sentence" for the splitter.
     bullets: List[str] = []
     for i in range(need):
         c = picks[i % len(picks)]
@@ -361,19 +403,15 @@ def auto_inject_citation_anchors(
         title = str(c.get("title") or "Source").strip()
         bullets.append(f"- Evidence-backed reference: **{title}**. [{n}]")
 
-    body, sources = split_body_and_sources(md or "")
-
     header = "## Evidence-backed statements"
     intro = "_Auto-added to anchor key claims to evidence when citation density was below threshold._"
 
-    # If section already exists, append bullets inside that section (before next ## heading or before Sources)
+    # If section exists in BODY, top up inside it (before next H2)
     if header in body:
-        # Find section start
         start = body.find(header)
         before = body[:start].rstrip()
         section_and_after = body[start:].lstrip()
 
-        # Find next H2 after this section (excluding the header itself)
         next_h2 = section_and_after.find("\n## ", len(header) + 1)
         if next_h2 == -1:
             section = section_and_after.rstrip()
@@ -382,25 +420,17 @@ def auto_inject_citation_anchors(
             section = section_and_after[:next_h2].rstrip()
             after = section_and_after[next_h2:].lstrip()
 
-        # Ensure intro line exists (keep stable formatting)
         if intro not in section:
-            # Insert intro right after header
             lines = section.splitlines()
             if lines and lines[0].strip() == header:
                 section = "\n".join([lines[0], intro, ""] + lines[1:]).rstrip()
 
-        # Append bullets at end of this section
         section = (section.rstrip() + "\n\n" + "\n".join(bullets) + "\n").rstrip()
-
         new_body = (before + "\n\n" + section + ("\n\n" + after if after else "")).strip()
-        if sources:
-            return (new_body + "\n\n" + sources.lstrip()).strip() + "\n"
-        return new_body.strip() + "\n"
+    else:
+        injection = "\n".join([header, intro, "", *bullets, ""]).strip()
+        new_body = (body.rstrip() + "\n\n" + injection).strip()
 
-    # Else: insert fresh section at end of BODY
-    injection = "\n".join([header, intro, "", *bullets, ""]).strip()
-
-    new_body = (body.rstrip() + "\n\n" + injection).strip()
     if sources:
         return (new_body + "\n\n" + sources.lstrip()).strip() + "\n"
     return new_body.strip() + "\n"
