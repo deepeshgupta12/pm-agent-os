@@ -90,7 +90,7 @@ def output_has_any_citations(md: str) -> bool:
 def split_body_and_sources(md: str) -> Tuple[str, str]:
     if not md:
         return "", ""
-    idx = md.find("## Sources")
+    idx = md.rfind("## Sources")
     if idx == -1:
         return md, ""
     return md[:idx].rstrip(), md[idx:].lstrip()
