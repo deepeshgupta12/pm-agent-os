@@ -33,6 +33,9 @@ import SettingsHomePage from "./pages/SettingsHomePage";
 // Commit 17: Guided mode
 import WorkspaceGuidedPage from "./pages/WorkspaceGuidedPage";
 
+// Commit 19: Agent Library
+import AgentsPage from "./pages/AgentsPage";
+
 export default function App() {
   return (
     <Routes>
@@ -47,6 +50,7 @@ export default function App() {
 
         {/* Global IA */}
         <Route path="/workspaces" element={<WorkspacesPage />} />
+        <Route path="/agents" element={<AgentsPage />} />
         <Route path="/runs" element={<RunsPage />} />
         <Route path="/outputs" element={<OutputsPage />} />
         <Route path="/approvals" element={<ApprovalsPage />} />
