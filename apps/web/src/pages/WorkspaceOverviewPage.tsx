@@ -20,6 +20,30 @@ function shortId(id: string): string {
   return id.length <= 10 ? id : `${id.slice(0, 8)}…`;
 }
 
+function safeJson(v: any): string {
+  try {
+    return JSON.stringify(v ?? {}, null, 2);
+  } catch {
+    return "{}";
+  }
+}
+
+function downloadText(filename: string, content: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function stamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
 export default function WorkspaceOverviewPage() {
   const { workspaceId } = useParams();
   const wid = workspaceId || "";
@@ -87,6 +111,22 @@ export default function WorkspaceOverviewPage() {
     setLoading(false);
   }
 
+  function exportOverviewJson() {
+    const payload = {
+      workspace_id: wid,
+      exported_at: new Date().toISOString(),
+      workspace: ws ?? null,
+      my_role: myRole ?? null,
+      counts: counts ?? {},
+      recent_runs: runs ?? [],
+      notes: {
+        runs_list_is_truncated: true,
+        runs_list_truncation_limit: 5,
+      },
+    };
+    downloadText(`workspace-overview_${wid}_${stamp()}.json`, safeJson(payload), "application/json");
+  }
+
   useEffect(() => {
     void loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -99,6 +139,9 @@ export default function WorkspaceOverviewPage() {
       </Button>
       <Button component={Link} to={`/run-builder/${wid}`} size="sm">
         Create run
+      </Button>
+      <Button variant="light" onClick={exportOverviewJson} disabled={!ws}>
+        Export (JSON)
       </Button>
       <Button variant="light" onClick={loadAll} loading={loading} size="sm">
         Refresh
@@ -139,9 +182,14 @@ export default function WorkspaceOverviewPage() {
             <Text size="sm" c="dimmed">
               Use Guided mode for the main workflow. Overview is for shortcuts and context.
             </Text>
-            <Button variant="light" size="xs" onClick={() => setAdvancedOpen((x) => !x)}>
-              {advancedOpen ? "Hide advanced" : "Show advanced"}
-            </Button>
+            <Group>
+              <Button variant="light" size="xs" onClick={exportOverviewJson} disabled={!ws}>
+                Export (JSON)
+              </Button>
+              <Button variant="light" size="xs" onClick={() => setAdvancedOpen((x) => !x)}>
+                {advancedOpen ? "Hide advanced" : "Show advanced"}
+              </Button>
+            </Group>
           </Group>
 
           <Collapse in={advancedOpen}>

@@ -26,6 +26,46 @@ function safeJson(v: any): string {
   }
 }
 
+function downloadText(filename: string, content: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function csvEscape(v: any): string {
+  const s = String(v ?? "");
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function eventsToCsv(items: GovernanceEventOut[]): string {
+  const header = ["id", "workspace_id", "user_id", "action", "decision", "reason", "created_at", "meta_json"].join(",");
+  const rows = (items || []).map((e) =>
+    [
+      csvEscape(e.id),
+      csvEscape(e.workspace_id),
+      csvEscape(e.user_id ?? ""),
+      csvEscape(e.action),
+      csvEscape(e.decision),
+      csvEscape(e.reason),
+      csvEscape(e.created_at),
+      csvEscape(safeJson(e.meta)),
+    ].join(",")
+  );
+  return [header, ...rows].join("\n");
+}
+
+function stamp(): string {
+  // safe filename stamp
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
 export default function GovernancePage() {
   const { workspaceId } = useParams();
   const wid = workspaceId || "";
@@ -114,6 +154,35 @@ export default function GovernancePage() {
     setDecision("all");
   }
 
+  function exportGovernanceJson() {
+    const payload = {
+      workspace_id: wid,
+      exported_at: new Date().toISOString(),
+      policy_effective: gov?.policy_effective ?? {},
+      rbac_effective: gov?.rbac_effective ?? {},
+    };
+    downloadText(`governance-effective_${wid}_${stamp()}.json`, safeJson(payload), "application/json");
+  }
+
+  function exportEventsJson() {
+    const payload = {
+      workspace_id: wid,
+      exported_at: new Date().toISOString(),
+      filters: {
+        limit: limitNum,
+        decision: decision === "all" ? null : decision,
+        action_prefix: actionPrefix.trim() ? actionPrefix.trim() : null,
+      },
+      items: events || [],
+    };
+    downloadText(`governance-events_${wid}_${stamp()}.json`, safeJson(payload), "application/json");
+  }
+
+  function exportEventsCsv() {
+    const csv = eventsToCsv(events || []);
+    downloadText(`governance-events_${wid}_${stamp()}.csv`, csv, "text/csv;charset=utf-8");
+  }
+
   useEffect(() => {
     if (!wid) return;
     void loadAll();
@@ -127,6 +196,15 @@ export default function GovernancePage() {
         <Group>
           <Button component={Link} to={`/workspaces/${wid}`} variant="light">
             Back
+          </Button>
+          <Button variant="light" onClick={exportGovernanceJson} disabled={!gov}>
+            Export effective (JSON)
+          </Button>
+          <Button variant="light" onClick={exportEventsCsv} disabled={!events || events.length === 0}>
+            Export events (CSV)
+          </Button>
+          <Button variant="light" onClick={exportEventsJson} disabled={!events || events.length === 0}>
+            Export events (JSON)
           </Button>
           <Button onClick={loadAll} loading={govLoading || eventsLoading}>
             Refresh
@@ -147,9 +225,14 @@ export default function GovernancePage() {
               <Text fw={700}>Effective Governance</Text>
               <Badge variant="light">policy + rbac</Badge>
             </Group>
-            <Button variant="light" onClick={loadGovernance} loading={govLoading}>
-              Refresh
-            </Button>
+            <Group>
+              <Button variant="light" onClick={exportGovernanceJson} disabled={!gov}>
+                Export (JSON)
+              </Button>
+              <Button variant="light" onClick={loadGovernance} loading={govLoading}>
+                Refresh
+              </Button>
+            </Group>
           </Group>
 
           {!gov ? (
@@ -175,9 +258,17 @@ export default function GovernancePage() {
               <Text fw={700}>Governance Events</Text>
               <Badge variant="light">audit trail</Badge>
             </Group>
-            <Button variant="light" onClick={loadEvents} loading={eventsLoading}>
-              Refresh
-            </Button>
+            <Group>
+              <Button variant="light" onClick={exportEventsCsv} disabled={!events || events.length === 0}>
+                Export (CSV)
+              </Button>
+              <Button variant="light" onClick={exportEventsJson} disabled={!events || events.length === 0}>
+                Export (JSON)
+              </Button>
+              <Button variant="light" onClick={loadEvents} loading={eventsLoading}>
+                Refresh
+              </Button>
+            </Group>
           </Group>
 
           <Text size="sm" c="dimmed">
@@ -231,8 +322,8 @@ export default function GovernancePage() {
               <Stack gap="xs">
                 <Text c="dimmed">No events found.</Text>
                 <Text size="sm" c="dimmed">
-                  Tip: policy events are generated when you save/publish/run agents with retrieval source types. RBAC events
-                  are generated when you attempt restricted actions (create/publish/archive/run).
+                  Tip: policy events are generated when you save/publish/run agents with retrieval source types. RBAC events are
+                  generated when you attempt restricted actions (create/publish/archive/run).
                 </Text>
               </Stack>
             </Card>
