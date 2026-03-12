@@ -282,6 +282,15 @@ export type ActionItem = {
   approvals_approved_count?: number;
   approvals_rejected_count?: number;
   my_decision?: "approved" | "rejected" | null;
+
+  // Commit 21: execution lifecycle (for approval-gated write actions like docs_publish)
+  execution_status?: "not_started" | "running" | "succeeded" | "failed" | string;
+  execution_attempts?: number;
+  execution_started_at?: string | null;
+  execution_finished_at?: string | null;
+  execution_last_error?: string | null;
+  execution_idempotency_key?: string | null;
+  execution_result_json?: Record<string, unknown>;
 };
 
 export type ActionItemDecision = {

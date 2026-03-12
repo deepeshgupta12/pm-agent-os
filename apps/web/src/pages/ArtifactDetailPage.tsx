@@ -15,6 +15,7 @@ import {
   Badge,
   Select,
   Anchor,
+  Code,
 } from "@mantine/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -28,6 +29,7 @@ import type {
   WorkspaceMember,
   ArtifactComment,
   ArtifactAssignIn,
+  ActionItem,
 } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL as string;
@@ -161,6 +163,12 @@ export default function ArtifactDetailPage() {
 
   const [unpublishing, setUnpublishing] = useState(false);
 
+  // Commit 21: docs_publish (approval-gated) action creator
+  const [docsPublishDocId, setDocsPublishDocId] = useState("");
+  const [docsPublishCreating, setDocsPublishCreating] = useState(false);
+  const [docsPublishMsg, setDocsPublishMsg] = useState<string | null>(null);
+  const [docsPublishActionId, setDocsPublishActionId] = useState<string | null>(null);
+
   // Role (derived)
   const [myRole, setMyRole] = useState<WorkspaceRole | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
@@ -274,6 +282,8 @@ export default function ArtifactDetailPage() {
     setErr(null);
     setDiffText("");
     setPublishRequestMsg(null);
+    setDocsPublishMsg(null);
+    setDocsPublishActionId(null);
 
     const res = await apiFetch<Artifact>(`/artifacts/${aid}`, { method: "GET" });
     if (!res.ok) {
@@ -449,9 +459,7 @@ export default function ArtifactDetailPage() {
       return;
     }
 
-    setPublishRequestMsg(
-      `Publish requested. Action created: ${res.data.action_id}. Approve it in Action Center to finalize.`
-    );
+    setPublishRequestMsg(`Publish requested. Action created: ${res.data.action_id}. Approve it in Action Center to finalize.`);
 
     await load();
   }
@@ -603,6 +611,53 @@ export default function ArtifactDetailPage() {
     return `/workspaces/${workspaceId}/actions`;
   }, [workspaceId]);
 
+  // Commit 21: create docs_publish action (approval-gated write)
+  async function createDocsPublishAction() {
+    if (!canWrite) return;
+    if (!workspaceId) {
+      setErr("Workspace not resolved yet. Reload the page and try again.");
+      return;
+    }
+    if (!art) return;
+
+    const docId = docsPublishDocId.trim();
+    if (!docId) {
+      setErr("Enter a Google Doc ID to publish into.");
+      return;
+    }
+
+    setDocsPublishCreating(true);
+    setErr(null);
+    setDocsPublishMsg(null);
+    setDocsPublishActionId(null);
+
+    const res = await apiFetch<ActionItem>(`/workspaces/${workspaceId}/actions`, {
+      method: "POST",
+      body: JSON.stringify({
+        type: "docs_publish",
+        title: `Publish to Google Docs: ${art.title}`,
+        payload_json: {
+          artifact_id: art.id,
+          run_id: art.run_id,
+          doc_id: docId,
+          mode: "replace",
+          format: "md",
+        },
+        target_ref: `artifact:${art.id}`,
+      }),
+    });
+
+    setDocsPublishCreating(false);
+
+    if (!res.ok) {
+      setErr(`Create docs_publish failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setDocsPublishActionId(res.data?.id || null);
+    setDocsPublishMsg(`Action created: ${res.data?.id}. Approve it (admin) in Action Center, then click Execute to publish.`);
+  }
+
   const mdComponents = useMemo(() => {
     return {
       h2: ({ children }: HeadingProps) => {
@@ -672,6 +727,28 @@ export default function ArtifactDetailPage() {
         </Card>
       ) : null}
 
+      {docsPublishMsg ? (
+        <Card withBorder>
+          <Stack gap={6}>
+            <Text>{docsPublishMsg}</Text>
+            {docsPublishActionId ? (
+              <Text size="sm">
+                action_id: <Code>{docsPublishActionId}</Code>
+              </Text>
+            ) : null}
+            {actionCenterHref ? (
+              <Text size="sm" c="dimmed">
+                Open{" "}
+                <Anchor component={Link} to={actionCenterHref}>
+                  Action Center
+                </Anchor>{" "}
+                → filter by type <Code>docs_publish</Code> → approve → execute.
+              </Text>
+            ) : null}
+          </Stack>
+        </Card>
+      ) : null}
+
       {art ? (
         <Card withBorder>
           <Stack gap="sm">
@@ -696,7 +773,12 @@ export default function ArtifactDetailPage() {
               <Button onClick={saveInPlace} loading={saving} disabled={isFinal || isInReview || !canWrite}>
                 Save (same version)
               </Button>
-              <Button variant="light" onClick={saveNewVersion} loading={newVerLoading} disabled={isFinal || isInReview || !canWrite}>
+              <Button
+                variant="light"
+                onClick={saveNewVersion}
+                loading={newVerLoading}
+                disabled={isFinal || isInReview || !canWrite}
+              >
                 Save as new version
               </Button>
               <Button variant="default" onClick={copyMarkdown}>
@@ -749,6 +831,48 @@ export default function ArtifactDetailPage() {
               />
               <TextInput label="Status" value={status} disabled />
             </Group>
+
+            {/* Commit 21: Google Docs publish (approval-gated write) */}
+            <Card withBorder>
+              <Stack gap="sm">
+                <Group justify="space-between" align="center">
+                  <Text fw={700}>Publish to Google Docs (docs_publish)</Text>
+                  <Badge variant="light">approval-gated</Badge>
+                </Group>
+
+                <Text size="sm" c="dimmed">
+                  Creates an Action Center item that, once approved, can be executed to write this artifact into an existing Google Doc.
+                </Text>
+
+                <Group align="end">
+                  <TextInput
+                    label="Google Doc ID"
+                    value={docsPublishDocId}
+                    onChange={(e) => setDocsPublishDocId(e.currentTarget.value)}
+                    placeholder="e.g. 1VLs9TK15aySWpKLnnv62K37xrpT55ZvxnleE-NHaYo8"
+                    style={{ flex: 1 }}
+                    disabled={!canWrite}
+                  />
+                  <Button
+                    onClick={createDocsPublishAction}
+                    loading={docsPublishCreating}
+                    disabled={!canWrite || !docsPublishDocId.trim()}
+                  >
+                    Create publish action
+                  </Button>
+                </Group>
+
+                {!canWrite ? (
+                  <Text size="sm" c="dimmed">
+                    Viewer role cannot create docs_publish actions.
+                  </Text>
+                ) : null}
+
+                <Text size="xs" c="dimmed">
+                  Tip: Use a real Google Doc ID (not a folder ID). Approve + execute in Action Center.
+                </Text>
+              </Stack>
+            </Card>
 
             {/* Assignment */}
             <Card withBorder>
@@ -840,7 +964,11 @@ export default function ArtifactDetailPage() {
                 />
 
                 <Group>
-                  <Button onClick={postComment} loading={postingComment} disabled={!canWrite || isFinal || !newComment.trim()}>
+                  <Button
+                    onClick={postComment}
+                    loading={postingComment}
+                    disabled={!canWrite || isFinal || !newComment.trim()}
+                  >
                     Post comment
                   </Button>
                   {!canWrite ? <Text size="sm" c="dimmed">Viewer role cannot comment.</Text> : null}
@@ -938,9 +1066,7 @@ export default function ArtifactDetailPage() {
                   </Card>
                 ) : (
                   <Text size="sm" c="dimmed">
-                    {siblings.length === 0
-                      ? "Create another version to enable diff."
-                      : "Pick a version and click “Show Diff”."}
+                    {siblings.length === 0 ? "Create another version to enable diff." : "Pick a version and click “Show Diff”."}
                   </Text>
                 )}
               </Stack>

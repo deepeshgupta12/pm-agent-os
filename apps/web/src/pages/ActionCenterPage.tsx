@@ -13,6 +13,7 @@ import {
   Title,
   Divider,
   Code,
+  Anchor,
 } from "@mantine/core";
 import { apiFetch } from "../apiClient";
 import type { ActionItem, ActionItemDecision, WorkspaceRole } from "../types";
@@ -36,6 +37,11 @@ function stableJsonStringify(v: any): string {
   } catch {
     return "{}";
   }
+}
+
+function safeGetObj(v: any): Record<string, any> {
+  if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, any>;
+  return {};
 }
 
 export default function ActionCenterPage() {
@@ -78,6 +84,9 @@ export default function ActionCenterPage() {
   // decisions drawer (per action)
   const [decisionsByAction, setDecisionsByAction] = useState<Record<string, ActionItemDecision[]>>({});
   const [decisionsLoading, setDecisionsLoading] = useState<Record<string, boolean>>({});
+
+  // execution (per action)
+  const [executingByAction, setExecutingByAction] = useState<Record<string, boolean>>({});
 
   async function loadRole() {
     if (!wid) return;
@@ -199,6 +208,29 @@ export default function ActionCenterPage() {
     setDecisionsByAction((m) => ({ ...m, [actionId]: res.data || [] }));
   }
 
+  async function executeAction(actionId: string) {
+    if (!isAdmin) {
+      setErr("Only admin can execute approval-gated write actions.");
+      return;
+    }
+
+    setErr(null);
+    setInfo(null);
+    setExecutingByAction((m) => ({ ...m, [actionId]: true }));
+
+    const res = await apiFetch<ActionItem>(`/actions/${actionId}/execute`, { method: "POST" });
+
+    setExecutingByAction((m) => ({ ...m, [actionId]: false }));
+
+    if (!res.ok) {
+      setErr(`Execute failed: ${res.status} ${res.error}`);
+      return;
+    }
+
+    setInfo(`Executed action: ${actionId}`);
+    await loadItems();
+  }
+
   const typeOptions = useMemo(() => {
     const uniq = Array.from(new Set(items.map((x) => x.type))).sort();
     return [{ value: "", label: "All types" }, ...uniq.map((t) => ({ value: t, label: t }))];
@@ -214,11 +246,6 @@ export default function ActionCenterPage() {
     void loadItems();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, type]);
-
-  const isReviewer = useMemo(() => {
-    // Server is source of truth; UI shows buttons for member/admin only.
-    return role === "admin" || role === "member";
-  }, [role]);
 
   return (
     <Stack gap="md">
@@ -275,11 +302,24 @@ export default function ActionCenterPage() {
                 const rej = a.approvals_rejected_count ?? 0;
                 const mine = a.my_decision ?? null;
 
-                const showDecide = a.status === "queued" && isReviewer;
+                // reviewer = admin by default policy
+                const showDecide = a.status === "queued" && isAdmin;
                 const alreadyDecided = !!mine;
 
                 const decisions = decisionsByAction[a.id] || [];
                 const loadingDec = !!decisionsLoading[a.id];
+
+                // execution UI
+                const execStatus = a.execution_status ?? "not_started";
+                const execAttempts = a.execution_attempts ?? 0;
+                const execErr = a.execution_last_error ?? null;
+                const execResult = safeGetObj(a.execution_result_json);
+                const webViewLink = typeof execResult.webViewLink === "string" ? execResult.webViewLink : null;
+
+                const canExecute =
+                  isAdmin && a.status === "approved" && execStatus !== "succeeded" && execStatus !== "running";
+
+                const executing = !!executingByAction[a.id];
 
                 return (
                   <Card key={a.id} withBorder>
@@ -296,6 +336,11 @@ export default function ActionCenterPage() {
                             </Badge>
 
                             {mine ? <Badge variant="outline">my_decision: {mine}</Badge> : null}
+
+                            {/* execution badge */}
+                            {a.type === "docs_publish" || a.type === "artifact_publish" ? (
+                              <Badge variant="light">exec: {execStatus}</Badge>
+                            ) : null}
                           </Group>
 
                           <Text fw={600}>{a.title}</Text>
@@ -312,26 +357,14 @@ export default function ActionCenterPage() {
                             <Button size="xs" color="red" onClick={() => decide(a.id, "rejected")} disabled={alreadyDecided}>
                               Reject
                             </Button>
-                            <Button
-                              size="xs"
-                              variant="light"
-                              color="red"
-                              onClick={() => cancel(a.id)}
-                              disabled={!isAdmin}
-                            >
+                            <Button size="xs" variant="light" color="red" onClick={() => cancel(a.id)}>
                               Cancel
                             </Button>
                           </Group>
                         ) : (
                           <Group>
                             {a.status === "queued" ? (
-                              <Button
-                                size="xs"
-                                variant="light"
-                                color="red"
-                                onClick={() => cancel(a.id)}
-                                disabled={!isAdmin}
-                              >
+                              <Button size="xs" variant="light" color="red" onClick={() => cancel(a.id)} disabled={!isAdmin}>
                                 Cancel
                               </Button>
                             ) : null}
@@ -347,41 +380,92 @@ export default function ActionCenterPage() {
 
                       {a.decision_comment ? <Text size="sm">decision_comment: {a.decision_comment}</Text> : null}
 
-                      <Group justify="space-between">
-                        <Button
-                          size="xs"
-                          variant="light"
-                          onClick={() => loadDecisions(a.id)}
-                          loading={loadingDec}
-                        >
-                          View decisions
-                        </Button>
+                      <Group justify="space-between" align="center">
+                        <Group gap="sm">
+                          <Button size="xs" variant="light" onClick={() => loadDecisions(a.id)} loading={loadingDec}>
+                            View decisions
+                          </Button>
+
+                          {canExecute ? (
+                            <Button size="xs" onClick={() => executeAction(a.id)} loading={executing}>
+                              Execute
+                            </Button>
+                          ) : null}
+
+                          {execStatus === "running" ? (
+                            <Badge variant="light">executing…</Badge>
+                          ) : null}
+                        </Group>
 
                         <Text size="xs" c="dimmed">
-                          payload_json keys:{" "}
-                          <Code>{Object.keys(a.payload_json || {}).join(", ") || "-"}</Code>
+                          payload_json keys: <Code>{Object.keys(a.payload_json || {}).join(", ") || "-"}</Code>
                         </Text>
                       </Group>
 
                       {decisions.length > 0 ? (
                         <Card withBorder>
-                          <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                            {stableJsonStringify(decisions)}
-                          </pre>
+                          <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{stableJsonStringify(decisions)}</pre>
                         </Card>
                       ) : null}
 
-                      {/* show output pointers if executor ran */}
+                      {/* executor output for decision_log_create */}
                       {a.payload_json && (a.payload_json as any).created_run_id ? (
                         <Text size="sm">
                           created_run_id: <Code>{String((a.payload_json as any).created_run_id)}</Code>{" "}
                           {(a.payload_json as any).created_artifact_id ? (
                             <>
-                              · created_artifact_id:{" "}
-                              <Code>{String((a.payload_json as any).created_artifact_id)}</Code>
+                              · created_artifact_id: <Code>{String((a.payload_json as any).created_artifact_id)}</Code>
                             </>
                           ) : null}
                         </Text>
+                      ) : null}
+
+                      {/* execution details block */}
+                      {(a.type === "docs_publish" || a.type === "artifact_publish") ? (
+                        <Card withBorder>
+                          <Stack gap={6}>
+                            <Group justify="space-between">
+                              <Text fw={600}>Execution</Text>
+                              <Badge variant="light">
+                                attempts: {execAttempts}
+                              </Badge>
+                            </Group>
+
+                            {a.execution_started_at ? (
+                              <Text size="sm" c="dimmed">
+                                started_at: <Code>{a.execution_started_at}</Code>
+                              </Text>
+                            ) : null}
+                            {a.execution_finished_at ? (
+                              <Text size="sm" c="dimmed">
+                                finished_at: <Code>{a.execution_finished_at}</Code>
+                              </Text>
+                            ) : null}
+
+                            {execErr ? (
+                              <Text size="sm" c="red">
+                                last_error: {execErr}
+                              </Text>
+                            ) : null}
+
+                            {webViewLink ? (
+                              <Text size="sm">
+                                Google Doc:{" "}
+                                <Anchor href={webViewLink} target="_blank" rel="noreferrer">
+                                  Open
+                                </Anchor>{" "}
+                                <Text span size="sm" c="dimmed">
+                                  ·
+                                </Text>{" "}
+                                <Code>{webViewLink}</Code>
+                              </Text>
+                            ) : null}
+
+                            <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+                              {stableJsonStringify(execResult)}
+                            </pre>
+                          </Stack>
+                        </Card>
                       ) : null}
                     </Stack>
                   </Card>
@@ -398,7 +482,7 @@ export default function ActionCenterPage() {
         <Stack gap="sm">
           <Text fw={700}>Create action item</Text>
           <Text size="sm" c="dimmed">
-            V2: policy-enforced creators + multi-reviewer decisions + executor on approval (decision_log_create).
+            Use this for testing. For docs_publish, create it from Artifact Studio (recommended).
           </Text>
 
           <Group grow>
@@ -417,7 +501,12 @@ export default function ActionCenterPage() {
             />
           </Group>
 
-          <TextInput label="title" value={createTitle} onChange={(e) => setCreateTitle(e.currentTarget.value)} disabled={!canWrite} />
+          <TextInput
+            label="title"
+            value={createTitle}
+            onChange={(e) => setCreateTitle(e.currentTarget.value)}
+            disabled={!canWrite}
+          />
 
           <Textarea
             label="payload_json"
