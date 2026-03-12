@@ -287,13 +287,14 @@ def create_connector(
     # V1 Policy: internal-only blocks connectors
     _enforce_internal_only(db, ws, user, action="policy.internal_only.connectors.create")
 
+    # Commit 22.1: correct RBAC action + roles for create
     try:
         rbac_assert(
             db,
             ws=ws,
             user=user,
-            action="rbac.connectors.read",
-            allowed_roles=rbac_allowed_connectors_read_roles(ws),
+            action="rbac.connectors.create",
+            allowed_roles=rbac_allowed_connectors_create_roles(ws),
         )
     except ValueError:
         raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
@@ -414,9 +415,9 @@ def trigger_sync(
     require_workspace_role_min(str(ws.id), "member", db, user)
 
     allowed = rbac_allowed_connectors_trigger_sync_roles(
-    ws,
-    connector_type=str(c.type or "").strip().lower(),
-    connector_id=str(c.id),
+        ws,
+        connector_type=str(c.type or "").strip().lower(),
+        connector_id=str(c.id),
     )
     try:
         rbac_assert(
@@ -503,9 +504,19 @@ def create_docs_ingestion_job(
     # Policy enforcement + audit
     _enforce_policy_sources(db, ws, user, ["docs"], "policy.allowlist.connectors.ingestion_jobs.docs")
 
+    try:
+        cid = uuid.UUID(connector_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    c = db.get(Connector, cid)
+    if not c or str(c.workspace_id) != str(ws.id) or c.type != "docs":
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    # Commit 22.1: compute RBAC allowed AFTER connector exists (fix c undefined) + use real connector_type
     allowed = rbac_allowed_connectors_trigger_sync_roles(
         ws,
-        connector_type="<docs>",
+        connector_type="docs",
         connector_id=str(c.id),
     )
     try:
@@ -518,15 +529,6 @@ def create_docs_ingestion_job(
         )
     except ValueError:
         raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
-
-    try:
-        cid = uuid.UUID(connector_id)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Connector not found")
-
-    c = db.get(Connector, cid)
-    if not c or str(c.workspace_id) != str(ws.id) or c.type != "docs":
-        raise HTTPException(status_code=404, detail="Connector not found")
 
     job = IngestionJob(
         workspace_id=ws.id,
@@ -640,9 +642,19 @@ def create_github_ingestion_job(
     # Policy enforcement + audit
     _enforce_policy_sources(db, ws, user, ["github"], "policy.allowlist.connectors.ingestion_jobs.github")
 
+    try:
+        cid = uuid.UUID(connector_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    c = db.get(Connector, cid)
+    if not c or str(c.workspace_id) != str(ws.id) or c.type != "github":
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    # Commit 22.1: compute RBAC allowed AFTER connector exists (fix c undefined) + use real connector_type
     allowed = rbac_allowed_connectors_trigger_sync_roles(
         ws,
-        connector_type="<github>",
+        connector_type="github",
         connector_id=str(c.id),
     )
     try:
@@ -655,15 +667,6 @@ def create_github_ingestion_job(
         )
     except ValueError:
         raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
-
-    try:
-        cid = uuid.UUID(connector_id)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Connector not found")
-
-    c = db.get(Connector, cid)
-    if not c or str(c.workspace_id) != str(ws.id) or c.type != "github":
-        raise HTTPException(status_code=404, detail="Connector not found")
 
     cfg = c.config or {}
     owner = cfg.get("owner")
@@ -962,9 +965,19 @@ def create_google_docs_ingestion_job(
     # Policy enforcement + audit
     _enforce_policy_sources(db, ws, user, ["docs"], "policy.allowlist.connectors.ingestion_jobs.gdocs")
 
+    try:
+        cid = uuid.UUID(connector_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    c = db.get(Connector, cid)
+    if not c or str(c.workspace_id) != str(ws.id) or c.type != "docs":
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    # Commit 22.1: compute RBAC allowed AFTER connector exists (fix c undefined) + use real connector_type
     allowed = rbac_allowed_connectors_trigger_sync_roles(
         ws,
-        connector_type="<docs>",
+        connector_type="docs",
         connector_id=str(c.id),
     )
     try:
@@ -977,15 +990,6 @@ def create_google_docs_ingestion_job(
         )
     except ValueError:
         raise HTTPException(status_code=403, detail="Not allowed by RBAC.")
-
-    try:
-        cid = uuid.UUID(connector_id)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Connector not found")
-
-    c = db.get(Connector, cid)
-    if not c or str(c.workspace_id) != str(ws.id) or c.type != "docs":
-        raise HTTPException(status_code=404, detail="Connector not found")
 
     cfg = c.config or {}
     folder_id = cfg.get("folder_id")
