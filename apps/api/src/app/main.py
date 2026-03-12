@@ -22,6 +22,7 @@ from app.api.schedules import router as schedules_router
 from app.api.governance import router as governance_router
 from app.api.custom_agent_runs import router as custom_agent_runs_router
 from app.api.agent_builder import router as agent_builder_router
+from app.api.audit_exports import router as audit_exports_router
 
 app = FastAPI(title="PM Agent OS API", version="0.0.1")
 
@@ -51,3 +52,4 @@ app.include_router(agents_v2_router)
 app.include_router(governance_router)
 app.include_router(custom_agent_runs_router)
 app.include_router(agent_builder_router)
+app.include_router(audit_exports_router)
