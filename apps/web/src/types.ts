@@ -98,6 +98,11 @@ export type PipelineTemplate = {
   name: string;
   description: string;
   definition_json: Record<string, unknown>;
+
+  // Commit 23A (multi-workspace template libraries)
+  // Backend now includes these in the list response.
+  is_library?: boolean | null;
+  library_label?: string | null;
 };
 
 export type PipelineStep = {
@@ -130,6 +135,12 @@ export type PipelineRun = {
   id: string;
   workspace_id: string;
   template_id: string;
+
+  // Commit 23A (template provenance)
+  template_workspace_id?: string | null;
+  template_is_library?: boolean | null;
+  template_library_label?: string | null;
+
   created_by_user_id: string;
   status: string;
   current_step_index: number;
@@ -277,13 +288,11 @@ export type ActionItem = {
   created_at: string;
   updated_at: string;
 
-  // V2 approvals metadata (from API)
   approvals_required?: number;
   approvals_approved_count?: number;
   approvals_rejected_count?: number;
   my_decision?: "approved" | "rejected" | null;
 
-  // Commit 21: execution lifecycle (for approval-gated write actions like docs_publish)
   execution_status?: "not_started" | "running" | "succeeded" | "failed" | string;
   execution_attempts?: number;
   execution_started_at?: string | null;
@@ -354,7 +363,7 @@ export type ScheduleRun = {
   schedule_id: string;
   status: "running" | "success" | "failed";
   started_at: string; // ISO
-  finished_at?: string | null; // ISO
+  finished_at?: string | null;
   error?: string | null;
 
   run_id?: string | null;

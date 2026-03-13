@@ -32,6 +32,26 @@ function normalizeTemplates(res: TemplateListResponse): PipelineTemplate[] {
   return res.items ?? [];
 }
 
+function wsShort(id?: string | null): string {
+  const s = (id || "").trim();
+  if (!s) return "unknown";
+  return `${s.slice(0, 8)}…`;
+}
+
+function templateLabel(t: PipelineTemplate, currentWorkspaceId: string): string {
+  const libLabel = (t.library_label || "").trim();
+
+  // Primary signal: library_label exists => treat as library-provided.
+  // Fallback: if template.workspace_id != current workspace, also show as "Library/External".
+  const isFromOtherWorkspace = t.workspace_id !== currentWorkspaceId;
+  const isLibrary = Boolean(libLabel) || isFromOtherWorkspace;
+
+  const origin =
+    isLibrary ? `[${libLabel || "Library"}]` : `[Local]`;
+
+  return `${t.name} — ${origin} (ws: ${wsShort(t.workspace_id)})`;
+}
+
 export default function PipelinesPage() {
   const { workspaceId } = useParams();
   const wid = workspaceId || "";
@@ -53,8 +73,12 @@ export default function PipelinesPage() {
   const [creating, setCreating] = useState(false);
 
   const templateOptions = useMemo(
-    () => templates.map((t) => ({ value: t.id, label: `${t.name}` })),
-    [templates]
+    () =>
+      templates.map((t) => ({
+        value: t.id,
+        label: templateLabel(t, wid),
+      })),
+    [templates, wid]
   );
 
   async function loadTemplates() {
@@ -189,9 +213,7 @@ export default function PipelinesPage() {
               <Stack gap={6}>
                 <Text fw={600}>Seed result</Text>
                 <Text size="sm">
-                  created=<Code>{String(seedInfo.created_count)}</Code> · existing=<Code>{String(
-                    seedInfo.existing_count
-                  )}</Code>
+                  created=<Code>{String(seedInfo.created_count)}</Code> · existing=<Code>{String(seedInfo.existing_count)}</Code>
                 </Text>
 
                 {seedInfo.created_template_ids?.length ? (
