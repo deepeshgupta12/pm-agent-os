@@ -80,6 +80,17 @@ class Workspace(Base):
         back_populates="workspace", cascade="all, delete-orphan"
     )
 
+    # Commit 23A Step A: templates across surfaces + libraries
+    run_templates: Mapped[List["RunTemplate"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+    artifact_templates: Mapped[List["ArtifactTemplate"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+    agent_builder_templates: Mapped[List["AgentBuilderTemplate"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+
     action_items: Mapped[List["ActionItem"]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan"
     )
@@ -626,12 +637,87 @@ class PipelineStep(Base):
     agent_id: Mapped[str] = mapped_column(String(64), nullable=False)
     input_payload: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="created")
-    run_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id"), nullable=True, index=True)
+    run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id"), nullable=True, index=True
+    )
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     pipeline_run: Mapped["PipelineRun"] = relationship(back_populates="steps")
     run: Mapped[Optional["Run"]] = relationship(back_populates="pipeline_steps")
+
+# ------------------------
+# Commit 23A Step A: DB-backed templates across surfaces
+# ------------------------
+class RunTemplate(Base):
+    __tablename__ = "run_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id"),
+        nullable=False,
+        index=True,
+    )
+
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    definition_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="run_templates")
+
+
+class ArtifactTemplate(Base):
+    __tablename__ = "artifact_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id"),
+        nullable=False,
+        index=True,
+    )
+
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    definition_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="artifact_templates")
+
+
+class AgentBuilderTemplate(Base):
+    __tablename__ = "agent_builder_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id"),
+        nullable=False,
+        index=True,
+    )
+
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    definition_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="agent_builder_templates")
+
+
 
 
 class ActionItem(Base):
