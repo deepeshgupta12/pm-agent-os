@@ -137,6 +137,90 @@ def _ensure_workspace_access(db: Session, workspace_id: str, user: User) -> Work
     return ws
 
 
+def _library_refs_for_workspace(ws: Workspace) -> List[Dict[str, str]]:
+    """Return normalized library refs from ws.template_admin_json."""
+    tj = getattr(ws, "template_admin_json", None) or {}
+    if not isinstance(tj, dict):
+        return []
+    libs = tj.get("libraries") or []
+    if not isinstance(libs, list):
+        return []
+    out: List[Dict[str, str]] = []
+    for x in libs:
+        if not isinstance(x, dict):
+            continue
+        wid = str(x.get("workspace_id") or "").strip()
+        if not wid:
+            continue
+        label = str(x.get("label") or "").strip() or "Library"
+        out.append({"workspace_id": wid, "label": label})
+    seen = set()
+    uniq: List[Dict[str, str]] = []
+    for r in out:
+        wid = r["workspace_id"]
+        if wid in seen:
+            continue
+        seen.add(wid)
+        uniq.append(r)
+    return uniq
+
+
+def _allowed_template_workspace_ids(ws: Workspace) -> Tuple[List[uuid.UUID], Dict[str, str]]:
+    """
+    Returns:
+      - allowed workspace UUIDs: [consumer_ws_id] + library_workspace_ids
+      - label map: {workspace_uuid_str: label} for libraries
+    """
+    allowed: List[uuid.UUID] = [ws.id]
+    label_map: Dict[str, str] = {}
+    for r in _library_refs_for_workspace(ws):
+        try:
+            wid = uuid.UUID(str(r["workspace_id"]))
+        except Exception:
+            continue
+        if wid == ws.id:
+            continue
+        allowed.append(wid)
+        label_map[str(wid)] = str(r.get("label") or "").strip() or "Library"
+
+    seen = set()
+    uniq: List[uuid.UUID] = []
+    for wid in allowed:
+        if wid in seen:
+            continue
+        seen.add(wid)
+        uniq.append(wid)
+
+    return uniq, label_map
+
+
+def _resolve_pipeline_template_or_404(
+    db: Session,
+    *,
+    consumer_ws: Workspace,
+    template_id: uuid.UUID,
+) -> Tuple[PipelineTemplate, bool, Optional[str]]:
+    """
+    Library-aware template resolution.
+
+    Allowed if template.workspace_id is:
+      - consumer_ws.id OR
+      - any workspace_id listed in consumer_ws.template_admin_json.libraries
+    """
+    t = db.get(PipelineTemplate, template_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Pipeline template not found")
+
+    allowed_ids, label_map = _allowed_template_workspace_ids(consumer_ws)
+    if t.workspace_id not in allowed_ids:
+        raise HTTPException(status_code=404, detail="Pipeline template not found")
+
+    is_lib = str(t.workspace_id) != str(consumer_ws.id)
+    lib_label = label_map.get(str(t.workspace_id)) if is_lib else None
+    return t, is_lib, lib_label
+
+
+
 def _inject_confidence_section(md: str, *, evidence_count: int) -> str:
     """
     Deterministic injector:
@@ -168,15 +252,30 @@ def _inject_confidence_section(md: str, *, evidence_count: int) -> str:
     return (text.rstrip() + "\n\n" + conf_block).strip() + "\n"
 
 
-def _template_to_out(t: PipelineTemplate) -> PipelineTemplateOut:
+def _template_to_out(
+    t: PipelineTemplate,
+    *,
+    consumer_ws: Optional[Workspace] = None,
+    library_label_map: Optional[Dict[str, str]] = None,
+) -> PipelineTemplateOut:
+    tpl_ws_id = str(t.workspace_id)
+    is_from_library = False
+    library_label = None
+
+    if consumer_ws is not None:
+        is_from_library = (str(consumer_ws.id) != tpl_ws_id)
+        if is_from_library and library_label_map:
+            library_label = library_label_map.get(tpl_ws_id)
+
     return PipelineTemplateOut(
         id=str(t.id),
         workspace_id=str(t.workspace_id),
         name=t.name,
         description=t.description,
         definition_json=t.definition_json or {},
+        is_from_library=is_from_library,
+        library_label=library_label,
     )
-
 
 def _prev_context_attached_map(db: Session, steps: List[PipelineStep]) -> Dict[str, bool]:
     run_ids = [s.run_id for s in steps if s.run_id is not None and s.step_index > 0]
@@ -315,17 +414,32 @@ def _run_to_out(db: Session, pr: PipelineRun, steps: List[PipelineStep]) -> Pipe
     latest_map = _latest_artifact_map(db, steps)
     retrieval_map = _run_retrieval_meta_map(db, steps)
 
+    tpl = db.get(PipelineTemplate, pr.template_id) if pr.template_id else None
+    tpl_ws_id = str(tpl.workspace_id) if tpl else None
+
+    is_from_library: Optional[bool] = None
+    library_label: Optional[str] = None
+
+    consumer_ws = db.get(Workspace, pr.workspace_id) if pr.workspace_id else None
+    if tpl and consumer_ws is not None:
+        _allowed, label_map = _allowed_template_workspace_ids(consumer_ws)
+        is_from_library = (str(consumer_ws.id) != str(tpl.workspace_id))
+        if is_from_library:
+            library_label = label_map.get(str(tpl.workspace_id))
+
     return PipelineRunOut(
         id=str(pr.id),
         workspace_id=str(pr.workspace_id),
         template_id=str(pr.template_id),
+        template_workspace_id=tpl_ws_id,
+        template_is_from_library=is_from_library,
+        template_library_label=library_label,
         created_by_user_id=str(pr.created_by_user_id),
         status=pr.status,
         current_step_index=pr.current_step_index,
         input_payload=pr.input_payload or {},
         steps=[_step_to_out(s, prev_map, latest_map, retrieval_map) for s in sorted(steps, key=lambda x: x.step_index)],
     )
-
 
 def _validate_pipeline_definition(db: Session, steps_def: Any) -> None:
     if not isinstance(steps_def, list) or len(steps_def) == 0:
@@ -1253,18 +1367,20 @@ def list_pipeline_templates(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    ws = _ensure_workspace_access(db, workspace_id, user)
+    consumer_ws = _ensure_workspace_access(db, workspace_id, user)
+
+    allowed_ids, label_map = _allowed_template_workspace_ids(consumer_ws)
+
     items = (
         db.execute(
             select(PipelineTemplate)
-            .where(PipelineTemplate.workspace_id == ws.id)
+            .where(PipelineTemplate.workspace_id.in_(allowed_ids))
             .order_by(PipelineTemplate.created_at.desc())
         )
         .scalars()
         .all()
     )
-    return [_template_to_out(t) for t in items]
-
+    return [_template_to_out(t, consumer_ws=consumer_ws, library_label_map=label_map) for t in items]
 
 @router.post("/workspaces/{workspace_id}/pipelines/runs", response_model=PipelineRunOut)
 def start_pipeline_run(
@@ -1273,19 +1389,25 @@ def start_pipeline_run(
     db: Session = Depends(get_db),
     user: User = Depends(require_user),
 ):
-    ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
+    consumer_ws, _role = require_workspace_role_min(workspace_id, "member", db, user)
 
-    template_uuid = uuid.UUID(payload.template_id)
-    t = db.get(PipelineTemplate, template_uuid)
-    if not t or t.workspace_id != ws.id:
-        raise HTTPException(status_code=404, detail="Pipeline template not found")
+    try:
+        template_uuid = uuid.UUID(payload.template_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid template_id")
+
+    t, _is_from_library, _lib_label = _resolve_pipeline_template_or_404(
+        db,
+        consumer_ws=consumer_ws,
+        template_id=template_uuid,
+    )
 
     definition = t.definition_json or {}
     steps_def = definition.get("steps") or []
     _validate_pipeline_definition(db, steps_def)
 
     pr = PipelineRun(
-        workspace_id=ws.id,
+        workspace_id=consumer_ws.id,
         template_id=t.id,
         created_by_user_id=user.id,
         status="created",
@@ -1331,7 +1453,6 @@ def start_pipeline_run(
 
     steps = db.execute(select(PipelineStep).where(PipelineStep.pipeline_run_id == pr.id)).scalars().all()
     return _run_to_out(db, pr, steps)
-
 
 @router.get("/pipelines/runs/{pipeline_run_id}", response_model=PipelineRunOut)
 def get_pipeline_run(

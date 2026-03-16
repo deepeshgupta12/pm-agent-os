@@ -24,6 +24,11 @@ from app.api.custom_agent_runs import router as custom_agent_runs_router
 from app.api.agent_builder import router as agent_builder_router
 from app.api.audit_exports import router as audit_exports_router
 
+# Commit 23A Step A routers
+from app.api.run_templates import router as run_templates_router
+from app.api.artifact_templates import router as artifact_templates_router
+from app.api.agent_builder_templates import router as agent_builder_templates_router
+
 app = FastAPI(title="PM Agent OS API", version="0.0.1")
 
 app.add_middleware(
@@ -53,3 +58,8 @@ app.include_router(governance_router)
 app.include_router(custom_agent_runs_router)
 app.include_router(agent_builder_router)
 app.include_router(audit_exports_router)
+
+# Commit 23A Step A includes
+app.include_router(run_templates_router)
+app.include_router(artifact_templates_router)
+app.include_router(agent_builder_templates_router)

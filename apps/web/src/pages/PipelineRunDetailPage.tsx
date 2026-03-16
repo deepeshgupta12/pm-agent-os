@@ -24,6 +24,12 @@ function stepColor(status: string): string {
   return "gray";
 }
 
+function wsShort(id?: string | null): string {
+  const s = (id || "").trim();
+  if (!s) return "unknown";
+  return `${s.slice(0, 8)}…`;
+}
+
 export default function PipelineRunDetailPage() {
   const { pipelineRunId } = useParams();
   const prid = pipelineRunId || "";
@@ -156,11 +162,23 @@ export default function PipelineRunDetailPage() {
             <Group justify="space-between">
               <Group gap="sm">
                 <Badge color={stepColor(pr.status)}>{pr.status}</Badge>
+
                 <Text fw={700}>template</Text>
                 <Text c="dimmed" size="sm">
                   {pr.template_id}
                 </Text>
+
+                {pr.template_library_label ? (
+                  <Badge variant="light">{pr.template_library_label}</Badge>
+                ) : null}
+
+                {pr.template_workspace_id ? (
+                  <Text size="xs" c="dimmed">
+                    template_ws=<Code>{wsShort(pr.template_workspace_id)}</Code>
+                  </Text>
+                ) : null}
               </Group>
+
               <Text size="xs" c="dimmed">
                 {pr.id}
               </Text>
