@@ -8,12 +8,6 @@ PM Agent OS is a full-stack platform where specialised AI agents write product d
 
 ---
 
-## Screenshots
-
-> *(Screenshots coming soon — replace this section with product screenshots)*
-
----
-
 ## Table of Contents
 
 - [Features](#features)
